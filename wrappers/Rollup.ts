@@ -1,4 +1,14 @@
-import { Address, beginCell, Cell, Contract, contractAddress, ContractProvider, Sender, SendMode } from '@ton/core';
+import {
+    Address,
+    beginCell,
+    Cell,
+    Contract,
+    contractAddress,
+    ContractProvider,
+    Dictionary,
+    Sender,
+    SendMode,
+} from '@ton/core';
 import { Bn254Groth16Verifier, Bn254Proof, KeyUpload } from './Bn254Groth16Verifier';
 
 export const RollupOpcodes = {
@@ -69,6 +79,19 @@ export class Rollup implements Contract {
             .endCell();
         const init = { code, data };
         return new Rollup(contractAddress(workchain, init), init);
+    }
+
+    /**
+     * Номера частей ключа, уже загруженных в контракт, — по ячейке его данных.
+     * Get-метода для этого у контракта нет; раскладка повторяет RollupStorage
+     * (contracts/rollup/storage.tolk) и createFromConfig выше.
+     */
+    static uploadedKeySlots(data: Cell): number[] {
+        const slice = data.beginParse();
+        slice.loadAddress(); // owner
+        slice.loadAddress(); // sequencer
+        slice.loadMaybeRef(); // vkData
+        return slice.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell()).keys();
     }
 
     private async send(provider: ContractProvider, via: Sender, value: bigint, body: Cell) {

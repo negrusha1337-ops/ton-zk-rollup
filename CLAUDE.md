@@ -32,7 +32,9 @@ Groth16 (BLS12-381) в TVM и сколько она стоит. Ответ: ра
   исполняет программу в zkVM и строит Groth16-пруф — см. `PROVING.md`.
 - **Настоящие пруфы SP1 нашей программы** (схема v6.1.0) для двух батчей:
   `fixtures/sp1_rollup_batch{1,2}/`. Rollup-контракт принимает их в Sandbox
-  (`tests/RollupZkvmProof.spec.ts`): 951 091 и 949 425 gas, запас 4,9–5,1%. В testnet не прогонялось.
+  (`tests/RollupZkvmProof.spec.ts`): 951 091 и 949 425 gas, запас 4,9–5,1%. Полный путь
+  (депозит → два батча → вывод) пройден в testnet 12.11.2026, газ совпал с Sandbox до единицы
+  (`bench/testnet-run-rollup.json`; скрипты `scripts/runRollupTestnet.ts`, `zk/testnet-rollup-report.mjs`).
 - `contracts/bn254/` — исследовательский код без аудита. Проверки точек есть только в
   `hinted.tolk`; `groth16.tolk` (наивный вариант и вариант со свидетелем) их не делает.
 
@@ -77,8 +79,8 @@ cd zkvm/script && PROTOC="$PWD/../../.tools/protoc/bin/protoc" cargo run --relea
   хешируются в один вход `sha256(...) mod 2^253`.
 - **Четыре `uint256` не помещаются в одну ячейку** (1024 > 1023 бит).
 - **Проверку нельзя запускать из external-сообщения** до `accept_message`: кредит 10 000 gas.
-- Sandbox 0.45 эмулирует global version 15, сеть на 17. Для верификатора BN254 расход в
-  testnet совпал с Sandbox до единицы; для остального кода это не проверялось.
+- Sandbox 0.45 эмулирует global version 15, сеть на 17. Для верификатора BN254 и
+  для rollup-контракта (батчи, депозит, вывод) расход в testnet совпал с Sandbox до единицы.
 - В `contracts/bn254/` нельзя использовать `MULADDDIVMOD`: частное не помещается в 257 бит
   на нередуцированных входах (исключение 4). Только `MULMOD`; инвариант границ — в `fp2.tolk`.
 - Большие функции Tolk помечать `@inline_ref`: без пометки компилятор зависает на встраивании,
@@ -104,5 +106,7 @@ cd zkvm/script && PROTOC="$PWD/../../.tools/protoc/bin/protoc" cargo run --relea
 - Ключ программы (`programVKey`) зависит от точного ELF и входит в IC0 ключа контракта: после
   изменения `zkvm/lib` или `zkvm/program` пруфы, ключ и `fixtures/zkvm_batches/program.json`
   нужно пересоздать вместе.
+- Монеты, приложенные к сообщениям сверх газа, остаются на контракте, а вывести их нечем:
+  суммы для testnet — только из `wrappers/rollupValues.ts` (тест шлёт те же суммы в Sandbox).
 - Circom ставится локально: `cargo install --git https://github.com/iden3/circom.git --tag v2.2.3 --root .tools circom`
   (или переменная `CIRCOM_BIN`).
