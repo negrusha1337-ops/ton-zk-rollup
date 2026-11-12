@@ -1,9 +1,10 @@
 {
   "source": "Измерено в @ton/sandbox тестом tests/RollupZkvmProof.spec.ts; не редактировать вручную",
-  "note": "Газ submit_batch с Groth16-пруфами SP1 (схема v6.1.0) нашей программы перехода состояния; nonce = 0",
+  "note": "Газ rollup-контракта с Groth16-пруфами SP1 (схема v6.1.0) нашей программы перехода состояния; nonce = 0; данные батча 2 опубликованы сообщением PublishData",
   "gasLimit": 1000000,
-  "submitBatch": 951091,
-  "submitBatchHeadroom": 48909,
-  "submitBatchWithDeposit": 949425,
-  "submitBatchWithDepositHeadroom": 50575
+  "submitBatch": 946776,
+  "submitBatchHeadroom": 53224,
+  "publishData": 4166,
+  "submitBatchWithDeposit": 949401,
+  "submitBatchWithDepositHeadroom": 50599
 }

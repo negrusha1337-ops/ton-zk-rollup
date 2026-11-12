@@ -22,6 +22,9 @@ hex = "0.4"
 [features]
 # Обёртка Groth16 нативным gnark вместо Docker-образа. Нужен установленный Go.
 native-gnark = ["sp1-sdk/native-gnark"]
+# Счётчики циклов по меткам cycle-tracker в отчёте исполнения. Только для замеров
+# (--execute): собирать в отдельный каталог, чтобы не пересобирать прувер.
+profiling = ["sp1-sdk/profiling"]
 
 [build-dependencies]
 sp1-build = "6.10.0"

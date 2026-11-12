@@ -1,7 +1,9 @@
 import { readFileSync } from 'fs';
 import path from 'path';
+import { Cell } from '@ton/core';
 import { Bn254Proof, KeyUploadJson } from './Bn254Groth16Verifier';
 import { BatchRoots } from './Rollup';
+import { dataChunkCell } from './rollupMath';
 
 // Загрузка пруфов SP1 программы перехода состояния (zkvm/) из фикстур. Используется и
 // тестами, и скриптом прогона в testnet: оба обязаны отправлять в контракт одно и то же.
@@ -11,6 +13,10 @@ const read = (...parts: string[]) => JSON.parse(readFileSync(path.join(FIXTURES,
 
 /** Публичные значения одного батча, как их выдал нативный запуск программы. */
 export type BatchOutput = {
+    /** Порции данных батча в порядке публикации (hex). */
+    dataChunksHex: string[];
+    /** 192 байта публичных значений программы (hex). */
+    publicValuesHex: string;
     publicInput: string;
     prevStateRoot: string;
     roots: { newStateRoot: string; batchHash: string; withdrawalsRoot: string };
@@ -23,7 +29,12 @@ export type ZkvmScenario = {
     deposit: { l2Recipient: string; value: string; amount: string };
     withdrawal: { leafIndex: number; recipientHash: string; amount: string };
     batches: BatchOutput[];
+    chunkHashVectors: { vectors: { length: number; hash: string }[] };
 };
+
+/** Порции данных батча как ячейки, которые секвенсор публикует сообщениями PublishData. */
+export const dataChunksOf = (output: BatchOutput): Cell[] =>
+    output.dataChunksHex.map((hex) => dataChunkCell(Buffer.from(hex, 'hex')));
 
 export type HintedFixture = { vkDataBoc: string; keyUpload: KeyUploadJson; hintsBoc: string; inputs: string[] };
 
@@ -34,6 +45,8 @@ export type ProvenBatch = {
     publicInputs: bigint[];
     output: BatchOutput;
     roots: BatchRoots;
+    /** Порции данных, которые нужно опубликовать до отправки батча. */
+    dataChunks: Cell[];
 };
 
 /** Сценарий «депозит → два батча → вывод» (fixtures/zkvm_batches/batches.json). */
@@ -65,8 +78,8 @@ export function loadProvenBatch(index: number): ProvenBatch {
         output,
         roots: {
             newStateRoot: BigInt(output.roots.newStateRoot),
-            batchHash: BigInt(output.roots.batchHash),
             withdrawalsRoot: BigInt(output.roots.withdrawalsRoot),
         },
+        dataChunks: dataChunksOf(output),
     };
 }

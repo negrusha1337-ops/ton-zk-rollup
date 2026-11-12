@@ -6,7 +6,7 @@
 use std::{fs, path::PathBuf};
 
 use rollup_native::{Scenario, DEPOSIT_VALUE};
-use rollup_stf::{apply_batch, BatchInput, PublicValues};
+use rollup_stf::{apply_batch, data_chunk_hash, BatchInput, PublicValues};
 use serde_json::{json, Value};
 
 fn decimal(bytes: &[u8]) -> String {
@@ -27,8 +27,10 @@ fn decimal(bytes: &[u8]) -> String {
     digits.iter().rev().map(|d| char::from(b'0' + d)).collect()
 }
 
-fn describe(values: &PublicValues) -> Value {
+fn describe(values: &PublicValues, input: &BatchInput) -> Value {
     json!({
+        // Порции данных батча: их секвенсор публикует в TON сообщениями PublishData.
+        "dataChunksHex": input.data_chunks.iter().map(hex::encode).collect::<Vec<_>>(),
         "publicValuesHex": hex::encode(values.to_bytes()),
         "publicInput": decimal(&values.digest()),
         "prevStateRoot": decimal(&values.prev_state_root),
@@ -46,10 +48,24 @@ fn run(name: &str, input: &BatchInput) -> (PublicValues, Vec<rollup_stf::Account
     apply_batch(input).unwrap_or_else(|error| panic!("{name}: батч отклонён: {error:?}"))
 }
 
+/// Эталонные хеши порций разной длины: тест сверяет их с хешем ячеек, которые строит
+/// TypeScript (`dataChunkCell`), то есть с тем, что увидит контракт.
+fn chunk_hash_vectors() -> Vec<Value> {
+    [0usize, 1, 126, 127, 128, 254, 635, 636, 2667, 2668, 60_000]
+        .iter()
+        .map(|&length| {
+            let data: Vec<u8> = (0..length).map(|i| (i * 31 + length * 7 + (i >> 8)) as u8).collect();
+            json!({ "length": length, "hash": hex::encode(data_chunk_hash(&data)) })
+        })
+        .collect()
+}
+
 fn main() {
     let scenario = Scenario::new();
-    let (values1, accounts1, withdrawals1) = run("батч 1", &scenario.batch1());
-    let (values2, accounts2, _) = run("батч 2", &scenario.batch2(accounts1, withdrawals1));
+    let input1 = scenario.batch1();
+    let (values1, accounts1, withdrawals1) = run("батч 1", &input1);
+    let input2 = scenario.batch2(accounts1, withdrawals1);
+    let (values2, accounts2, _) = run("батч 2", &input2);
 
     let output = json!({
         "source": "Сгенерировано нативным запуском zkvm/native (cargo run -p rollup-native); не редактировать вручную",
@@ -69,7 +85,11 @@ fn main() {
             "address": hex::encode(account.address),
             "balance": account.balance.to_string(),
         })).collect::<Vec<_>>(),
-        "batches": [describe(&values1), describe(&values2)],
+        "batches": [describe(&values1, &input1), describe(&values2, &input2)],
+        "chunkHashVectors": {
+            "note": "Байт i порции длины n равен (i·31 + n·7 + (i >> 8)) mod 256",
+            "vectors": chunk_hash_vectors(),
+        },
     });
 
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/zkvm_batches");

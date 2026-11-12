@@ -2,5 +2,5 @@
   "source": "cargo prove vkey --elf zkvm/target/elf-compilation/riscv64im-succinct-zkvm-elf/release/rollup-program",
   "note": "Хеш ключа программы — первый публичный вход верификатора SP1. Он зависит от точного ELF, то есть от версии SP1, компилятора и зависимостей; при пересборке может измениться",
   "sp1Version": "6.10.0",
-  "programVKey": "0x008435a100bdb26effac3ad7355b89e796d6f06bab443274937938928ce6fbb1"
+  "programVKey": "0x00191f30102955bde306406de3ba5a7e0c2b664a554d12a096bd03fb3e86b2de"
 }

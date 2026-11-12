@@ -2,18 +2,19 @@ import { Address, Cell, fromNano, toNano } from '@ton/core';
 import { compile, NetworkProvider, sleep } from '@ton/blueprint';
 import { Bn254Groth16Verifier, keyUploadFromJson } from '../wrappers/Bn254Groth16Verifier';
 import { Rollup } from '../wrappers/Rollup';
-import { depositHash, merkleProofCell, withdrawalTree } from '../wrappers/rollupMath';
+import { batchDataHash, dataHashStep, depositHash, merkleProofCell, withdrawalTree } from '../wrappers/rollupMath';
 import {
     DEPLOY_VALUE,
     KEY_FINALIZE_VALUE,
     KEY_PART_VALUE,
+    PUBLISH_DATA_VALUE,
     SUBMIT_BATCH_VALUE,
     WITHDRAW_VALUE,
 } from '../wrappers/rollupValues';
 import { loadProvenBatch, loadZkvmScenario, ProvenBatch } from '../wrappers/zkvmProofs';
 
 // Полный путь rollup-контракта в testnet на настоящих пруфах SP1:
-// развёртывание → ключ частями → депозит → батч 1 → батч 2 → вывод.
+// развёртывание → ключ частями → депозит → батч 1 → данные батча 2 → батч 2 → вывод.
 //
 //   npx blueprint run runRollupTestnet --testnet --mnemonic
 //
@@ -91,11 +92,14 @@ export async function run(provider: NetworkProvider) {
     const withdrawn = nullifier !== null && (await provider.isContractDeployed(nullifier));
 
     const batchesLeft = BigInt(Math.max(0, batches.length - batchIndex));
+    // Порции данных ещё не принятых батчей; уже опубликованные не вычитаем — оценка сверху.
+    const chunksLeft = BigInt(batches.slice(batchIndex).reduce((sum, batch) => sum + batch.dataChunks.length, 0));
     const needed =
         (deployed ? 0n : DEPLOY_VALUE + WALLET_FEE_SMALL) +
         BigInt(missingParts.length) * (KEY_PART_VALUE + WALLET_FEE_LARGE) +
         (keyReady ? 0n : KEY_FINALIZE_VALUE + WALLET_FEE_SMALL) +
         (depositQueued || batchIndex > 0 ? 0n : depositValue + WALLET_FEE_SMALL) +
+        chunksLeft * (PUBLISH_DATA_VALUE + WALLET_FEE_SMALL) +
         batchesLeft * (SUBMIT_BATCH_VALUE + WALLET_FEE_BATCH) +
         (withdrawn ? 0n : WITHDRAW_VALUE + WALLET_FEE_SMALL);
     const { balance } = await provider.getContractState(owner);
@@ -146,7 +150,35 @@ export async function run(provider: NetworkProvider) {
     }
 
     // --- батчи ---
+    // Данные батча публикуются в TON до пруфа: контракт копит хеш порций, а пруф привязан
+    // к нему. Уже опубликованные порции определяются по накопленному хешу и пропускаются.
+    const publishData = async (batch: ProvenBatch, number: number) => {
+        const prefixes = batch.dataChunks.reduce(
+            (hashes, chunk) => [...hashes, dataHashStep(hashes[hashes.length - 1], chunk)],
+            [0n],
+        );
+        const published = prefixes.indexOf(await rollup.getBatchDataHash(number));
+        if (published < 0) {
+            throw new Error(`Батч ${number}: в контракте опубликованы другие данные, пруф к ним не подойдёт.`);
+        }
+        for (let index = published; index < batch.dataChunks.length; index++) {
+            ui.write(`Батч ${number}: данные, порция ${index + 1} из ${batch.dataChunks.length}`);
+            await rollup.sendPublishData(sender, {
+                batchIndex: number,
+                data: batch.dataChunks[index],
+                value: PUBLISH_DATA_VALUE,
+            });
+            await waitFor(
+                `порция ${index + 1} данных батча ${number} учтена`,
+                async () => (await rollup.getBatchDataHash(number)) === prefixes[index + 1],
+            );
+        }
+        if ((await rollup.getBatchDataHash(number)) !== batchDataHash(batch.dataChunks)) {
+            throw new Error(`Батч ${number}: хеш опубликованных данных не совпал с ожидаемым.`);
+        }
+    };
     const submit = async (batch: ProvenBatch, number: number) => {
+        await publishData(batch, number);
         if ((await rollup.getExpectedPublicInput(batch.roots)) !== BigInt(batch.output.publicInput)) {
             throw new Error(`Батч ${number}: контракт ждёт другой публичный вход, пруф к его состоянию не подходит.`);
         }

@@ -18,6 +18,7 @@ enum RollupErrors {
   WrongMerkleProof = 7308,
   NotNullifier = 7309,
   WrongRecipient = 7310,
+  DataForClosedBatch = 7311,
 }
 
 /// Удерживается с каждого депозита: покрывает газ транзакции и плату за хранение.
@@ -38,16 +39,52 @@ const DIGEST_MASK_253: int = (1 << 253) - 1
 /// 253 бит. Порядок значений — часть протокола; программа для zkVM обязана
 /// коммитить их так же:
 ///   prevStateRoot ‖ newStateRoot ‖ batchHash ‖ withdrawalsRoot ‖ prevDepositHash ‖ newDepositHash
-fun batchDigest(state: RollupState, queue: DepositQueue, roots: BatchRoots): int {
+///
+/// batchHash — накопительный хеш данных батча, опубликованных в TON (см. takeBatchData).
+fun batchDigest(state: RollupState, queue: DepositQueue, roots: BatchRoots, batchHash: int): int {
   val first = beginCell()
     .storeUint(state.stateRoot, 256)
     .storeUint(roots.newStateRoot, 256)
-    .storeUint(roots.batchHash, 256);
+    .storeUint(batchHash, 256);
   val second = beginCell()
     .storeUint(roots.withdrawalsRoot, 256)
     .storeUint(queue.processedHash, 256)
     .storeUint(queue.targetHash, 256);
   return sha256OfTwo(first, second, 2) & DIGEST_MASK_253;
+}
+
+/// Шаг накопительного хеша данных батча: sha256(предыдущий ‖ хеш ячейки с порцией).
+@inline
+fun dataHashStep(previous: int, dataCellHash: int): int {
+  return sha256OfBuilder(beginCell().storeUint(previous, 256).storeUint(dataCellHash, 256), 1);
+}
+
+/// Хеш данных, опубликованных для батча с этим номером; 0, если данных не было.
+@inline
+fun batchDataHashOf(pendingData: map<uint64, uint256>, batchIndex: int): int {
+  val entry = pendingData.get(batchIndex);
+  return entry.isFound ? entry.loadValue() : 0;
+}
+
+/// Забирает хеш данных следующего батча и удаляет запись: после принятия батча она не нужна.
+fun takeBatchData(mutate state: RollupState): int {
+  val entry = state.pendingData.deleteAndGetDeleted(state.batchIndex + 1);
+  return entry.isFound ? entry.loadValue() : 0;
+}
+
+/// Порция данных батча. Публиковать может только секвенсор: чужая порция изменила бы
+/// хеш, под который он строит пруф.
+fun handlePublishData(sender: address, msg: PublishData) {
+  var storage = RollupStorage.load();
+  assert (sender == storage.sequencer) throw RollupErrors.NotSequencer;
+  var state = storage.state.load();
+  // Данные можно публиковать и для батчей вперёд, пока строится пруф текущего,
+  // но не для уже принятых.
+  assert (msg.batchIndex > state.batchIndex) throw RollupErrors.DataForClosedBatch;
+  val previous = batchDataHashOf(state.pendingData, msg.batchIndex);
+  state.pendingData.set(msg.batchIndex, dataHashStep(previous, msg.data.hash()));
+  storage.state = state.toCell();
+  storage.save();
 }
 
 /// Применяет батч, пруф которого уже проверен.
@@ -66,6 +103,7 @@ fun applyBatch(mutate storage: RollupStorage, state: RollupState, queue: Deposit
     withdrawalsRoot: roots.withdrawalsRoot,
     batchIndex: state.batchIndex + 1,
     queue: nextQueue.toCell(),
+    pendingData: state.pendingData,
   }.toCell();
   storage.save();
 }
@@ -87,6 +125,7 @@ fun handleDeposit(valueCoins: coins, msg: DepositTon) {
     withdrawalsRoot: state.withdrawalsRoot,
     batchIndex: state.batchIndex,
     queue: queue.toCell(),
+    pendingData: state.pendingData,
   }.toCell();
   storage.save();
 }

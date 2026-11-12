@@ -1,11 +1,17 @@
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
+import { createHash } from 'crypto';
+import { mkdirSync, writeFileSync } from 'fs';
+import path from 'path';
 import { Address, beginCell, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
+import { computePhaseOf } from './helpers/gas';
 import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
 import { NullifierErrors, Rollup, RollupErrors, RollupOpcodes } from '../wrappers/Rollup';
 import {
+    batchDataHash,
     batchDigest,
+    dataChunkCell,
     depositHash,
     merkleProofCell,
     sha256Int,
@@ -27,6 +33,14 @@ const mockProof = (valid: boolean): Bn254Proof => ({
     c: [0n, 0n],
 });
 const NO_HINTS = beginCell().endCell();
+/** Детерминированные «случайные» байты: поток sha256(seed ‖ счётчик). */
+const pseudoRandomBytes = (length: number, seed: number) => {
+    const blocks: Buffer[] = [];
+    for (let counter = 0; blocks.length * 32 < length; counter++) {
+        blocks.push(createHash('sha256').update(`rollup-data:${seed}:${counter}`).digest());
+    }
+    return Buffer.concat(blocks).subarray(0, length);
+};
 
 describe('Rollup: логика на тестовом двойнике', () => {
     let code: Cell;
@@ -37,7 +51,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
     let user: SandboxContract<TreasuryContract>;
     let rollup: SandboxContract<Rollup>;
 
-    const submit = (roots: { newStateRoot: bigint; batchHash: bigint; withdrawalsRoot: bigint }, valid = true) =>
+    const submit = (roots: { newStateRoot: bigint; withdrawalsRoot: bigint }, valid = true) =>
         rollup.sendSubmitBatch(sequencer.getSender(), {
             proof: mockProof(valid),
             hints: NO_HINTS,
@@ -96,7 +110,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
     });
 
     describe('батчи', () => {
-        const roots1 = { newStateRoot: sha256Int(2n), batchHash: sha256Int(3n), withdrawalsRoot: 0n };
+        const roots1 = { newStateRoot: sha256Int(2n), withdrawalsRoot: 0n };
 
         it('принимает батч только от секвенсора', async () => {
             const result = await rollup.sendSubmitBatch(user.getSender(), {
@@ -140,7 +154,13 @@ describe('Rollup: логика на тестовом двойнике', () => {
         it('публичный вход привязан к текущему состоянию и очереди', async () => {
             const before = await rollup.getExpectedPublicInput(roots1);
             expect(before).toBe(
-                batchDigest({ prevStateRoot: GENESIS_ROOT, ...roots1, prevDepositHash: 0n, newDepositHash: 0n }),
+                batchDigest({
+                    prevStateRoot: GENESIS_ROOT,
+                    ...roots1,
+                    batchHash: 0n,
+                    prevDepositHash: 0n,
+                    newDepositHash: 0n,
+                }),
             );
             await submit(roots1);
             // Тот же батч после принятия потребовал бы уже другой публичный вход:
@@ -148,7 +168,13 @@ describe('Rollup: логика на тестовом двойнике', () => {
             const after = await rollup.getExpectedPublicInput(roots1);
             expect(after).not.toBe(before);
             expect(after).toBe(
-                batchDigest({ prevStateRoot: roots1.newStateRoot, ...roots1, prevDepositHash: 0n, newDepositHash: 0n }),
+                batchDigest({
+                    prevStateRoot: roots1.newStateRoot,
+                    ...roots1,
+                    batchHash: 0n,
+                    prevDepositHash: 0n,
+                    newDepositHash: 0n,
+                }),
             );
         });
 
@@ -160,7 +186,13 @@ describe('Rollup: логика на тестовом двойнике', () => {
             // Батч 1: депозит пришёл после того, как цель была зафиксирована (на генезисе),
             // поэтому этот батч его ещё не обрабатывает.
             expect(await rollup.getExpectedPublicInput(roots1)).toBe(
-                batchDigest({ prevStateRoot: GENESIS_ROOT, ...roots1, prevDepositHash: 0n, newDepositHash: 0n }),
+                batchDigest({
+                    prevStateRoot: GENESIS_ROOT,
+                    ...roots1,
+                    batchHash: 0n,
+                    prevDepositHash: 0n,
+                    newDepositHash: 0n,
+                }),
             );
             await submit(roots1);
             const queue1 = await rollup.getDepositQueue();
@@ -168,11 +200,12 @@ describe('Rollup: логика на тестовом двойнике', () => {
             expect(queue1.target).toEqual({ count: 1n, hash: afterDeposit });
 
             // Батч 2 обязан довести очередь до цели: контракт сам подставляет её хеш.
-            const roots2 = { newStateRoot: sha256Int(4n), batchHash: sha256Int(5n), withdrawalsRoot: 0n };
+            const roots2 = { newStateRoot: sha256Int(4n), withdrawalsRoot: 0n };
             expect(await rollup.getExpectedPublicInput(roots2)).toBe(
                 batchDigest({
                     prevStateRoot: roots1.newStateRoot,
                     ...roots2,
+                    batchHash: 0n,
                     prevDepositHash: 0n,
                     newDepositHash: afterDeposit,
                 }),
@@ -181,6 +214,124 @@ describe('Rollup: логика на тестовом двойнике', () => {
             const queue2 = await rollup.getDepositQueue();
             expect(queue2.processed).toEqual({ count: 1n, hash: afterDeposit });
             expect(queue2.target).toEqual(queue2.head);
+        });
+    });
+
+    describe('данные батча', () => {
+        const roots1 = { newStateRoot: sha256Int(2n), withdrawalsRoot: 0n };
+        // Порции заведомо разной длины: неполная ячейка, ровно одна ячейка, цепочка из трёх.
+        const chunkA = dataChunkCell(Buffer.from('порция А'));
+        const chunkB = dataChunkCell(Buffer.alloc(127, 0xb1));
+        const chunkC = dataChunkCell(Buffer.alloc(300, 0xc2));
+        const publish = (batchIndex: number, data: Cell, from = sequencer) =>
+            rollup.sendPublishData(from.getSender(), { batchIndex, data, value: toNano('0.05') });
+        const digestWith = (batchHash: bigint) =>
+            batchDigest({
+                prevStateRoot: GENESIS_ROOT,
+                ...roots1,
+                batchHash,
+                prevDepositHash: 0n,
+                newDepositHash: 0n,
+            });
+
+        it('публиковать данные может только секвенсор', async () => {
+            const result = await publish(1, chunkA, user);
+            expect(result.transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: RollupErrors.notSequencer,
+            });
+            expect(await rollup.getBatchDataHash(1)).toBe(0n);
+        });
+
+        it('порции складываются в накопительный хеш в порядке публикации', async () => {
+            expect(await rollup.getExpectedPublicInput(roots1)).toBe(digestWith(0n));
+            for (const chunk of [chunkA, chunkB, chunkC]) {
+                expect((await publish(1, chunk)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+            }
+            const expected = batchDataHash([chunkA, chunkB, chunkC]);
+            expect(await rollup.getBatchDataHash(1)).toBe(expected);
+            expect(expected).not.toBe(batchDataHash([chunkB, chunkA, chunkC]));
+            // Публичный вход следующего батча теперь зависит от опубликованных данных.
+            expect(await rollup.getExpectedPublicInput(roots1)).toBe(digestWith(expected));
+        });
+
+        it('данные принятого батча опубликовать нельзя, а запись о них удаляется', async () => {
+            await publish(1, chunkA);
+            await submit(roots1);
+            expect(await rollup.getBatchDataHash(1)).toBe(0n);
+            const late = await publish(1, chunkB);
+            expect(late.transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: RollupErrors.dataForClosedBatch,
+            });
+        });
+
+        it('данные можно публиковать вперёд: они дожидаются своего батча', async () => {
+            await publish(2, chunkB);
+            await publish(1, chunkA);
+            await publish(2, chunkC);
+            await submit(roots1);
+            expect(await rollup.getBatchDataHash(2)).toBe(batchDataHash([chunkB, chunkC]));
+            const roots2 = { newStateRoot: sha256Int(4n), withdrawalsRoot: 0n };
+            expect(await rollup.getExpectedPublicInput(roots2)).toBe(
+                batchDigest({
+                    prevStateRoot: roots1.newStateRoot,
+                    ...roots2,
+                    batchHash: batchDataHash([chunkB, chunkC]),
+                    prevDepositHash: 0n,
+                    newDepositHash: 0n,
+                }),
+            );
+            await submit(roots2);
+            expect(await rollup.getBatchDataHash(2)).toBe(0n);
+            expect((await rollup.getRollupState()).batchIndex).toBe(2);
+        });
+
+        it('газ публикации не зависит от размера порции', async () => {
+            // Контракт берёт готовый хеш ячейки и не читает данные: порция в 60 КБ стоит
+            // по газу столько же, сколько маленькая. Размер оплачивается пересылкой сообщения.
+            const sizes = [100, 4_000, 60_000];
+            const measured: Record<
+                string,
+                { gasUsed: number; forwardFeeNano: number; cells: number; messageBocBytes: number }
+            > = {};
+            for (const [index, bytes] of sizes.entries()) {
+                // Данные без повторов: одинаковые ячейки сеть тарифицирует один раз, и плата
+                // за пересылку на однородном заполнении получилась бы заниженной.
+                const data = dataChunkCell(pseudoRandomBytes(bytes, index));
+                const result = await publish(1, data);
+                expect(result.transactions).toHaveTransaction({ to: rollup.address, success: true });
+                const tx = result.transactions.find(
+                    (t) => t.inMessage?.info.type === 'internal' && t.inMessage.info.dest.equals(rollup.address),
+                )!;
+                const info = tx.inMessage!.info;
+                measured[`${bytes} байт`] = {
+                    gasUsed: Number(computePhaseOf(result.transactions, rollup.address).gasUsed),
+                    forwardFeeNano: info.type === 'internal' ? Number(info.forwardFee) : 0,
+                    cells: Math.ceil(bytes / 127),
+                    messageBocBytes: beginCell().storeRef(data).endCell().toBoc().length,
+                };
+            }
+            const gasValues = Object.values(measured).map((m) => m.gasUsed);
+            // Первая порция создаёт запись словаря, следующие её обновляют — разница в сотни gas.
+            expect(Math.max(...gasValues) - Math.min(...gasValues)).toBeLessThan(1_000);
+
+            const file = path.join(__dirname, '..', 'bench', 'rollup-publish-data.json');
+            mkdirSync(path.dirname(file), { recursive: true });
+            writeFileSync(
+                file,
+                JSON.stringify(
+                    {
+                        source: 'Измерено в @ton/sandbox тестом tests/Rollup.spec.ts; не редактировать вручную',
+                        note: 'Сообщение PublishData: газ контракта и поле forward fee входящего сообщения (часть платы за пересылку, оставшаяся после доли отправляющего шарда) при ценах встроенного конфига Sandbox',
+                        measured,
+                    },
+                    null,
+                    2,
+                ) + '\n',
+            );
         });
     });
 
@@ -214,7 +365,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
         const balanceOf = async (address: Address) => (await blockchain.getContract(address)).balance;
 
         beforeEach(async () => {
-            await submit({ newStateRoot: sha256Int(2n), batchHash: sha256Int(3n), withdrawalsRoot: tree.root });
+            await submit({ newStateRoot: sha256Int(2n), withdrawalsRoot: tree.root });
         });
 
         it('выплачивает ровно сумму листа получателю через нуллификатор', async () => {

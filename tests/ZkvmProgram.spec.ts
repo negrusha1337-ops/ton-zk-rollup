@@ -1,35 +1,25 @@
 import { createHash } from 'crypto';
-import { readFileSync } from 'fs';
-import path from 'path';
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Address, beginCell, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
 import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
 import { Rollup } from '../wrappers/Rollup';
-import { batchDigest, depositHash, merkleProofCell, withdrawalTree } from '../wrappers/rollupMath';
+import {
+    batchDataHash,
+    batchDigest,
+    dataChunkCell,
+    depositHash,
+    merkleProofCell,
+    withdrawalTree,
+} from '../wrappers/rollupMath';
+import { BatchOutput, dataChunksOf, loadZkvmScenario } from '../wrappers/zkvmProofs';
 
-type BatchOutput = {
-    publicValuesHex: string;
-    publicInput: string;
-    prevStateRoot: string;
-    roots: { newStateRoot: string; batchHash: string; withdrawalsRoot: string };
-    prevDepositHash: string;
-    newDepositHash: string;
-};
-const program = JSON.parse(
-    readFileSync(path.join(__dirname, '..', 'fixtures', 'zkvm_batches', 'batches.json'), 'utf8'),
-) as {
-    genesisStateRoot: string;
-    deposit: { l2Recipient: string; value: string; amount: string };
-    withdrawal: { leafIndex: number; recipientHash: string; amount: string };
-    batches: BatchOutput[];
-};
+const program = loadZkvmScenario();
 
 const MASK_253 = (1n << 253n) - 1n;
 const rootsOf = (batch: BatchOutput) => ({
     newStateRoot: BigInt(batch.roots.newStateRoot),
-    batchHash: BigInt(batch.roots.batchHash),
     withdrawalsRoot: BigInt(batch.roots.withdrawalsRoot),
 });
 // Заглушка пруфа для тестового двойника контракта.
@@ -90,6 +80,7 @@ describe('Программа zkVM и rollup-контракт согласова�
                 batchDigest({
                     prevStateRoot: BigInt(batch.prevStateRoot),
                     ...rootsOf(batch),
+                    batchHash: BigInt(batch.roots.batchHash),
                     prevDepositHash: BigInt(batch.prevDepositHash),
                     newDepositHash: BigInt(batch.newDepositHash),
                 }),
@@ -97,7 +88,23 @@ describe('Программа zkVM и rollup-контракт согласова�
         }
     });
 
-    it('сценарий: депозит → батч 1 → батч 2 → вывод', async () => {
+    it('хеш порции данных в программе — это хеш ячейки TON', () => {
+        // Программа считает хеш дерева ячеек сама (zkvm/lib, data_chunk_hash); контракт
+        // получает его от сети. Сверяем на длинах вокруг границ ячеек и уровней дерева.
+        expect(program.chunkHashVectors.vectors.length).toBeGreaterThan(8);
+        for (const { length, hash } of program.chunkHashVectors.vectors) {
+            const data = Buffer.from(Array.from({ length }, (_, i) => (i * 31 + length * 7 + (i >> 8)) & 0xff));
+            expect(dataChunkCell(data).hash().toString('hex')).toBe(hash);
+        }
+        // Обязательство на данные батча: ноль без данных, иначе накопительный хеш порций.
+        expect(BigInt(batch1.roots.batchHash)).toBe(0n);
+        expect(batch2.dataChunksHex.length).toBeGreaterThan(0);
+        for (const batch of program.batches) {
+            expect(BigInt(batch.roots.batchHash)).toBe(batchDataHash(dataChunksOf(batch)));
+        }
+    });
+
+    it('сценарий: депозит → батч 1 → данные → батч 2 → вывод', async () => {
         // Депозит на L1 приходит до первого батча.
         const deposit = await rollup.sendDeposit(user.getSender(), {
             l2Recipient: BigInt(program.deposit.l2Recipient),
@@ -115,6 +122,17 @@ describe('Программа zkVM и rollup-контракт согласова�
         // Батч 2 обязан обработать депозит: программа пришла к тому же хешу очереди, что и контракт.
         expect(BigInt(batch2.newDepositHash)).toBe(queued);
         expect(BigInt(batch2.prevStateRoot)).toBe(rootsOf(batch1).newStateRoot);
+        // Пока данные батча не опубликованы, контракт ждёт другой публичный вход.
+        expect(await rollup.getExpectedPublicInput(rootsOf(batch2))).not.toBe(BigInt(batch2.publicInput));
+        for (const data of dataChunksOf(batch2)) {
+            const published = await rollup.sendPublishData(sequencer.getSender(), {
+                batchIndex: 2,
+                data,
+                value: toNano('0.05'),
+            });
+            expect(published.transactions).toHaveTransaction({ to: rollup.address, success: true });
+        }
+        expect(await rollup.getBatchDataHash(2)).toBe(BigInt(batch2.roots.batchHash));
         expect(await rollup.getExpectedPublicInput(rootsOf(batch2))).toBe(BigInt(batch2.publicInput));
         expect((await submit(batch2)).transactions).toHaveTransaction({ to: rollup.address, success: true });
         expect(await rollup.getRollupState()).toEqual({

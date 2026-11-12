@@ -13,3 +13,9 @@ edition = "2021"
 [workspace.dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 sha2 = { version = "0.10", default-features = false }
+
+# SHA-256 через прекомпиляцию SP1: внутри zkVM сжатие считает системный вызов, а не
+# программный код (на привязке к данным TON это основная цена). Вне zkVM крейт ведёт
+# себя как обычный sha2. Тег должен соответствовать версии SP1.
+[patch.crates-io]
+sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha2", tag = "patch-sha2-0.10.9-sp1-6.10.0" }

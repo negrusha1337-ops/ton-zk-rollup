@@ -20,13 +20,17 @@ fun onInternalMessage(inMsg: InMessage) {
     SubmitBatch => {
       var storage = RollupStorage.load();
       assert (inMsg.senderAddress == storage.sequencer) throw RollupErrors.NotSequencer;
-      val state = storage.state.load();
+      var state = storage.state.load();
       val queue = state.queue.load();
       val roots = msg.roots.load();
       // ЗАГЛУШКА: пруф считается верным, если его первое число равно 1.
       val ok = msg.proof.load().ax == 1;
       assert (ok) throw RollupErrors.WrongProof;
+      takeBatchData(mutate state);
       applyBatch(mutate storage, state, queue, roots);
+    }
+    PublishData => {
+      handlePublishData(inMsg.senderAddress, msg);
     }
     DepositTon => {
       handleDeposit(inMsg.valueCoins, msg);
@@ -66,14 +70,22 @@ get fun depositQueue(): DepositQueue {
   return depositQueueView();
 }
 
-/// Первый публичный вход, который контракт потребует от следующего батча с такими корнями.
-get fun expectedPublicInput(newStateRoot: int, batchHash: int, withdrawalsRoot: int): int {
-  val state = RollupStorage.load().state.load();
-  return batchDigest(state, state.queue.load(), BatchRoots {
-    newStateRoot: newStateRoot,
-    batchHash: batchHash,
-    withdrawalsRoot: withdrawalsRoot,
-  });
+/// Первый публичный вход, который контракт потребует от следующего батча с такими корнями
+/// (при уже опубликованных для него данных).
+get fun expectedPublicInput(newStateRoot: int, withdrawalsRoot: int): int {
+  val storage = RollupStorage.load();
+  val state = storage.state.load();
+  return batchDigest(
+    state,
+    state.queue.load(),
+    BatchRoots { newStateRoot: newStateRoot, withdrawalsRoot: withdrawalsRoot },
+    batchDataHashOf(state.pendingData, state.batchIndex + 1)
+  );
+}
+
+/// Накопительный хеш данных, опубликованных для батча с этим номером; 0, если их нет.
+get fun batchDataHash(batchIndex: int): int {
+  return batchDataHashOf(RollupStorage.load().state.load().pendingData, batchIndex);
 }
 
 /// Хеш зафиксированного ключа верификации; 0, пока ключ не зафиксирован.

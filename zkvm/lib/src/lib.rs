@@ -7,6 +7,11 @@
 //!
 //! шесть слов по 32 байта. Контракт берёт от них SHA-256, обрезает до 253 бит и
 //! подаёт верификатору первым публичным входом — так же считает дайджест SP1.
+//!
+//! Транзакции батча программа берёт не из произвольного входа, а из данных,
+//! опубликованных в TON (data availability, DA.md): секвенсор шлёт их порциями в
+//! rollup-контракт, контракт копит хеш порций, а программа считает тот же хеш и кладёт
+//! его в batchHash. Пруф для данных, которых в TON не было, не сойдётся с контрактом.
 #![no_std]
 
 extern crate alloc;
@@ -21,6 +26,17 @@ pub type L2Address = [u8; 20];
 
 /// Глубина дерева выводов — как WITHDRAWAL_TREE_DEPTH в контракте.
 pub const WITHDRAWAL_TREE_DEPTH: usize = 32;
+
+/// Раскладка порции данных в ячейки TON — как `dataChunkCell` в wrappers/rollupMath.ts.
+pub const DATA_CELL_BYTES: usize = 127;
+pub const DATA_CELL_REFS: usize = 4;
+pub const MAX_DATA_CHUNK_BYTES: usize = 60_000;
+
+/// Размеры транзакций в данных батча: тег, отправитель, получатель, сумма (u128, big-endian).
+const TRANSFER_BYTES: usize = 1 + 20 + 20 + 16;
+const WITHDRAW_BYTES: usize = 1 + 20 + 32 + 16;
+const TAG_TRANSFER: u8 = 0;
+const TAG_WITHDRAW: u8 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Account {
@@ -58,7 +74,9 @@ pub struct BatchInput {
     pub prev_deposit_hash: Hash,
     /// Депозиты, которые батч обязан обработать, в порядке очереди.
     pub deposits: Vec<Deposit>,
-    pub transactions: Vec<Transaction>,
+    /// Порции данных батча в том виде и порядке, в каком они опубликованы в TON.
+    /// Транзакции — это их склейка в кодировке `encode_transactions`.
+    pub data_chunks: Vec<Vec<u8>>,
     /// Все выводы предыдущих батчей, по порядку номеров листьев.
     pub prior_withdrawals: Vec<WithdrawalLeaf>,
 }
@@ -105,6 +123,10 @@ pub enum BatchError {
     InsufficientBalance,
     BalanceOverflow,
     UnknownSender,
+    /// Данные батча не разбираются как список транзакций.
+    MalformedData,
+    /// Порция длиннее, чем помещается в одно сообщение TON.
+    DataChunkTooLarge,
 }
 
 pub fn sha256(parts: &[&[u8]]) -> Hash {
@@ -174,32 +196,120 @@ pub fn withdrawals_root(leaves: &[WithdrawalLeaf]) -> Hash {
     level[0]
 }
 
-/// Обязательство на данные батча: хеш депозитов и транзакций в каноническом виде.
-pub fn batch_hash(deposits: &[Deposit], transactions: &[Transaction]) -> Hash {
-    let mut hasher = Sha256::new();
-    hasher.update((deposits.len() as u64).to_be_bytes());
-    for deposit in deposits {
-        hasher.update(deposit.l2_recipient);
-        hasher.update(deposit.amount.to_be_bytes());
+/// Хеш порции данных — хеш представления корневой ячейки TON для раскладки «куча»:
+/// данные режутся на куски по DATA_CELL_BYTES байт, кусок i лежит в ячейке i, её ссылки —
+/// ячейки 4i+1 … 4i+4. Это тот самый хеш, который контракт получает от сети готовым
+/// (`msg.data.hash()`), поэтому считать его здесь нужно бит в бит по правилам TON:
+///
+///   sha256(d1 ‖ d2 ‖ данные ‖ глубины ссылок по 2 байта ‖ хеши ссылок),
+///
+/// где d1 — число ссылок (ячейки обычные, уровня 0), d2 — удвоенное число байт данных
+/// (данные всегда выровнены по байту), глубина ячейки — 1 + наибольшая глубина ссылок.
+pub fn data_chunk_hash(data: &[u8]) -> Hash {
+    let cell_count = core::cmp::max(1, data.len().div_ceil(DATA_CELL_BYTES));
+    let mut hashes: Vec<Hash> = alloc::vec![[0u8; 32]; cell_count];
+    let mut depths: Vec<u16> = alloc::vec![0u16; cell_count];
+    for index in (0..cell_count).rev() {
+        let start = index * DATA_CELL_BYTES;
+        let piece = &data[core::cmp::min(start, data.len())..core::cmp::min(start + DATA_CELL_BYTES, data.len())];
+        let first_child = DATA_CELL_REFS * index + 1;
+        let last_child = core::cmp::min(first_child + DATA_CELL_REFS, cell_count);
+        let children = if first_child < cell_count { first_child..last_child } else { 0..0 };
+
+        let mut hasher = Sha256::new();
+        hasher.update([children.len() as u8, (piece.len() * 2) as u8]);
+        hasher.update(piece);
+        let mut depth = 0u16;
+        for child in children.clone() {
+            hasher.update(depths[child].to_be_bytes());
+            depth = core::cmp::max(depth, depths[child] + 1);
+        }
+        for child in children {
+            hasher.update(hashes[child]);
+        }
+        hashes[index] = hasher.finalize().into();
+        depths[index] = depth;
     }
-    hasher.update((transactions.len() as u64).to_be_bytes());
+    hashes[0]
+}
+
+/// Шаг накопительного хеша данных батча — как dataHashStep в контракте.
+pub fn data_hash_step(previous: &Hash, chunk_hash: &Hash) -> Hash {
+    sha256(&[previous, chunk_hash])
+}
+
+/// Обязательство на данные батча: накопительный хеш порций в порядке публикации.
+/// Ноль, если данных нет, — так же считает контракт.
+pub fn batch_data_hash(chunks: &[Vec<u8>]) -> Result<Hash, BatchError> {
+    let mut hash = [0u8; 32];
+    for chunk in chunks {
+        if chunk.len() > MAX_DATA_CHUNK_BYTES {
+            return Err(BatchError::DataChunkTooLarge);
+        }
+        hash = data_hash_step(&hash, &data_chunk_hash(chunk));
+    }
+    Ok(hash)
+}
+
+/// Кодировка транзакций в данных батча. Ей пользуется секвенсор; программа делает обратное.
+pub fn encode_transactions(transactions: &[Transaction]) -> Vec<u8> {
+    let mut out = Vec::new();
     for transaction in transactions {
         match transaction {
             Transaction::Transfer { from, to, amount } => {
-                hasher.update([0u8]);
-                hasher.update(from);
-                hasher.update(to);
-                hasher.update(amount.to_be_bytes());
+                out.push(TAG_TRANSFER);
+                out.extend_from_slice(from);
+                out.extend_from_slice(to);
+                out.extend_from_slice(&amount.to_be_bytes());
             }
             Transaction::Withdraw { from, l1_recipient_hash, amount } => {
-                hasher.update([1u8]);
-                hasher.update(from);
-                hasher.update(l1_recipient_hash);
-                hasher.update(amount.to_be_bytes());
+                out.push(TAG_WITHDRAW);
+                out.extend_from_slice(from);
+                out.extend_from_slice(l1_recipient_hash);
+                out.extend_from_slice(&amount.to_be_bytes());
             }
         }
     }
-    hasher.finalize().into()
+    out
+}
+
+fn amount_from(bytes: &[u8]) -> u128 {
+    let mut raw = [0u8; 16];
+    raw.copy_from_slice(bytes);
+    u128::from_be_bytes(raw)
+}
+
+/// Разбор данных батча: порции склеиваются, транзакция может пересекать границу порций.
+/// Любой хвост, который не разбирается целиком, — ошибка: пруфа для таких данных нет.
+pub fn decode_transactions(chunks: &[Vec<u8>]) -> Result<Vec<Transaction>, BatchError> {
+    let data: Vec<u8> = chunks.iter().flat_map(|chunk| chunk.iter().copied()).collect();
+    let mut transactions = Vec::new();
+    let mut rest = data.as_slice();
+    while let Some(&tag) = rest.first() {
+        let size = match tag {
+            TAG_TRANSFER => TRANSFER_BYTES,
+            TAG_WITHDRAW => WITHDRAW_BYTES,
+            _ => return Err(BatchError::MalformedData),
+        };
+        if rest.len() < size {
+            return Err(BatchError::MalformedData);
+        }
+        let (body, tail) = rest.split_at(size);
+        let mut from = [0u8; 20];
+        from.copy_from_slice(&body[1..21]);
+        let amount = amount_from(&body[size - 16..]);
+        transactions.push(if tag == TAG_TRANSFER {
+            let mut to = [0u8; 20];
+            to.copy_from_slice(&body[21..41]);
+            Transaction::Transfer { from, to, amount }
+        } else {
+            let mut l1_recipient_hash = [0u8; 32];
+            l1_recipient_hash.copy_from_slice(&body[21..53]);
+            Transaction::Withdraw { from, l1_recipient_hash, amount }
+        });
+        rest = tail;
+    }
+    Ok(transactions)
 }
 
 fn debit(accounts: &mut BTreeMap<L2Address, u128>, from: &L2Address, amount: u128) -> Result<(), BatchError> {
@@ -217,6 +327,16 @@ fn credit(accounts: &mut BTreeMap<L2Address, u128>, to: &L2Address, amount: u128
 /// Применяет батч и возвращает публичные значения и новое состояние.
 /// Любая ошибка означает, что батч некорректен и пруфа для него быть не должно.
 pub fn apply_batch(input: &BatchInput) -> Result<(PublicValues, Vec<Account>, Vec<WithdrawalLeaf>), BatchError> {
+    let batch_hash = batch_data_hash(&input.data_chunks)?;
+    apply_batch_with_data_hash(input, batch_hash)
+}
+
+/// То же, но хеш данных уже посчитан вызывающим (`batch_data_hash`). Разделено, чтобы
+/// гостевая программа могла отдельно замерить цену привязки к данным.
+pub fn apply_batch_with_data_hash(
+    input: &BatchInput,
+    batch_hash: Hash,
+) -> Result<(PublicValues, Vec<Account>, Vec<WithdrawalLeaf>), BatchError> {
     if input.accounts.windows(2).any(|pair| pair[0].address >= pair[1].address) {
         return Err(BatchError::AccountsNotSorted);
     }
@@ -232,7 +352,7 @@ pub fn apply_batch(input: &BatchInput) -> Result<(PublicValues, Vec<Account>, Ve
     }
 
     let mut withdrawals = input.prior_withdrawals.clone();
-    for transaction in &input.transactions {
+    for transaction in &decode_transactions(&input.data_chunks)? {
         match transaction {
             Transaction::Transfer { from, to, amount } => {
                 debit(&mut accounts, from, *amount)?;
@@ -248,7 +368,7 @@ pub fn apply_batch(input: &BatchInput) -> Result<(PublicValues, Vec<Account>, Ve
     let public_values = PublicValues {
         prev_state_root,
         new_state_root: state_root(&accounts),
-        batch_hash: batch_hash(&input.deposits, &input.transactions),
+        batch_hash,
         withdrawals_root: withdrawals_root(&withdrawals),
         prev_deposit_hash: input.prev_deposit_hash,
         new_deposit_hash,
@@ -271,10 +391,10 @@ mod tests {
             accounts: Vec::new(),
             prev_deposit_hash: [0u8; 32],
             deposits: alloc::vec![Deposit { l2_recipient: address(1), amount: 1000 }],
-            transactions: alloc::vec![
+            data_chunks: alloc::vec![encode_transactions(&[
                 Transaction::Transfer { from: address(1), to: address(2), amount: 300 },
                 Transaction::Withdraw { from: address(2), l1_recipient_hash: [7u8; 32], amount: 100 },
-            ],
+            ])],
             prior_withdrawals: Vec::new(),
         };
         let (values, accounts, withdrawals) = apply_batch(&input).unwrap();
@@ -296,7 +416,11 @@ mod tests {
             accounts: alloc::vec![Account { address: address(1), balance: 10 }],
             prev_deposit_hash: [0u8; 32],
             deposits: Vec::new(),
-            transactions: alloc::vec![Transaction::Transfer { from: address(1), to: address(2), amount: 11 }],
+            data_chunks: alloc::vec![encode_transactions(&[Transaction::Transfer {
+                from: address(1),
+                to: address(2),
+                amount: 11,
+            }])],
             prior_withdrawals: Vec::new(),
         };
         assert_eq!(apply_batch(&input).unwrap_err(), BatchError::InsufficientBalance);
@@ -311,10 +435,53 @@ mod tests {
             ],
             prev_deposit_hash: [0u8; 32],
             deposits: Vec::new(),
-            transactions: Vec::new(),
+            data_chunks: Vec::new(),
             prior_withdrawals: Vec::new(),
         };
         assert_eq!(apply_batch(&input).unwrap_err(), BatchError::AccountsNotSorted);
+    }
+
+    #[test]
+    fn transactions_survive_encoding_and_chunk_boundaries() {
+        let transactions = alloc::vec![
+            Transaction::Transfer { from: address(1), to: address(2), amount: u128::MAX },
+            Transaction::Withdraw { from: address(2), l1_recipient_hash: [9u8; 32], amount: 1 },
+            Transaction::Transfer { from: address(3), to: address(4), amount: 0 },
+        ];
+        let data = encode_transactions(&transactions);
+        // Граница порций посреди транзакции: разбор идёт по склейке.
+        let (head, tail) = data.split_at(70);
+        let decoded = decode_transactions(&[head.to_vec(), tail.to_vec()]).unwrap();
+        assert_eq!(encode_transactions(&decoded), data);
+        assert_eq!(decoded.len(), 3);
+    }
+
+    #[test]
+    fn malformed_data_is_rejected() {
+        assert_eq!(decode_transactions(&[alloc::vec![7u8]]).unwrap_err(), BatchError::MalformedData);
+        let mut truncated = encode_transactions(&[Transaction::Transfer { from: address(1), to: address(2), amount: 5 }]);
+        truncated.pop();
+        assert_eq!(decode_transactions(&[truncated]).unwrap_err(), BatchError::MalformedData);
+    }
+
+    #[test]
+    fn data_hash_is_zero_without_data_and_depends_on_order() {
+        assert_eq!(batch_data_hash(&[]).unwrap(), [0u8; 32]);
+        let a = alloc::vec![1u8; 10];
+        let b = alloc::vec![2u8; 300];
+        assert_ne!(batch_data_hash(&[a.clone(), b.clone()]).unwrap(), batch_data_hash(&[b, a]).unwrap());
+        let oversized = alloc::vec![0u8; MAX_DATA_CHUNK_BYTES + 1];
+        assert_eq!(batch_data_hash(&[oversized]).unwrap_err(), BatchError::DataChunkTooLarge);
+    }
+
+    #[test]
+    fn empty_chunk_hash_matches_ton_empty_cell() {
+        // Хеш пустой ячейки TON — известная константа: sha256 от двух нулевых байт описателей.
+        let expected = [
+            0x96, 0xa2, 0x96, 0xd2, 0x24, 0xf2, 0x85, 0xc6, 0x7b, 0xee, 0x93, 0xc3, 0x0f, 0x8a, 0x30, 0x91, 0x57, 0xf0,
+            0xda, 0xa3, 0x5d, 0xc5, 0xb8, 0x7e, 0x41, 0x0b, 0x78, 0x63, 0x0a, 0x09, 0xcf, 0xc7,
+        ];
+        assert_eq!(data_chunk_hash(&[]), expected);
     }
 
     #[test]

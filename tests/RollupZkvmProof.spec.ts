@@ -6,11 +6,12 @@ import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
 import { Bn254Groth16Verifier, keyUploadFromJson } from '../wrappers/Bn254Groth16Verifier';
 import { Rollup } from '../wrappers/Rollup';
-import { depositHash, merkleProofCell, withdrawalTree } from '../wrappers/rollupMath';
+import { batchDataHash, dataChunkCell, depositHash, merkleProofCell, withdrawalTree } from '../wrappers/rollupMath';
 import {
     DEPLOY_VALUE,
     KEY_FINALIZE_VALUE,
     KEY_PART_VALUE,
+    PUBLISH_DATA_VALUE,
     SUBMIT_BATCH_VALUE,
     WITHDRAW_VALUE,
 } from '../wrappers/rollupValues';
@@ -25,7 +26,9 @@ const program = loadZkvmScenario();
 // Сквозной путь без заглушек: программа перехода состояния (zkvm/lib) исполнена в SP1,
 // её Groth16-пруф (схема v6.1.0) проверяется настоящим rollup-контрактом. Пруф привязан
 // и к программе (ключ программы — константа в ключе верификации), и к батчу (дайджест
-// публичных значений контракт считает сам из своего состояния).
+// публичных значений контракт считает сам из своего состояния), и к данным батча,
+// опубликованным в TON: транзакции программа берёт из тех же порций, хеш которых
+// накопил контракт (DA.md).
 describe('Rollup: пруфы SP1 нашей программы перехода состояния', () => {
     const genesis = BigInt(program.genesisStateRoot);
     const batch1 = loadProvenBatch(1);
@@ -48,6 +51,18 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
             nonce: overrides.nonce,
             value: SUBMIT_BATCH_VALUE,
         });
+    /** Публикует порции данных батча в том порядке, в каком их разбирала программа. */
+    const publishData = async (batch: ProvenBatch, batchIndex: number, chunks = batch.dataChunks) => {
+        for (const data of chunks) {
+            const result = await rollup.sendPublishData(sequencer.getSender(), {
+                batchIndex,
+                data,
+                value: PUBLISH_DATA_VALUE,
+            });
+            expect(result.transactions).toHaveTransaction({ to: rollup.address, success: true });
+            gas.publishData = Number(computePhaseOf(result.transactions, rollup.address).gasUsed);
+        }
+    };
     const deposit = () =>
         rollup.sendDeposit(user.getSender(), {
             l2Recipient: BigInt(program.deposit.l2Recipient),
@@ -99,7 +114,7 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
             JSON.stringify(
                 {
                     source: 'Измерено в @ton/sandbox тестом tests/RollupZkvmProof.spec.ts; не редактировать вручную',
-                    note: 'Газ submit_batch с Groth16-пруфами SP1 (схема v6.1.0) нашей программы перехода состояния; nonce = 0',
+                    note: 'Газ rollup-контракта с Groth16-пруфами SP1 (схема v6.1.0) нашей программы перехода состояния; nonce = 0; данные батча 2 опубликованы сообщением PublishData',
                     gasLimit: TX_GAS_LIMIT,
                     ...gas,
                 },
@@ -159,7 +174,24 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
         expect((await rollup.getRollupState()).batchIndex).toBe(0);
     });
 
-    it('полный путь на настоящих пруфах: депозит → батч 1 → батч 2 → вывод', async () => {
+    it('батч не принимается, пока его данные не опубликованы в TON', async () => {
+        await deposit();
+        await submit(batch1);
+        expect(batch2.dataChunks.length).toBeGreaterThan(0);
+
+        // Данные не опубликованы: контракт подставляет нулевой хеш, пруф SP1 к нему не подходит.
+        const withoutData = await submit(batch2);
+        expect(withoutData.transactions).toHaveTransaction({ to: rollup.address, success: false });
+        expect((await rollup.getRollupState()).batchIndex).toBe(1);
+
+        // Опубликованы не те данные — тоже отказ.
+        await publishData(batch2, 2, [dataChunkCell(Buffer.from('не те данные'))]);
+        const wrongData = await submit(batch2);
+        expect(wrongData.transactions).toHaveTransaction({ to: rollup.address, success: false });
+        expect((await rollup.getRollupState()).batchIndex).toBe(1);
+    });
+
+    it('полный путь на настоящих пруфах: депозит → батч 1 → данные → батч 2 → вывод', async () => {
         // Депозит приходит до первого батча; батч 2 обязан его обработать.
         expect((await deposit()).transactions).toHaveTransaction({ to: rollup.address, success: true });
         const queued = (await rollup.getDepositQueue()).head.hash;
@@ -167,6 +199,10 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
         expect(BigInt(batch2.output.newDepositHash)).toBe(queued);
 
         expect((await submit(batch1)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+
+        // Данные батча 2 — те самые байты, из которых программа в zkVM взяла транзакции.
+        await publishData(batch2, 2);
+        expect(await rollup.getBatchDataHash(2)).toBe(batchDataHash(batch2.dataChunks));
         expect(await rollup.getExpectedPublicInput(batch2.roots)).toBe(BigInt(batch2.output.publicInput));
 
         const second = await submit(batch2);

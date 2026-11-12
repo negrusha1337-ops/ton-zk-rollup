@@ -1,69 +1,79 @@
 {
   "source": "Сгенерировано zk/testnet-rollup-report.mjs из https://testnet.toncenter.com/api/v3; не редактировать вручную",
   "network": "testnet",
-  "contract": "EQC9yzupvlGdaSrL2nfknGjs19iDhS03fd1erg_HKjyHuFzn",
+  "contract": "EQC8sdnPVoxXY4ZpWc9opOCXP_Tzhu2IHmzLC9slJAtLj2_6",
   "gasLimitPerTransaction": 1000000,
-  "transactions": 30,
+  "transactions": 31,
   "failedTransactions": [],
   "keyUpload": {
     "parts": 23,
-    "partsGasUsed": 124323,
-    "finalizeGasUsed": 29981
+    "partsGasUsed": 125634,
+    "finalizeGasUsed": 30038
   },
   "deposit": [
     {
-      "transactionHash": "74366ccc4cfb2cb506565c551110b296d904617d379715a2a02acf1827b08b76",
-      "time": "2026-11-12T20:54:53.000Z",
+      "transactionHash": "6c27430cbe1873ef664ff989870f321399b2953364a3a4a72d294698b2700a36",
+      "time": "2026-11-12T22:56:04.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 4440,
-      "gasFeeNano": 296001
+      "gasUsed": 4593,
+      "gasFeeNano": 306201
+    }
+  ],
+  "publishData": [
+    {
+      "transactionHash": "60c9569a3d33d81a5f56610ff3bfd6b43363ceaca830c81ca91a4d2132f89149",
+      "time": "2026-11-12T22:56:31.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 4166,
+      "gasFeeNano": 277734
     }
   ],
   "submitBatch": [
     {
       "batch": 1,
-      "transactionHash": "123a7b5c1490d8ca23d7d8a0301e35dcc629b2fb47b10507e1abe95e7beefb38",
-      "time": "2026-11-12T20:55:02.000Z",
+      "transactionHash": "fe39444d383ac7abf860f04db0b0e6be91921ee379715ff055ae9beeb0679f82",
+      "time": "2026-11-12T22:56:22.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 951091,
-      "gasFeeNano": 63406072,
-      "sandboxGasUsed": 951091,
+      "gasUsed": 946776,
+      "gasFeeNano": 63118406,
+      "sandboxGasUsed": 946776,
       "matchesSandbox": true
     },
     {
       "batch": 2,
-      "transactionHash": "7009636fdabfd91d4874d80c4aa4f7c9a5c7b328ebc254755330848a433fd7fb",
-      "time": "2026-11-12T20:55:14.000Z",
+      "transactionHash": "819bcb7d666eae18763a5e9979cea4ee4c1f51396c87b122b8244d1ea2dd82ec",
+      "time": "2026-11-12T22:56:41.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 949425,
-      "gasFeeNano": 63295006,
-      "sandboxGasUsed": 949425,
+      "gasUsed": 949401,
+      "gasFeeNano": 63293406,
+      "sandboxGasUsed": 949401,
       "matchesSandbox": true
     }
   ],
   "withdraw": [
     {
-      "transactionHash": "7ea6a92a2f838b8351a59812bda1bb27d50e96a7831757a0be8873abbe155ef9",
-      "time": "2026-11-12T20:55:28.000Z",
+      "transactionHash": "86f7a8635bef4b6c903e6db4c9de3b76d6ce67220074d69610ed92c8bdd530a1",
+      "time": "2026-11-12T22:56:52.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 21197,
-      "gasFeeNano": 1413134
+      "gasUsed": 21528,
+      "gasFeeNano": 1435201
     }
   ],
   "withdrawPayout": [
     {
-      "transactionHash": "f48f4964fb8ceb3e22484147026818c22fd737eb4179bae7efb0816f7635e480",
-      "time": "2026-11-12T20:55:28.000Z",
+      "transactionHash": "771e65c8aec1388fc1fea6fbc8f48fcfdd89b3997fc41649bee0383732d62c39",
+      "time": "2026-11-12T22:56:52.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 3627,
-      "gasFeeNano": 241801
+      "gasUsed": 3684,
+      "gasFeeNano": 245601
     }
   ],
-  "totalFeesNano": 139111155,
-  "valueReceivedNano": 1613006463
+  "totalFeesNano": 139230741,
+  "valueReceivedNano": 1617984396
 }

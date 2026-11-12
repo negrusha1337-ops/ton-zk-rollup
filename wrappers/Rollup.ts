@@ -14,6 +14,7 @@ import { Bn254Groth16Verifier, Bn254Proof, KeyUpload } from './Bn254Groth16Verif
 export const RollupOpcodes = {
     submitBatch: 0x52420001,
     depositTon: 0x52420002,
+    publishData: 0x52420003,
     withdraw: 0x52420004,
     nullifierClaim: 0x52420010,
     nullifierClaimed: 0x52420011,
@@ -31,6 +32,7 @@ export const RollupErrors = {
     wrongMerkleProof: 7308,
     notNullifier: 7309,
     wrongRecipient: 7310,
+    dataForClosedBatch: 7311,
 };
 
 export const NullifierErrors = {
@@ -45,7 +47,7 @@ export type RollupConfig = {
     genesisStateRoot: bigint;
 };
 
-export type BatchRoots = { newStateRoot: bigint; batchHash: bigint; withdrawalsRoot: bigint };
+export type BatchRoots = { newStateRoot: bigint; withdrawalsRoot: bigint };
 
 export type QueueMark = { count: bigint; hash: bigint };
 
@@ -68,6 +70,7 @@ export class Rollup implements Contract {
             .storeUint(0, 256) // корень выводов: выводов ещё не было
             .storeUint(0, 64)
             .storeRef(queue.endCell())
+            .storeBit(false) // pendingData: данных батчей ещё нет
             .endCell();
         const data = beginCell()
             .storeAddress(config.owner)
@@ -134,7 +137,6 @@ export class Rollup implements Contract {
     static buildSubmitBatchBody(opts: { proof: Bn254Proof; hints: Cell; roots: BatchRoots; nonce?: bigint }): Cell {
         const roots = beginCell()
             .storeUint(opts.roots.newStateRoot, 256)
-            .storeUint(opts.roots.batchHash, 256)
             .storeUint(opts.roots.withdrawalsRoot, 256)
             .endCell();
         return beginCell()
@@ -153,6 +155,24 @@ export class Rollup implements Contract {
         opts: { proof: Bn254Proof; hints: Cell; roots: BatchRoots; nonce?: bigint; value: bigint },
     ) {
         await this.send(provider, via, opts.value, Rollup.buildSubmitBatchBody(opts));
+    }
+
+    /**
+     * Порция данных батча (data availability). `data` — цепочка ячеек из
+     * `dataChunkCell` (wrappers/rollupMath.ts): программа zkVM считает хеш такой раскладки.
+     */
+    async sendPublishData(
+        provider: ContractProvider,
+        via: Sender,
+        opts: { batchIndex: number; data: Cell; value: bigint },
+    ) {
+        const body = beginCell()
+            .storeUint(RollupOpcodes.publishData, 32)
+            .storeUint(0, 64)
+            .storeUint(opts.batchIndex, 64)
+            .storeRef(opts.data)
+            .endCell();
+        await this.send(provider, via, opts.value, body);
     }
 
     /** Депозит TON: на L2 зачтётся приложенная сумма минус комиссия 0,01 TON. */
@@ -201,9 +221,14 @@ export class Rollup implements Contract {
     async getExpectedPublicInput(provider: ContractProvider, roots: BatchRoots): Promise<bigint> {
         const { stack } = await provider.get('expectedPublicInput', [
             { type: 'int', value: roots.newStateRoot },
-            { type: 'int', value: roots.batchHash },
             { type: 'int', value: roots.withdrawalsRoot },
         ]);
+        return stack.readBigNumber();
+    }
+
+    /** Накопительный хеш данных, опубликованных для батча; 0, если их нет. */
+    async getBatchDataHash(provider: ContractProvider, batchIndex: number): Promise<bigint> {
+        const { stack } = await provider.get('batchDataHash', [{ type: 'int', value: BigInt(batchIndex) }]);
         return stack.readBigNumber();
     }
 

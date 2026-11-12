@@ -24,7 +24,10 @@ Groth16 (BLS12-381) в TVM и сколько она стоит. Ответ: ра
 - Стандартный путь (обёртка в схеме) уже есть прототипом у IOG для Cardano.
 - Rollup-контракт, минимальная версия: `contracts/rollup.tolk` (логика в `contracts/rollup/`,
   нуллификатор `contracts/rollup_nullifier.tolk`). `submit_batch` с настоящей проверкой —
-  946 898 gas. Не реализованы jetton'ы, аварийный выход, управление; DA не решено.
+  947 286 gas. Не реализованы jetton'ы, аварийный выход, управление.
+- **Data availability — данные батчей в сообщениях TON** (`DA.md`): секвенсор публикует порции
+  сообщением `PublishData` (около 4 300 gas при любом размере), контракт копит их хеш по номеру
+  батча и сам подставляет его в публичный вход. Без опубликованных данных батч не принять.
 - `contracts/rollup_mock.tolk` — двойник с заглушкой проверки пруфа, ТОЛЬКО для тестов логики.
 - Программа перехода состояния для zkVM: `zkvm/` (Rust; `lib` — логика, `program` — гость SP1,
   `native` — запуск без zkVM). Игрушечный реестр, не EVM. Публичные значения сверены с
@@ -32,9 +35,11 @@ Groth16 (BLS12-381) в TVM и сколько она стоит. Ответ: ра
   исполняет программу в zkVM и строит Groth16-пруф — см. `PROVING.md`.
 - **Настоящие пруфы SP1 нашей программы** (схема v6.1.0) для двух батчей:
   `fixtures/sp1_rollup_batch{1,2}/`. Rollup-контракт принимает их в Sandbox
-  (`tests/RollupZkvmProof.spec.ts`): 951 091 и 949 425 gas, запас 4,9–5,1%. Полный путь
-  (депозит → два батча → вывод) пройден в testnet 12.11.2026, газ совпал с Sandbox до единицы
-  (`bench/testnet-run-rollup.json`; скрипты `scripts/runRollupTestnet.ts`, `zk/testnet-rollup-report.mjs`).
+  (`tests/RollupZkvmProof.spec.ts`): 946 776 и 949 401 gas, запас 5,1–5,3%.
+- Полный путь (депозит → батч 1 → данные → батч 2 → вывод) пройден в testnet 12.11.2026:
+  31 транзакция, газ всех шагов совпал с Sandbox до единицы (`bench/testnet-run-rollup.json`;
+  прогон версии до публикации данных — `bench/testnet-run-rollup-no-da.json`). Скрипты —
+  `scripts/runRollupTestnet.ts`, `zk/testnet-rollup-report.mjs`.
 - `contracts/bn254/` — исследовательский код без аудита. Проверки точек есть только в
   `hinted.tolk`; `groth16.tolk` (наивный вариант и вариант со свидетелем) их не делает.
 
@@ -108,5 +113,15 @@ cd zkvm/script && PROTOC="$PWD/../../.tools/protoc/bin/protoc" cargo run --relea
   нужно пересоздать вместе.
 - Монеты, приложенные к сообщениям сверх газа, остаются на контракте, а вывести их нечем:
   суммы для testnet — только из `wrappers/rollupValues.ts` (тест шлёт те же суммы в Sandbox).
+- Раскладка порции данных в ячейки (127 байт на ячейку, ячейка i → ячейки 4i+1…4i+4) — часть
+  протокола: `dataChunkCell` (`wrappers/rollupMath.ts`), её копия в `zk/gen-rollup-batches.mjs`
+  и `data_chunk_hash` (`zkvm/lib`) обязаны совпадать. Цепочкой ячеек порцию не делать:
+  эмулятор Sandbox падает на глубине под 500.
+- В `zkvm/Cargo.toml` крейт `sha2` заменён версией с прекомпиляцией SP1 (тег под версию SP1):
+  без неё хеш данных в zkVM в 5,5 раза дороже. При смене версии SP1 менять и тег.
+- Замеры циклов по меткам — сборка `zkvm/script` с `--features profiling` в отдельный каталог
+  (`--target-dir target/profiling`); прувер собирать без этой опции.
+- Groth16 на этом ноутбуке при параллельной нагрузке идёт 14 минут и доходит до порога сторожа
+  (4 ГБ свободного места): перед запуском закрывать всё тяжёлое.
 - Circom ставится локально: `cargo install --git https://github.com/iden3/circom.git --tag v2.2.3 --root .tools circom`
   (или переменная `CIRCOM_BIN`).

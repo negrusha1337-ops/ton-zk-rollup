@@ -1,7 +1,10 @@
-//! Тестовый сценарий из двух батчей. Используется нативным запуском (сверка с
+//! Тестовый сценарий из двух батчей и нагрузочный батч для замеров. Используется нативным запуском (сверка с
 //! контрактом без пруфа) и будет использоваться хост-скриптом SP1 при доказательстве.
 //! Должен совпадать с tests/ZkvmProgram.spec.ts.
-use rollup_stf::{sha256, Account, BatchInput, Deposit, Hash, L2Address, Transaction, WithdrawalLeaf};
+use rollup_stf::{
+    encode_transactions, sha256, Account, BatchInput, Deposit, Hash, L2Address, Transaction, WithdrawalLeaf,
+    MAX_DATA_CHUNK_BYTES,
+};
 
 pub const NANO: u128 = 1_000_000_000;
 /// Сколько пользователь прикладывает к депозиту и сколько удерживает контракт (DEPOSIT_FEE).
@@ -37,31 +40,60 @@ impl Scenario {
     }
 
     /// Батч 1: депозит уже в очереди L1, но цель очереди зафиксирована на генезисе,
-    /// поэтому батч его не обрабатывает. Состояние пустое, транзакций нет.
+    /// поэтому батч его не обрабатывает. Состояние пустое, транзакций нет, данные не
+    /// публикуются — хеш данных такого батча равен нулю.
     pub fn batch1(&self) -> BatchInput {
         BatchInput {
             accounts: Vec::new(),
             prev_deposit_hash: [0u8; 32],
             deposits: Vec::new(),
-            transactions: Vec::new(),
+            data_chunks: Vec::new(),
             prior_withdrawals: Vec::new(),
         }
     }
 
-    /// Батч 2: обязан обработать депозит; затем перевод и вывод на L1.
+    /// Батч 2: обязан обработать депозит; затем перевод и вывод на L1. Транзакции
+    /// публикуются в TON одной порцией данных.
     pub fn batch2(&self, accounts: Vec<Account>, prior_withdrawals: Vec<WithdrawalLeaf>) -> BatchInput {
         BatchInput {
             accounts,
             prev_deposit_hash: [0u8; 32],
             deposits: vec![self.deposit.clone()],
-            transactions: vec![
+            data_chunks: vec![encode_transactions(&[
                 Transaction::Transfer { from: self.alice, to: self.bob, amount: 4 * NANO / 10 },
                 Transaction::Withdraw {
                     from: self.bob,
                     l1_recipient_hash: self.l1_recipient_hash,
                     amount: self.withdrawal_amount,
                 },
-            ],
+            ])],
+            prior_withdrawals,
+        }
+    }
+
+    /// Нагрузочный батч поверх состояния после батча 2: `transfers` переводов по одному
+    /// нанотону туда-обратно между двумя счетами. Нужен только для замеров (цена данных
+    /// в циклах zkVM); в контракт не отправляется. Данные режутся на порции предельного
+    /// размера, так что транзакции пересекают границы порций.
+    pub fn load_batch(
+        &self,
+        accounts: Vec<Account>,
+        prior_withdrawals: Vec<WithdrawalLeaf>,
+        transfers: usize,
+    ) -> BatchInput {
+        let transactions: Vec<Transaction> = (0..transfers)
+            .map(|index| {
+                let (from, to) = if index % 2 == 0 { (self.alice, self.bob) } else { (self.bob, self.alice) };
+                Transaction::Transfer { from, to, amount: 1 }
+            })
+            .collect();
+        let data = encode_transactions(&transactions);
+        BatchInput {
+            accounts,
+            // Очередь депозитов после батча 2 обработана целиком; её хеш на логику батча не влияет.
+            prev_deposit_hash: [0u8; 32],
+            deposits: Vec::new(),
+            data_chunks: data.chunks(MAX_DATA_CHUNK_BYTES).map(<[u8]>::to_vec).collect(),
             prior_withdrawals,
         }
     }

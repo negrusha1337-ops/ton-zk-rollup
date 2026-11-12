@@ -3,11 +3,16 @@
 #![no_main]
 sp1_zkvm::entrypoint!(main);
 
-use rollup_stf::{apply_batch, BatchInput};
+use rollup_stf::{apply_batch_with_data_hash, batch_data_hash, BatchInput};
 
 pub fn main() {
     let input = sp1_zkvm::io::read::<BatchInput>();
+    // Привязка к данным, опубликованным в TON: хеш порций в том виде, в каком его копит
+    // контракт. Метки cycle-tracker позволяют хосту отдельно увидеть цену этой привязки.
+    println!("cycle-tracker-report-start: data-hash");
+    let batch_hash = batch_data_hash(&input.data_chunks).expect("некорректные данные батча");
+    println!("cycle-tracker-report-end: data-hash");
     // Некорректный батч — паника: пруфа для него не существует.
-    let (public_values, _, _) = apply_batch(&input).expect("некорректный батч");
+    let (public_values, _, _) = apply_batch_with_data_hash(&input, batch_hash).expect("некорректный батч");
     sp1_zkvm::io::commit_slice(&public_values.to_bytes());
 }

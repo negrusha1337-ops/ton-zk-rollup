@@ -23,6 +23,7 @@ const STEPS = {
     '0x42543236': 'keyFinalize',
     '0x52420001': 'submitBatch',
     '0x52420002': 'deposit',
+    '0x52420003': 'publishData',
     '0x52420004': 'withdraw',
     '0x52420011': 'withdrawPayout',
 };
@@ -98,6 +99,9 @@ const report = {
         finalizeGasUsed: of('keyFinalize').find((row) => row.success)?.gasUsed ?? null,
     },
     deposit: of('deposit')
+        .filter((row) => row.success)
+        .map(pick),
+    publishData: of('publishData')
         .filter((row) => row.success)
         .map(pick),
     submitBatch: batches,

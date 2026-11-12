@@ -4,7 +4,8 @@
 // Merkle-доказательству через контракт-нуллификатор.
 //
 // НЕ ДЛЯ ПРОДАКШЕНА. Код не проходил аудит, нет jetton'ов, аварийного выхода,
-// управления обновлениями и решения по data availability. Только Sandbox и testnet.
+// управления обновлениями. Данные батчей публикуются сообщениями PublishData (DA.md).
+// Только Sandbox и testnet.
 import "rollup/storage"
 import "rollup/messages"
 import "rollup/logic"
@@ -24,12 +25,24 @@ fun onInternalMessage(inMsg: InMessage) {
       var storage = RollupStorage.load();
       assert (inMsg.senderAddress == storage.sequencer) throw RollupErrors.NotSequencer;
       assert (storage.vkData != null) throw RollupErrors.KeyNotFinalized;
-      val state = storage.state.load();
+      var state = storage.state.load();
       val queue = state.queue.load();
       val roots = msg.roots.load();
-      val ok = verifyBn254Proof(msg.proof, batchDigest(state, queue, roots), msg.nonce, storage.vkData!, msg.hints);
+      // Хеш данных батча контракт берёт из своего хранилища: пруф для данных, которые не
+      // были опубликованы в TON, не сойдётся.
+      val batchHash = takeBatchData(mutate state);
+      val ok = verifyBn254Proof(
+        msg.proof,
+        batchDigest(state, queue, roots, batchHash),
+        msg.nonce,
+        storage.vkData!,
+        msg.hints
+      );
       assert (ok) throw RollupErrors.WrongProof;
       applyBatch(mutate storage, state, queue, roots);
+    }
+    PublishData => {
+      handlePublishData(inMsg.senderAddress, msg);
     }
     DepositTon => {
       handleDeposit(inMsg.valueCoins, msg);
@@ -69,14 +82,22 @@ get fun depositQueue(): DepositQueue {
   return depositQueueView();
 }
 
-/// Первый публичный вход, который контракт потребует от следующего батча с такими корнями.
-get fun expectedPublicInput(newStateRoot: int, batchHash: int, withdrawalsRoot: int): int {
-  val state = RollupStorage.load().state.load();
-  return batchDigest(state, state.queue.load(), BatchRoots {
-    newStateRoot: newStateRoot,
-    batchHash: batchHash,
-    withdrawalsRoot: withdrawalsRoot,
-  });
+/// Первый публичный вход, который контракт потребует от следующего батча с такими корнями
+/// (при уже опубликованных для него данных).
+get fun expectedPublicInput(newStateRoot: int, withdrawalsRoot: int): int {
+  val storage = RollupStorage.load();
+  val state = storage.state.load();
+  return batchDigest(
+    state,
+    state.queue.load(),
+    BatchRoots { newStateRoot: newStateRoot, withdrawalsRoot: withdrawalsRoot },
+    batchDataHashOf(state.pendingData, state.batchIndex + 1)
+  );
+}
+
+/// Накопительный хеш данных, опубликованных для батча с этим номером; 0, если их нет.
+get fun batchDataHash(batchIndex: int): int {
+  return batchDataHashOf(RollupStorage.load().state.load().pendingData, batchIndex);
 }
 
 /// Хеш зафиксированного ключа верификации; 0, пока ключ не зафиксирован.

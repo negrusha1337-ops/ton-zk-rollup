@@ -88,3 +88,46 @@ export function merkleProofCell(siblings: bigint[]): Cell {
     if (!tail) throw new Error('merkleProofCell: пустое доказательство');
     return tail;
 }
+
+// --- данные батча (data availability, DA.md) ---
+
+/** Байт данных в одной ячейке порции: 127 байт = 1016 бит из 1023. */
+export const DATA_CELL_BYTES = 127;
+/** Ссылок на ячейку в дереве порции. */
+export const DATA_CELL_REFS = 4;
+/** Предел порции: с запасом помещается во внешнее сообщение (65 535 байт вместе с обвязкой). */
+export const MAX_DATA_CHUNK_BYTES = 60_000;
+
+/**
+ * Порция данных батча как дерево ячеек. Данные режутся на куски по DATA_CELL_BYTES байт;
+ * кусок i лежит в ячейке i, а её ссылки — ячейки 4i+1 … 4i+4 (раскладка «куча», как у
+ * двоичной кучи, только с четырьмя потомками). Корень — ячейка 0. Пустая порция — одна
+ * пустая ячейка.
+ *
+ * Раскладка — часть протокола: программа zkVM (zkvm/lib, `data_chunk_hash`) считает хеш
+ * именно такого дерева. Дерево, а не цепочка, потому что глубина цепочки на 60 КБ — под
+ * 500 ячеек: это у самого лимита сети (512), и эмулятор Sandbox на такой глубине падает.
+ */
+export function dataChunkCell(data: Buffer): Cell {
+    if (data.length > MAX_DATA_CHUNK_BYTES) {
+        throw new Error(`dataChunkCell: порция ${data.length} байт больше ${MAX_DATA_CHUNK_BYTES}`);
+    }
+    const cellCount = Math.max(1, Math.ceil(data.length / DATA_CELL_BYTES));
+    const cells: Cell[] = new Array(cellCount);
+    for (let index = cellCount - 1; index >= 0; index--) {
+        const builder = beginCell().storeBuffer(data.subarray(index * DATA_CELL_BYTES, (index + 1) * DATA_CELL_BYTES));
+        for (let child = DATA_CELL_REFS * index + 1; child <= DATA_CELL_REFS * index + DATA_CELL_REFS; child++) {
+            if (child < cellCount) builder.storeRef(cells[child]);
+        }
+        cells[index] = builder.endCell();
+    }
+    return cells[0];
+}
+
+const cellHashInt = (cell: Cell) => BigInt('0x' + cell.hash().toString('hex'));
+
+/** Шаг накопительного хеша данных батча — как dataHashStep в контракте. */
+export const dataHashStep = (previous: bigint, chunk: Cell) => sha256Int(previous, cellHashInt(chunk));
+
+/** Хеш данных батча: порции в порядке публикации; 0, если данных нет. */
+export const batchDataHash = (chunks: Cell[]) => chunks.reduce(dataHashStep, 0n);

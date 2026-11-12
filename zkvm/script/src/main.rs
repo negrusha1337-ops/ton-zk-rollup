@@ -1,6 +1,7 @@
 //! Исполнение и доказательство программы перехода состояния в SP1.
 //!
 //!   cargo run --release -- --batch 1 --execute     # исполнить в zkVM, без пруфа
+//!   cargo run --release -- --batch 3 --transfers 1000 --execute   # нагрузочный батч: цена данных в циклах
 //!   cargo run --release -- --batch 1 --compressed  # сжатый STARK-пруф: проверка, что машина тянет доказательство
 //!   cargo run --release -- --batch 1 --prove       # Groth16-пруф для отправки в TON
 //!
@@ -28,9 +29,12 @@ const PROOF_NONCE: [u32; 4] = [0; 4];
 
 #[derive(Parser, Debug)]
 struct Args {
-    /// Номер батча сценария: 1 или 2.
+    /// Номер батча сценария: 1 или 2; 3 — нагрузочный батч для замеров (только --execute).
     #[arg(long)]
     batch: u8,
+    /// Число переводов в нагрузочном батче.
+    #[arg(long, default_value_t = 1000)]
+    transfers: usize,
     #[arg(long)]
     execute: bool,
     /// Сжатый STARK-пруф без Groth16-обёртки: в TON не отправляется, только диагностика.
@@ -50,16 +54,21 @@ struct ProofFixture {
 }
 
 /// Вход батча из общего сценария; батч 2 продолжает состояние после батча 1.
-fn batch_input(batch: u8) -> BatchInput {
+fn batch_input(batch: u8, transfers: usize) -> BatchInput {
     let scenario = Scenario::new();
     let first = scenario.batch1();
+    if batch == 1 {
+        return first;
+    }
+    let (_, accounts, withdrawals) = apply_batch(&first).expect("батч 1 сценария некорректен");
+    let second = scenario.batch2(accounts, withdrawals);
     match batch {
-        1 => first,
-        2 => {
-            let (_, accounts, withdrawals) = apply_batch(&first).expect("батч 1 сценария некорректен");
-            scenario.batch2(accounts, withdrawals)
+        2 => second,
+        3 => {
+            let (_, accounts, withdrawals) = apply_batch(&second).expect("батч 2 сценария некорректен");
+            scenario.load_batch(accounts, withdrawals, transfers)
         }
-        other => panic!("в сценарии нет батча {other}: допустимы 1 и 2"),
+        other => panic!("в сценарии нет батча {other}: допустимы 1, 2 и 3"),
     }
 }
 
@@ -71,7 +80,12 @@ fn main() {
         std::process::exit(1);
     }
 
-    let input = batch_input(args.batch);
+    if args.batch == 3 && !args.execute {
+        eprintln!("Батч 3 — нагрузочный, только для замеров: допустим один режим --execute");
+        std::process::exit(1);
+    }
+
+    let input = batch_input(args.batch, args.transfers);
     let (expected, _, _) = apply_batch(&input).expect("батч сценария некорректен");
     let mut stdin = SP1Stdin::new();
     stdin.write(&input);
@@ -82,7 +96,11 @@ fn main() {
         let (output, report) = client.execute(ROLLUP_ELF, stdin).run().expect("исполнение в zkVM не удалось");
         assert_eq!(output.as_slice(), expected.to_bytes().as_slice(), "zkVM и нативный запуск разошлись");
         println!("Публичные значения совпали с нативным запуском.");
+        let data_bytes: usize = input.data_chunks.iter().map(Vec::len).sum();
+        let data_hash_cycles = report.cycle_tracker.get("data-hash").copied().unwrap_or(0);
         println!("Циклов zkVM: {}", report.total_instruction_count());
+        println!("Данных батча: {} байт в {} порциях", data_bytes, input.data_chunks.len());
+        println!("Циклов на хеш данных (привязка к TON): {data_hash_cycles}");
         return;
     }
 

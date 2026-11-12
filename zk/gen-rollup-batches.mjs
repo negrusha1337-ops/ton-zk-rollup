@@ -1,8 +1,8 @@
 // Два батча для сквозного теста rollup-контракта с НАСТОЯЩЕЙ проверкой пруфа.
 //
-// Программы для zkVM, доказывающей переход состояния, ещё нет. Поэтому пруф строится
-// игрушечной схемой Multiplier (BN254): её единственный публичный вход можно сделать
-// равным любому числу, и мы делаем его равным дайджесту публичных значений батча.
+// Пруф здесь строится игрушечной схемой Multiplier (BN254): её единственный публичный
+// вход можно сделать равным любому числу, и мы делаем его равным дайджесту публичных
+// значений батча. Настоящие пруфы программы перехода состояния — в fixtures/sp1_rollup_batch*.
 // Переход состояния такой пруф НЕ доказывает — он нужен, чтобы контракт прошёл весь
 // настоящий путь: дайджест → верификатор → смена корня, и чтобы измерить газ.
 //
@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as snarkjs from 'snarkjs';
+import ton from '@ton/core';
 import { buildProofHints, buildVerificationKeyData, parseProof, parseVerificationKey } from './bn254-onchain.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -39,6 +40,35 @@ const sha256Int = (...values) =>
                 .digest('hex'),
     );
 const label = (text) => BigInt('0x' + createHash('sha256').update(text).digest('hex'));
+// Порция данных батча как дерево ячеек — копия dataChunkCell из wrappers/rollupMath.ts.
+const DATA_CELL_BYTES = 127;
+const DATA_CELL_REFS = 4;
+function dataChunkCell(data) {
+    const cellCount = Math.max(1, Math.ceil(data.length / DATA_CELL_BYTES));
+    const cells = new Array(cellCount);
+    for (let index = cellCount - 1; index >= 0; index--) {
+        const builder = ton
+            .beginCell()
+            .storeBuffer(data.subarray(index * DATA_CELL_BYTES, (index + 1) * DATA_CELL_BYTES));
+        for (let child = DATA_CELL_REFS * index + 1; child <= DATA_CELL_REFS * index + DATA_CELL_REFS; child++) {
+            if (child < cellCount) builder.storeRef(cells[child]);
+        }
+        cells[index] = builder.endCell();
+    }
+    return cells[0];
+}
+/** Накопительный хеш порций — как dataHashStep в контракте; 0, если данных нет. */
+const batchDataHash = (chunks) =>
+    chunks.reduce((hash, chunk) => sha256Int(hash, BigInt('0x' + dataChunkCell(chunk).hash().toString('hex'))), 0n);
+/** Детерминированные байты порции: поток sha256(метка ‖ счётчик). */
+const chunkBytes = (text, length) => {
+    const blocks = [];
+    for (let counter = 0; blocks.length * 32 < length; counter++) {
+        blocks.push(createHash('sha256').update(`${text}:${counter}`).digest());
+    }
+    return Buffer.concat(blocks).subarray(0, length);
+};
+
 const batchDigest = (v) =>
     sha256Int(v.prevStateRoot, v.newStateRoot, v.batchHash, v.withdrawalsRoot, v.prevDepositHash, v.newDepositHash) &
     MASK_253;
@@ -57,12 +87,16 @@ for (let level = 1; level < TREE_DEPTH; level++) siblings.push(sha256Int(sibling
 let withdrawalsRoot = sha256Int(BigInt(withdrawal.leafIndex), withdrawal.recipientHash, withdrawal.amount);
 for (const sibling of siblings) withdrawalsRoot = sha256Int(withdrawalsRoot, sibling);
 
+// Данные батчей (data availability): батч 1 — без данных, батч 2 — две порции, вторая
+// длиннее одной ячейки. Содержимое произвольное: игрушечная схема его не исполняет.
+const batchData = [[], [chunkBytes('stage1:data-2a', 100), chunkBytes('stage1:data-2b', 700)]];
+
 const batchValues = [
     {
         // Батч 1: депозит уже в очереди, но цель зафиксирована на генезисе — депозиты не обрабатываются.
         prevStateRoot: genesisStateRoot,
         newStateRoot: label('stage1:state-1'),
-        batchHash: label('stage1:batch-1'),
+        batchHash: batchDataHash(batchData[0]),
         withdrawalsRoot: 0n,
         prevDepositHash: 0n,
         newDepositHash: 0n,
@@ -71,7 +105,7 @@ const batchValues = [
         // Батч 2: обязан обработать депозит и публикует корень дерева выводов.
         prevStateRoot: label('stage1:state-1'),
         newStateRoot: label('stage1:state-2'),
-        batchHash: label('stage1:batch-2'),
+        batchHash: batchDataHash(batchData[1]),
         withdrawalsRoot,
         prevDepositHash: 0n,
         newDepositHash: depositHashAfter,
@@ -100,9 +134,11 @@ for (const [index, values] of batchValues.entries()) {
     batches.push({
         roots: {
             newStateRoot: s(values.newStateRoot),
-            batchHash: s(values.batchHash),
             withdrawalsRoot: s(values.withdrawalsRoot),
         },
+        // Порции данных, которые секвенсор публикует до батча, и их накопительный хеш.
+        dataChunksHex: batchData[index].map((chunk) => chunk.toString('hex')),
+        batchHash: s(values.batchHash),
         publicInput: s(digest),
         proof: [
             proof.pi_a[0],

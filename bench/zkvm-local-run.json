@@ -55,5 +55,30 @@
       "minFreeDiskGb": 5
     },
     "note": "Памяти 16 ГБ при пиковом следе 27 ГБ: система работала на подкачке, свободное место на диске падало с 21 до 5 ГБ. Запуск — через zkvm/script/prove-guarded.sh."
+  },
+  "note": "Замеры ниже сделаны на первой версии программы (без привязки к данным TON, программный SHA-256). Повторные пруфы нынешней программы — в поле reprove.",
+  "reprove": {
+    "date": "2026-11-12",
+    "program": "с привязкой к данным TON и прекомпиляцией SHA-256",
+    "programVKey": "0x00191f30102955bde306406de3ba5a7e0c2b664a554d12a096bd03fb3e86b2de",
+    "executeCycles": {
+      "batch1": 8057,
+      "batch2": 130911
+    },
+    "groth16": {
+      "batch1": {
+        "wallClockSeconds": 848.72,
+        "peakMemoryFootprintBytes": 27977405416,
+        "minFreeDiskGb": 4,
+        "freeDiskAtStartGb": 21
+      },
+      "batch2": {
+        "wallClockSeconds": 823.47,
+        "peakMemoryFootprintBytes": 27975062600,
+        "minFreeDiskGb": 4,
+        "freeDiskAtStartGb": 6
+      },
+      "note": "Параллельно на машине шли посторонние тесты; свободное место доходило до порога сторожа (4 ГБ), подкачка — до 17 ГБ."
+    }
   }
 }

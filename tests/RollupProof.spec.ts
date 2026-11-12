@@ -6,14 +6,24 @@ import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
 import { Bn254Groth16Verifier, Bn254Proof, KeyUploadJson, keyUploadFromJson } from '../wrappers/Bn254Groth16Verifier';
 import { NullifierErrors, Rollup, RollupErrors } from '../wrappers/Rollup';
-import { batchDigest, depositHash, merkleProofCell, withdrawalTree } from '../wrappers/rollupMath';
+import {
+    batchDataHash,
+    batchDigest,
+    dataChunkCell,
+    depositHash,
+    merkleProofCell,
+    withdrawalTree,
+} from '../wrappers/rollupMath';
 import { computePhaseOf } from './helpers/gas';
 
 // Лимит газа на транзакцию: конфиг сети, параметр 21 (gas_limit).
 const TX_GAS_LIMIT = 1_000_000;
 
 type BatchFixture = {
-    roots: { newStateRoot: string; batchHash: string; withdrawalsRoot: string };
+    roots: { newStateRoot: string; withdrawalsRoot: string };
+    /** Порции данных батча, которые секвенсор публикует до отправки пруфа. */
+    dataChunksHex: string[];
+    batchHash: string;
     publicInput: string;
     proof: string[];
     hintsBoc: string;
@@ -40,9 +50,9 @@ const proofOf = (batch: BatchFixture): Bn254Proof => {
 };
 const rootsOf = (batch: BatchFixture) => ({
     newStateRoot: BigInt(batch.roots.newStateRoot),
-    batchHash: BigInt(batch.roots.batchHash),
     withdrawalsRoot: BigInt(batch.roots.withdrawalsRoot),
 });
+const dataOf = (batch: BatchFixture) => batch.dataChunksHex.map((hex) => dataChunkCell(Buffer.from(hex, 'hex')));
 
 // Сквозной путь на настоящем контракте (contracts/rollup.tolk): ключ загружается
 // частями, батчи принимаются только с верным Groth16-пруфом на BN254.
@@ -68,6 +78,17 @@ describe('Rollup: настоящая проверка пруфа', () => {
             roots: rootsOf(batch),
             value: toNano('0.3'),
         });
+    const publishData = async (batch: BatchFixture, batchIndex: number, chunks = dataOf(batch)) => {
+        for (const data of chunks) {
+            const result = await rollup.sendPublishData(sequencer.getSender(), {
+                batchIndex,
+                data,
+                value: toNano('0.05'),
+            });
+            expect(result.transactions).toHaveTransaction({ to: rollup.address, success: true });
+            gas.publishData = Number(computePhaseOf(result.transactions, rollup.address).gasUsed);
+        }
+    };
     const depositFromScenario = () =>
         rollup.sendDeposit(user.getSender(), {
             l2Recipient: BigInt(scenario.deposit.l2Recipient),
@@ -127,8 +148,17 @@ describe('Rollup: настоящая проверка пруфа', () => {
         // Публичный вход, который потребует контракт, совпадает с тем, под который строился пруф.
         expect(await rollup.getExpectedPublicInput(rootsOf(batch1))).toBe(BigInt(batch1.publicInput));
         expect(BigInt(batch1.publicInput)).toBe(
-            batchDigest({ prevStateRoot: genesis, ...rootsOf(batch1), prevDepositHash: 0n, newDepositHash: 0n }),
+            batchDigest({
+                prevStateRoot: genesis,
+                ...rootsOf(batch1),
+                batchHash: 0n,
+                prevDepositHash: 0n,
+                newDepositHash: 0n,
+            }),
         );
+        // Батч 1 — без данных; у батча 2 обязательство равно накопительному хешу его порций.
+        expect(batch1.dataChunksHex).toEqual([]);
+        expect(BigInt(batch2.batchHash)).toBe(batchDataHash(dataOf(batch2)));
         expect(BigInt(scenario.deposit.hashAfter)).toBe(
             depositHash(0n, BigInt(scenario.deposit.l2Recipient), BigInt(scenario.deposit.amount)),
         );
@@ -173,6 +203,24 @@ describe('Rollup: настоящая проверка пруфа', () => {
         expect((await rollup.getRollupState()).stateRoot).toBe(genesis);
     });
 
+    it('батч не принимается, пока его данные не опубликованы в TON', async () => {
+        await depositFromScenario();
+        await submit(batch1);
+
+        // Данных нет: контракт подставляет нулевой хеш, и настоящий пруф к нему не подходит.
+        const withoutData = await submit(batch2);
+        expect(withoutData.transactions).toHaveTransaction({ to: rollup.address, success: false });
+        expect((await rollup.getRollupState()).batchIndex).toBe(1);
+
+        // Опубликованы другие данные (порции в обратном порядке) — пруф тоже не подходит.
+        await publishData(batch2, 2, dataOf(batch2).reverse());
+        const wrongData = await submit(batch2);
+        expect(wrongData.transactions).toHaveTransaction({ to: rollup.address, success: false });
+        expect((await rollup.getRollupState()).batchIndex).toBe(1);
+        // Отказ откатил транзакцию целиком: запись о данных на месте.
+        expect(await rollup.getBatchDataHash(2)).toBe(batchDataHash(dataOf(batch2).reverse()));
+    });
+
     it('полный путь: депозит → два батча → вывод', async () => {
         // Депозит приходит до первого батча.
         const deposit = await depositFromScenario();
@@ -180,7 +228,9 @@ describe('Rollup: настоящая проверка пруфа', () => {
         gas.deposit = Number(computePhaseOf(deposit.transactions, rollup.address).gasUsed);
 
         expect((await submit(batch1)).transactions).toHaveTransaction({ to: rollup.address, success: true });
-        // Теперь цель очереди — этот депозит, и батч 2 обязан его обработать.
+        // Теперь цель очереди — этот депозит, и батч 2 обязан его обработать. Его данные
+        // должны быть опубликованы в TON до пруфа.
+        await publishData(batch2, 2);
         expect(await rollup.getExpectedPublicInput(rootsOf(batch2))).toBe(BigInt(batch2.publicInput));
 
         const second = await submit(batch2);
