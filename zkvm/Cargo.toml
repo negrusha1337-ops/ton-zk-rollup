@@ -1,0 +1,15 @@
+# Программа перехода состояния для zkVM (SP1) и её нативный запуск.
+#   lib      — логика перехода состояния, без зависимостей от SP1
+#   program  — гостевая программа SP1: читает вход, вызывает lib, коммитит публичные значения
+#   native   — запуск той же логики на обычном процессоре: сценарий для тестов контракта
+[workspace]
+members = ["lib", "program", "native"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+sha2 = { version = "0.10", default-features = false }

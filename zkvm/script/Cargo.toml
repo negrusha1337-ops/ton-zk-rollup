@@ -1,0 +1,27 @@
+# Хост-скрипт SP1: исполняет программу в zkVM и строит Groth16-пруф.
+#
+# Намеренно НЕ входит в workspace zkvm/: sp1-sdk тянет большое дерево зависимостей
+# (несколько ГБ при сборке), а остальному проекту он не нужен. Собирать и запускать
+# на машине с запасом диска и памяти — см. PROVING.md.
+[package]
+name = "rollup-script"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+sp1-sdk = { version = "6.10.0", features = ["blocking"] }
+rollup-stf = { path = "../lib" }
+rollup-native = { path = "../native" }
+clap = { version = "4.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+
+[features]
+# Обёртка Groth16 нативным gnark вместо Docker-образа. Нужен установленный Go.
+native-gnark = ["sp1-sdk/native-gnark"]
+
+[build-dependencies]
+sp1-build = "6.10.0"

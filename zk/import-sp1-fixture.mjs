@@ -3,9 +3,13 @@
 // Вход (скачивается вручную, см. fixtures/sp1_v6_fibonacci/source.json):
 //   • Groth16Verifier.sol из succinctlabs/sp1-contracts — оттуда берётся ключ верификации;
 //   • groth16-fixture.json из succinctlabs/sp1-project-template — пруф программы Фибоначчи.
-// Выход: fixtures/sp1_v6_fibonacci/{verification_key,proof,public}.json в раскладке snarkjs.
+// Выход: fixtures/<имя>/{verification_key,proof,public}.json в раскладке snarkjs.
 //
-// Запуск: node zk/import-sp1-fixture.mjs <Groth16Verifier.sol> <SP1VerifierGroth16.sol> <groth16-fixture.json>
+// Запуск: node zk/import-sp1-fixture.mjs <Groth16Verifier.sol> <SP1VerifierGroth16.sol> <groth16-fixture.json> [имя]
+//
+// Без имени пишет fixtures/sp1_v6_fibonacci (пруф шаблона Succinct). С именем — пруф нашей
+// собственной программы из zkvm/script (fixtures/zkvm_batches/proof-batch<N>.json): версия
+// верификатора должна совпадать с версией схемы SDK, иначе не сойдётся selector пруфа.
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -13,12 +17,17 @@ import { fileURLToPath } from 'node:url';
 import { bn254 } from '@noble/curves/bn254.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const OUT = path.join(ROOT, 'fixtures', 'sp1_v6_fibonacci');
-const [verifierPath, wrapperPath, fixturePath] = process.argv.slice(2);
+const TEMPLATE_FIXTURE = 'sp1_v6_fibonacci';
+const [verifierPath, wrapperPath, fixturePath, fixtureName = TEMPLATE_FIXTURE] = process.argv.slice(2);
 if (!verifierPath || !wrapperPath || !fixturePath) {
-    console.error('Нужны три пути: Groth16Verifier.sol, SP1VerifierGroth16.sol, groth16-fixture.json');
+    console.error('Нужны три пути: Groth16Verifier.sol, SP1VerifierGroth16.sol, groth16-fixture.json [имя фикстуры]');
     process.exit(1);
 }
+if (!/^[a-z0-9_]+$/.test(fixtureName)) {
+    console.error(`Недопустимое имя фикстуры: ${fixtureName} (строчные латинские буквы, цифры, подчёркивание)`);
+    process.exit(1);
+}
+const OUT = path.join(ROOT, 'fixtures', fixtureName);
 
 const { Fp, Fp2 } = bn254.fields;
 const p = Fp.ORDER;
@@ -85,6 +94,10 @@ const wrapperConstant = (name) => {
     return match[1].toLowerCase();
 };
 const verifierHash = wrapperConstant('VERIFIER_HASH');
+const versionMatch = /function VERSION\(\)[^{]*\{\s*return "([^"]+)";/.exec(wrapper);
+if (!versionMatch) throw new Error(`В ${path.basename(wrapperPath)} нет VERSION()`);
+const circuitVersion = versionMatch[1];
+const contractsUrl = `https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/${circuitVersion}`;
 const expectedVkRoot = BigInt(wrapperConstant('VK_ROOT'));
 
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
@@ -158,10 +171,16 @@ write('verification_key.json', {
 write('proof.json', { pi_a: g1Json(A), pi_b: g2Json(B), pi_c: g1Json(C), protocol: 'groth16', curve: 'bn128' });
 write('public.json', inputs.map(s));
 write('source.json', {
-    description: 'Настоящий пруф SP1 (программа Фибоначчи, n = 20) и ключ его Groth16-верификатора',
-    verifier: 'https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/v6.0.0/Groth16Verifier.sol',
-    wrapper: 'https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/v6.0.0/SP1VerifierGroth16.sol',
-    proof: 'https://github.com/succinctlabs/sp1-project-template/blob/main/contracts/src/fixtures/groth16-fixture.json',
+    description:
+        fixtureName === TEMPLATE_FIXTURE
+            ? 'Настоящий пруф SP1 (программа Фибоначчи, n = 20) и ключ его Groth16-верификатора'
+            : `Настоящий пруф SP1 нашей программы перехода состояния и ключ Groth16-верификатора ${circuitVersion}`,
+    verifier: `${contractsUrl}/Groth16Verifier.sol`,
+    wrapper: `${contractsUrl}/SP1VerifierGroth16.sol`,
+    proof:
+        fixtureName === TEMPLATE_FIXTURE
+            ? 'https://github.com/succinctlabs/sp1-project-template/blob/main/contracts/src/fixtures/groth16-fixture.json'
+            : path.relative(ROOT, path.resolve(fixturePath)),
     verifierHash,
     programVKey: fixture.vkey,
     publicValues: fixture.publicValues,
@@ -170,6 +189,6 @@ write('source.json', {
     variableInputs: [1, 4],
 });
 console.log(
-    `Пруф SP1 проверен эталонной библиотекой и записан в fixtures/sp1_v6_fibonacci (входов: ${inputs.length}).`,
+    `Пруф SP1 (${circuitVersion}) проверен эталонной библиотекой и записан в fixtures/${fixtureName} (входов: ${inputs.length}).`,
 );
 console.log('Публичные входы:', inputs.map((v) => '0x' + v.toString(16)).join(', '));

@@ -1,0 +1,9 @@
+[package]
+name = "rollup-native"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rollup-stf = { path = "../lib" }
+hex = "0.4"
+serde_json = "1.0"

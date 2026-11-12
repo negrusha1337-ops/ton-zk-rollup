@@ -1,0 +1,24 @@
+{
+  "description": "Локальный запуск программы перехода состояния в SP1 (zkvm/script). Замеры /usr/bin/time -l, один прогон.",
+  "date": "2026-11-12",
+  "machine": "Apple M4, 10 ядер, 16 ГБ памяти, macOS (Darwin 25.3.0)",
+  "sp1Sdk": "6.10.0",
+  "sp1CircuitVersion": "v6.1.0",
+  "programVKey": "0x008435a100bdb26effac3ad7355b89e796d6f06bab443274937938928ce6fbb1",
+  "execute": {
+    "batch1": { "cycles": 32434, "publicValuesMatchNative": true },
+    "batch2": { "cycles": 628133, "publicValuesMatchNative": true }
+  },
+  "compressedProof": {
+    "batch": 1,
+    "builtAndVerified": true,
+    "proveAndVerifySeconds": 75,
+    "wallClockSeconds": 93.75,
+    "maxResidentSetBytes": 5620727808,
+    "peakMemoryFootprintBytes": 19196345272
+  },
+  "groth16Proof": {
+    "built": false,
+    "reason": "Не запускался: архив артефактов схемы 6 211 807 514 байт (внутри groth16_circuit.bin на 2 437 991 441 байт и ключ доказательства), на диске 18 ГБ свободно, памяти 16 ГБ при уже занятой подкачке."
+  }
+}

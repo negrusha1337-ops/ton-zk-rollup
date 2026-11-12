@@ -26,6 +26,11 @@ Groth16 (BLS12-381) в TVM и сколько она стоит. Ответ: ра
   нуллификатор `contracts/rollup_nullifier.tolk`). `submit_batch` с настоящей проверкой —
   946 898 gas. Не реализованы jetton'ы, аварийный выход, управление; DA не решено.
 - `contracts/rollup_mock.tolk` — двойник с заглушкой проверки пруфа, ТОЛЬКО для тестов логики.
+- Программа перехода состояния для zkVM: `zkvm/` (Rust; `lib` — логика, `program` — гость SP1,
+  `native` — запуск без zkVM). Игрушечный реестр, не EVM. Публичные значения сверены с
+  контрактом (`tests/ZkvmProgram.spec.ts`). `zkvm/script` (хост с `sp1-sdk`, вне workspace)
+  исполняет программу в zkVM и строит сжатый STARK-пруф на ноутбуке (75 с). Groth16-пруфа
+  ещё нет: нужна машина с 32+ ГБ памяти и 30+ ГБ диска — см. `PROVING.md`.
 - `contracts/bn254/` — исследовательский код без аудита. Проверки точек есть только в
   `hinted.tolk`; `groth16.tolk` (наивный вариант и вариант со свидетелем) их не делает.
 
@@ -37,6 +42,9 @@ npm run zk:build            # пересобрать схемы, setup и док
 npm run zk:verifiers        # перегенерировать Tolk-верификаторы из fixtures/
 npm run zk:network-config   # обновить снимок цен газа mainnet
 npm run zk:cost-report      # таблица «газ → TON» из измерений
+cd zkvm && cargo test -p rollup-stf && cargo run -p rollup-native   # программа zkVM нативно
+cd zkvm/program && cargo prove build   # сборка под zkVM (нужен SP1: ~/.sp1/bin в PATH)
+cd zkvm/script && PROTOC="$PWD/../../.tools/protoc/bin/protoc" cargo run --release -- --batch 1 --execute
 ```
 
 После `zk:build` обязательно `zk:verifiers`, затем тесты: ключи и доказательства должны быть
@@ -85,5 +93,8 @@ npm run zk:cost-report      # таблица «газ → TON» из измер�
 - Trusted setup в `zk/build.mjs` — одноучастниковый, только для тестов.
 - Цифры газа не выдумывать: только из Sandbox (`bench/gas-results/`) или из конфига сети.
 - Никаких приватных ключей и мнемоник в репозитории. Только Sandbox и testnet.
+- SDK SP1 6.10.0 строит пруфы под схему v6.1.0, а фикстура `sp1_v6_fibonacci` — v6.0.0: ключи
+  верификатора разные. Нонс SP1 (пятый вход) задаёт доказывающий; `zkvm/script` фиксирует 0.
+- `zkvm/script` собирается только с `protoc` (переменная `PROTOC`, бинарник в `.tools/protoc`).
 - Circom ставится локально: `cargo install --git https://github.com/iden3/circom.git --tag v2.2.3 --root .tools circom`
   (или переменная `CIRCOM_BIN`).
