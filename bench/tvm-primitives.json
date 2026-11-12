@@ -1,0 +1,21 @@
+{
+  "source": "Измерено в @ton/sandbox тестом tests/TvmPrimitives.spec.ts; не редактировать вручную",
+  "iterations": 1000,
+  "emptyLoopTotalGas": 23745,
+  "note": "Газ на одну операцию сверх пустого цикла (включая сборку builder и работу со стеком)",
+  "gasPerOperation": {
+    "benchEmptyLoop": 0,
+    "benchSha256Merkle": 168.13,
+    "benchKeccak256Merkle": 172.03,
+    "benchBabyBearMulAdd": 129.03,
+    "benchBabyBearExt4Mul": 1256.63,
+    "benchBn254FpMul": 33.94,
+    "benchBn254FpMulConstModulus": 49.01,
+    "benchBn254FpAdd": 62.14,
+    "benchCallDictionary": 192.25,
+    "benchCallRef": 56.08,
+    "benchPushBigConstant": 67.01,
+    "benchReadGlobal": 69.95,
+    "benchMaskOnly": 51.8
+  }
+}

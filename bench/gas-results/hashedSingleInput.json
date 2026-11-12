@@ -1,0 +1,19 @@
+{
+  "source": "Измерено в @ton/sandbox тестами tests/*.spec.ts; не редактировать вручную",
+  "section": "hashedSingleInput",
+  "rows": [
+    {
+      "circuit": "hash4",
+      "publicInputs": 1,
+      "gasUsed": 103752,
+      "codeCells": 23,
+      "codeBits": 8870,
+      "bodyCells": 6,
+      "bodyBits": 2592,
+      "note": "4 значения по 256 бит хешируются в контракте (HASHEXT_SHA256), схема считает SHA-256"
+    }
+  ],
+  "hashGetterGas": 704,
+  "plainSingleInputGas": 104594,
+  "overheadVsPlainSingleInput": -842
+}

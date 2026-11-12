@@ -1,0 +1,7 @@
+{
+  "circuit": "hash4",
+  "curve": "bls12-381",
+  "constraints": 94817,
+  "publicSignals": 1,
+  "ptauPower": 17
+}

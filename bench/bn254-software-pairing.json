@@ -1,0 +1,30 @@
+{
+  "source": "Измерено в @ton/sandbox тестом tests/Bn254Pairing.spec.ts; не редактировать вручную",
+  "note": "Газ get-методов стенда contracts/bn254_bench.tolk: наивная реализация без подсказок и предвычислений",
+  "gas": {
+    "fp12Mul": 23225,
+    "fp12Sqr": 17821,
+    "fp12Inv": 114883,
+    "fp12Frobenius": 8265,
+    "millerLoop": 2838423,
+    "finalExp": 3429320,
+    "fp12CyclotomicSquare": 14918,
+    "pairing": 6264699,
+    "pairingCheck2": 8115399,
+    "groth16Verify": 12529487,
+    "groth16VerifyWitness": 6514007,
+    "groth16VerifyHinted": 944152,
+    "hintedCasesMin": 832265,
+    "hintedCasesMax": 945855,
+    "linesOnly": 690375,
+    "g1PublicInputCombination": 716007,
+    "sp1_v6_fibonacci:groth16VerifyHinted": 941747,
+    "risc0_v3_test_receipt:groth16VerifyHinted": 946667
+  },
+  "hintedProfile": {
+    "транскрипт, свидетель, vk_x по оконной таблице": 127924,
+    "цикл: 65 тождеств, линии B по наклонам": 732353,
+    "замыкающее тождество и c · c⁻¹": 36713,
+    "частное bigQ": 45374
+  }
+}

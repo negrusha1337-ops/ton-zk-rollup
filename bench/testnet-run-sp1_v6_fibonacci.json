@@ -1,0 +1,24 @@
+{
+  "source": "Прогон в testnet 12.11.2026; данные транзакций взяты с https://testnet.tonapi.io",
+  "network": "testnet",
+  "globalVersion": 17,
+  "gasLimitPerTransaction": 1000000,
+  "gasPriceNanoPerGas": 66.67,
+  "contract": "EQA_7F9q37iRlriq9Z3nR4g6MJpEtOSe0HfTxjCWCyXBnIaA",
+  "fixture": "sp1_v6_fibonacci",
+  "verifyProof": {
+    "transactionHash": "c899d6948bfb57ddf37aa17f25a22c07aefb5f5f846700f005e92dd6eda6acf7",
+    "success": true,
+    "exitCode": 0,
+    "gasUsed": 943702,
+    "gasFeeNano": 62913472,
+    "sandboxGasUsed": 943702
+  },
+  "keyUpload": {
+    "parts": 23,
+    "partsGasUsed": 120781,
+    "finalizeGasUsed": 30050,
+    "totalGasUsed": 150831,
+    "sandboxTotalGasUsed": 150831
+  }
+}

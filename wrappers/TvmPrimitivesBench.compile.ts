@@ -1,0 +1,8 @@
+import { CompilerConfig } from '@ton/blueprint';
+
+export const compile: CompilerConfig = {
+    lang: 'tolk',
+    entrypoint: 'contracts/bench/tvm_primitives.tolk',
+    withStackComments: false,
+    withSrcLineComments: false,
+};

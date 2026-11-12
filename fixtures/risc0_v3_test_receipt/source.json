@@ -1,0 +1,21 @@
+{
+ "description": "Настоящая квитанция RISC Zero (тестовая, из risc0-ethereum) и ключ её Groth16-верификатора",
+ "verifier": "https://github.com/risc0/risc0-ethereum/blob/main/contracts/src/groth16/Groth16Verifier.sol",
+ "controlId": "https://github.com/risc0/risc0-ethereum/blob/main/contracts/src/groth16/ControlID.sol",
+ "receipt": "https://github.com/risc0/risc0-ethereum/blob/main/contracts/test/TestReceiptV3_1.sol",
+ "selector": "0xe71e6620",
+ "imageId": "0xc92414d80cdeb43ba0f4ff4882447c21f18b547d41ffa506a84da164e8e31f7d",
+ "journal": "0x6a75737420612073696d706c652072656365697074",
+ "claimDigest": "0x02e217ec3932749a48182e61b15d5145998f339a496225cc6b4f5c01d29992be",
+ "inputNames": [
+  "controlRoot0",
+  "controlRoot1",
+  "claimDigest0",
+  "claimDigest1",
+  "bn254ControlId"
+ ],
+ "variableInputs": [
+  2,
+  3
+ ]
+}

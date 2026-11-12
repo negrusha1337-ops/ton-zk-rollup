@@ -1,0 +1,7 @@
+{
+  "circuit": "multiplier_bn254",
+  "curve": "bn128",
+  "constraints": 1,
+  "publicSignals": 1,
+  "ptauPower": 8
+}

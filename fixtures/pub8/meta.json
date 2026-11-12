@@ -1,0 +1,7 @@
+{
+  "circuit": "pub8",
+  "curve": "bls12-381",
+  "constraints": 8,
+  "publicSignals": 8,
+  "ptauPower": 8
+}

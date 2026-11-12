@@ -1,0 +1,44 @@
+{
+  "network": "mainnet",
+  "fetchedAt": "2026-11-12T14:53:29.175Z",
+  "source": "https://tonapi.io/v2/blockchain/config",
+  "globalVersion": 17,
+  "masterchain": {
+    "gas": {
+      "configParam": 20,
+      "gasLimit": 1000000,
+      "specialGasLimit": 70000000,
+      "gasCredit": 10000,
+      "blockGasLimit": 2500000,
+      "flatGasLimit": 100,
+      "flatGasPriceNano": 1000000,
+      "gasPriceRaw": 655360000,
+      "gasPriceNanoPerGas": 10000
+    },
+    "forward": {
+      "configParam": 24,
+      "lumpPriceNano": 10000000,
+      "bitPriceNanoPerBit": 10000,
+      "cellPriceNanoPerCell": 1000000
+    }
+  },
+  "basechain": {
+    "gas": {
+      "configParam": 21,
+      "gasLimit": 1000000,
+      "specialGasLimit": 1000000,
+      "gasCredit": 10000,
+      "blockGasLimit": 10000000,
+      "flatGasLimit": 100,
+      "flatGasPriceNano": 6667,
+      "gasPriceRaw": 4369067,
+      "gasPriceNanoPerGas": 66.66667175292969
+    },
+    "forward": {
+      "configParam": 25,
+      "lumpPriceNano": 66667,
+      "bitPriceNanoPerBit": 66.66667175292969,
+      "cellPriceNanoPerCell": 6666.66667175293
+    }
+  }
+}

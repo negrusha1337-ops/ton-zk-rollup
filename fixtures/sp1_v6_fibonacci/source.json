@@ -1,0 +1,20 @@
+{
+ "description": "Настоящий пруф SP1 (программа Фибоначчи, n = 20) и ключ его Groth16-верификатора",
+ "verifier": "https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/v6.0.0/Groth16Verifier.sol",
+ "wrapper": "https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/v6.0.0/SP1VerifierGroth16.sol",
+ "proof": "https://github.com/succinctlabs/sp1-project-template/blob/main/contracts/src/fixtures/groth16-fixture.json",
+ "verifierHash": "0x0e78f4db7a6771a3a6a7d9c3b0de6fe73d58781368967a7fe84d87aefffec896",
+ "programVKey": "0x004a55ed3c7a07d0233a027278a8b7ff8681ffbd5d1ec4795c18966f6e693090",
+ "publicValues": "0x00000000000000000000000000000000000000000000000000000000000000140000000000000000000000000000000000000000000000000000000000001a6d0000000000000000000000000000000000000000000000000000000000002ac2",
+ "inputNames": [
+  "programVKey",
+  "publicValuesDigest",
+  "exitCode",
+  "vkRoot",
+  "nonce"
+ ],
+ "variableInputs": [
+  1,
+  4
+ ]
+}

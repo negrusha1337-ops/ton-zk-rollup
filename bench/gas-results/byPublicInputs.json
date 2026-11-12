@@ -1,0 +1,69 @@
+{
+  "source": "Измерено в @ton/sandbox тестами tests/*.spec.ts; не редактировать вручную",
+  "section": "byPublicInputs",
+  "rows": [
+    {
+      "circuit": "pub1",
+      "publicInputs": 1,
+      "gasUsed": 104594,
+      "codeCells": 21,
+      "codeBits": 9945,
+      "bodyCells": 6,
+      "bodyBits": 1833
+    },
+    {
+      "circuit": "pub2",
+      "publicInputs": 2,
+      "gasUsed": 108536,
+      "codeCells": 24,
+      "codeBits": 10991,
+      "bodyCells": 6,
+      "bodyBits": 2090
+    },
+    {
+      "circuit": "pub4",
+      "publicInputs": 4,
+      "gasUsed": 118312,
+      "codeCells": 27,
+      "codeBits": 12225,
+      "bodyCells": 7,
+      "bodyBits": 2604
+    },
+    {
+      "circuit": "pub8",
+      "publicInputs": 8,
+      "gasUsed": 157137,
+      "codeCells": 36,
+      "codeBits": 16896,
+      "bodyCells": 8,
+      "bodyBits": 3632
+    },
+    {
+      "circuit": "pub16",
+      "publicInputs": 16,
+      "gasUsed": 218983,
+      "codeCells": 42,
+      "codeBits": 20408,
+      "bodyCells": 11,
+      "bodyBits": 5688
+    },
+    {
+      "circuit": "pub32",
+      "publicInputs": 32,
+      "gasUsed": 358129,
+      "codeCells": 55,
+      "codeBits": 28608,
+      "bodyCells": 16,
+      "bodyBits": 9800
+    },
+    {
+      "circuit": "pub64",
+      "publicInputs": 64,
+      "gasUsed": 720853,
+      "codeCells": 78,
+      "codeBits": 42280,
+      "bodyCells": 27,
+      "bodyBits": 18024
+    }
+  ]
+}
