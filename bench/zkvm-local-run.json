@@ -1,13 +1,19 @@
 {
-  "description": "Локальный запуск программы перехода состояния в SP1 (zkvm/script). Замеры /usr/bin/time -l, один прогон.",
+  "description": "Локальный запуск программы перехода состояния в SP1 (zkvm/script). Замеры /usr/bin/time -l, по одному прогону.",
   "date": "2026-11-12",
   "machine": "Apple M4, 10 ядер, 16 ГБ памяти, macOS (Darwin 25.3.0)",
   "sp1Sdk": "6.10.0",
   "sp1CircuitVersion": "v6.1.0",
   "programVKey": "0x008435a100bdb26effac3ad7355b89e796d6f06bab443274937938928ce6fbb1",
   "execute": {
-    "batch1": { "cycles": 32434, "publicValuesMatchNative": true },
-    "batch2": { "cycles": 628133, "publicValuesMatchNative": true }
+    "batch1": {
+      "cycles": 32434,
+      "publicValuesMatchNative": true
+    },
+    "batch2": {
+      "cycles": 628133,
+      "publicValuesMatchNative": true
+    }
   },
   "compressedProof": {
     "batch": 1,
@@ -18,7 +24,36 @@
     "peakMemoryFootprintBytes": 19196345272
   },
   "groth16Proof": {
-    "built": false,
-    "reason": "Не запускался: архив артефактов схемы 6 211 807 514 байт (внутри groth16_circuit.bin на 2 437 991 441 байт и ключ доказательства), на диске 18 ГБ свободно, памяти 16 ГБ при уже занятой подкачке."
+    "backend": "нативный gnark (feature native-gnark, Go 1.27.4), без Docker и без GPU",
+    "circuitArtifactsBytes": {
+      "archive": 6211807514,
+      "unpacked": "около 7,9 ГБ (du)",
+      "provingKey": 5862173061,
+      "circuit": 2437991441
+    },
+    "constraints": 15972262,
+    "nonce": 0,
+    "batch1": {
+      "built": true,
+      "verifiedBySdk": true,
+      "verifiedByReferenceLibrary": true,
+      "wallClockSeconds": 535.15,
+      "gnarkProveSeconds": 165.7,
+      "maxResidentSetBytes": 9444589568,
+      "peakMemoryFootprintBytes": 27480249008,
+      "minFreeDiskGb": 5,
+      "freeDiskAtStartGb": 21
+    },
+    "batch2": {
+      "built": true,
+      "verifiedBySdk": true,
+      "verifiedByReferenceLibrary": true,
+      "wallClockSeconds": 524.22,
+      "gnarkProveSeconds": 151.7,
+      "maxResidentSetBytes": 9530048512,
+      "peakMemoryFootprintBytes": 27733136528,
+      "minFreeDiskGb": 5
+    },
+    "note": "Памяти 16 ГБ при пиковом следе 27 ГБ: система работала на подкачке, свободное место на диске падало с 21 до 5 ГБ. Запуск — через zkvm/script/prove-guarded.sh."
   }
 }

@@ -29,8 +29,10 @@ Groth16 (BLS12-381) в TVM и сколько она стоит. Ответ: ра
 - Программа перехода состояния для zkVM: `zkvm/` (Rust; `lib` — логика, `program` — гость SP1,
   `native` — запуск без zkVM). Игрушечный реестр, не EVM. Публичные значения сверены с
   контрактом (`tests/ZkvmProgram.spec.ts`). `zkvm/script` (хост с `sp1-sdk`, вне workspace)
-  исполняет программу в zkVM и строит сжатый STARK-пруф на ноутбуке (75 с). Groth16-пруфа
-  ещё нет: нужна машина с 32+ ГБ памяти и 30+ ГБ диска — см. `PROVING.md`.
+  исполняет программу в zkVM и строит Groth16-пруф — см. `PROVING.md`.
+- **Настоящие пруфы SP1 нашей программы** (схема v6.1.0) для двух батчей:
+  `fixtures/sp1_rollup_batch{1,2}/`. Rollup-контракт принимает их в Sandbox
+  (`tests/RollupZkvmProof.spec.ts`): 951 091 и 949 425 gas, запас 4,9–5,1%. В testnet не прогонялось.
 - `contracts/bn254/` — исследовательский код без аудита. Проверки точек есть только в
   `hinted.tolk`; `groth16.tolk` (наивный вариант и вариант со свидетелем) их не делает.
 
@@ -96,5 +98,11 @@ cd zkvm/script && PROTOC="$PWD/../../.tools/protoc/bin/protoc" cargo run --relea
 - SDK SP1 6.10.0 строит пруфы под схему v6.1.0, а фикстура `sp1_v6_fibonacci` — v6.0.0: ключи
   верификатора разные. Нонс SP1 (пятый вход) задаёт доказывающий; `zkvm/script` фиксирует 0.
 - `zkvm/script` собирается только с `protoc` (переменная `PROTOC`, бинарник в `.tools/protoc`).
+- Groth16 на ноутбуке с 16 ГБ: пиковый след 27 ГБ, всё держится на подкачке. Запускать только
+  через `zkvm/script/prove-guarded.sh` (сторож диска), при 20+ ГБ свободного места и закрытых
+  программах; сборка — `--features native-gnark` с Go из `.tools/go`.
+- Ключ программы (`programVKey`) зависит от точного ELF и входит в IC0 ключа контракта: после
+  изменения `zkvm/lib` или `zkvm/program` пруфы, ключ и `fixtures/zkvm_batches/program.json`
+  нужно пересоздать вместе.
 - Circom ставится локально: `cargo install --git https://github.com/iden3/circom.git --tag v2.2.3 --root .tools circom`
   (или переменная `CIRCOM_BIN`).

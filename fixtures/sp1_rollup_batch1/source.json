@@ -1,0 +1,20 @@
+{
+ "description": "Настоящий пруф SP1 нашей программы перехода состояния и ключ Groth16-верификатора v6.1.0",
+ "verifier": "https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/v6.1.0/Groth16Verifier.sol",
+ "wrapper": "https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/v6.1.0/SP1VerifierGroth16.sol",
+ "proof": "fixtures/zkvm_batches/proof-batch1.json",
+ "verifierHash": "0x4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696",
+ "programVKey": "0x008435a100bdb26effac3ad7355b89e796d6f06bab443274937938928ce6fbb1",
+ "publicValues": "0xaf5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfcaf5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+ "inputNames": [
+  "programVKey",
+  "publicValuesDigest",
+  "exitCode",
+  "vkRoot",
+  "nonce"
+ ],
+ "variableInputs": [
+  1,
+  4
+ ]
+}
