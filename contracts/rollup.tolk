@@ -33,7 +33,7 @@ fun onInternalMessage(inMsg: InMessage) {
       val batchHash = takeBatchData(mutate state);
       val ok = verifyBn254Proof(
         msg.proof,
-        batchDigest(state, queue, roots, batchHash),
+        batchDigest(storage.chainId, state, queue, roots, batchHash),
         msg.nonce,
         storage.vkData!,
         msg.hints
@@ -88,6 +88,7 @@ get fun expectedPublicInput(newStateRoot: int, withdrawalsRoot: int): int {
   val storage = RollupStorage.load();
   val state = storage.state.load();
   return batchDigest(
+    storage.chainId,
     state,
     state.queue.load(),
     BatchRoots { newStateRoot: newStateRoot, withdrawalsRoot: withdrawalsRoot },
@@ -98,6 +99,11 @@ get fun expectedPublicInput(newStateRoot: int, withdrawalsRoot: int): int {
 /// Накопительный хеш данных, опубликованных для батча с этим номером; 0, если их нет.
 get fun batchDataHash(batchIndex: int): int {
   return batchDataHashOf(RollupStorage.load().state.load().pendingData, batchIndex);
+}
+
+/// Идентификатор rollup'а, под который должны быть построены пруфы и подписаны транзакции.
+get fun chainId(): int {
+  return RollupStorage.load().chainId;
 }
 
 /// Хеш зафиксированного ключа верификации; 0, пока ключ не зафиксирован.

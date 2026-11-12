@@ -45,6 +45,8 @@ export type RollupConfig = {
     sequencer: Address;
     nullifierCode: Cell;
     genesisStateRoot: bigint;
+    /** Идентификатор rollup'а: входит в публичный вход пруфа и в подписи транзакций L2. */
+    chainId: bigint;
 };
 
 export type BatchRoots = { newStateRoot: bigint; withdrawalsRoot: bigint };
@@ -75,6 +77,7 @@ export class Rollup implements Contract {
         const data = beginCell()
             .storeAddress(config.owner)
             .storeAddress(config.sequencer)
+            .storeUint(config.chainId, 64)
             .storeBit(false) // vkData: ещё нет
             .storeBit(false) // keyParts: пустой словарь
             .storeRef(config.nullifierCode)
@@ -93,6 +96,7 @@ export class Rollup implements Contract {
         const slice = data.beginParse();
         slice.loadAddress(); // owner
         slice.loadAddress(); // sequencer
+        slice.loadUint(64); // chainId
         slice.loadMaybeRef(); // vkData
         return slice.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell()).keys();
     }
@@ -229,6 +233,11 @@ export class Rollup implements Contract {
     /** Накопительный хеш данных, опубликованных для батча; 0, если их нет. */
     async getBatchDataHash(provider: ContractProvider, batchIndex: number): Promise<bigint> {
         const { stack } = await provider.get('batchDataHash', [{ type: 'int', value: BigInt(batchIndex) }]);
+        return stack.readBigNumber();
+    }
+
+    async getChainId(provider: ContractProvider): Promise<bigint> {
+        const { stack } = await provider.get('chainId', []);
         return stack.readBigNumber();
     }
 

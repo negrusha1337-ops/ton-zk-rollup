@@ -68,6 +68,7 @@ export async function run(provider: NetworkProvider) {
                 sequencer: owner,
                 nullifierCode: await compile('RollupNullifier'),
                 genesisStateRoot: BigInt(scenario.genesisStateRoot),
+                chainId: BigInt(scenario.chainId),
             },
             await compile('Rollup'),
         ),

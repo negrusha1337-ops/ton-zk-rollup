@@ -17,6 +17,8 @@ export const sha256Int = (...values: bigint[]) =>
     );
 
 export type BatchPublicValues = {
+    /** Идентификатор rollup'а из хранилища контракта. */
+    chainId: bigint;
     prevStateRoot: bigint;
     newStateRoot: bigint;
     batchHash: bigint;
@@ -25,10 +27,11 @@ export type BatchPublicValues = {
     newDepositHash: bigint;
 };
 
-/** Первый публичный вход пруфа батча: sha256 шести значений, обрезанный до 253 бит. */
+/** Первый публичный вход пруфа батча: sha256 семи значений, обрезанный до 253 бит. */
 export function batchDigest(v: BatchPublicValues): bigint {
     return (
         sha256Int(
+            v.chainId,
             v.prevStateRoot,
             v.newStateRoot,
             v.batchHash,

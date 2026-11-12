@@ -78,7 +78,13 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
         user = await blockchain.treasury('user');
         rollup = blockchain.openContract(
             Rollup.createFromConfig(
-                { owner: owner.address, sequencer: sequencer.address, nullifierCode, genesisStateRoot: genesis },
+                {
+                    owner: owner.address,
+                    sequencer: sequencer.address,
+                    nullifierCode,
+                    genesisStateRoot: genesis,
+                    chainId: BigInt(program.chainId),
+                },
                 code,
             ),
         );
@@ -139,6 +145,7 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
             expect(exitCode).toBe(0n);
             expect(nonce).toBe(0n);
         }
+        expect(await rollup.getChainId()).toBe(BigInt(program.chainId));
         expect(BigInt(batch1.output.prevStateRoot)).toBe(genesis);
         expect(await rollup.getExpectedPublicInput(batch1.roots)).toBe(BigInt(batch1.output.publicInput));
     });
@@ -172,6 +179,38 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
         const result = await submit(batch2);
         expect(result.transactions).toHaveTransaction({ to: rollup.address, success: false });
         expect((await rollup.getRollupState()).batchIndex).toBe(0);
+    });
+
+    it("пруф SP1 не подходит rollup'у с другим идентификатором", async () => {
+        // Двойник: тот же код, тот же ключ, тот же генезис — другой chainId. Пруф, построенный
+        // для нашего rollup'а (и транзакции, подписанные под него), у двойника не проходит.
+        const twin = blockchain.openContract(
+            Rollup.createFromConfig(
+                {
+                    owner: owner.address,
+                    sequencer: sequencer.address,
+                    nullifierCode: await compile('RollupNullifier'),
+                    genesisStateRoot: genesis,
+                    chainId: BigInt(program.chainId) + 1n,
+                },
+                await compile('Rollup'),
+            ),
+        );
+        await twin.sendDeploy(owner.getSender(), DEPLOY_VALUE);
+        for (const { slot, part } of Bn254Groth16Verifier.keyParts(key)) {
+            await twin.sendUploadKeyPart(owner.getSender(), { slot, part, value: KEY_PART_VALUE });
+        }
+        await twin.sendFinalizeKey(owner.getSender(), { key, value: KEY_FINALIZE_VALUE });
+        expect(await twin.getKeyHash()).toBe(await rollup.getKeyHash());
+
+        const result = await twin.sendSubmitBatch(sequencer.getSender(), {
+            proof: batch1.proof,
+            hints: Cell.fromBase64(batch1.hinted.hintsBoc),
+            roots: batch1.roots,
+            value: SUBMIT_BATCH_VALUE,
+        });
+        expect(result.transactions).toHaveTransaction({ to: twin.address, success: false });
+        expect((await twin.getRollupState()).batchIndex).toBe(0);
     });
 
     it('батч не принимается, пока его данные не опубликованы в TON', async () => {

@@ -33,24 +33,28 @@ const WITHDRAWAL_TREE_DEPTH: int = 32
 const DIGEST_MASK_253: int = (1 << 253) - 1
 
 @pure fun sha256OfBuilder(b: builder, count: int): uint256 asm "HASHEXT_SHA256"
-@pure fun sha256OfTwo(first: builder, second: builder, count: int): uint256 asm "HASHEXT_SHA256"
+@pure fun sha256OfThree(first: builder, second: builder, third: builder, count: int): uint256 asm "HASHEXT_SHA256"
 
-/// Первый публичный вход пруфа: sha256 от шести 32-байтовых значений, обрезанный до
+/// Первый публичный вход пруфа: sha256 от семи 32-байтовых значений, обрезанный до
 /// 253 бит. Порядок значений — часть протокола; программа для zkVM обязана
 /// коммитить их так же:
-///   prevStateRoot ‖ newStateRoot ‖ batchHash ‖ withdrawalsRoot ‖ prevDepositHash ‖ newDepositHash
+///   chainId ‖ prevStateRoot ‖ newStateRoot ‖ batchHash ‖ withdrawalsRoot ‖ prevDepositHash ‖ newDepositHash
 ///
-/// batchHash — накопительный хеш данных батча, опубликованных в TON (см. takeBatchData).
-fun batchDigest(state: RollupState, queue: DepositQueue, roots: BatchRoots, batchHash: int): int {
+/// chainId — идентификатор этого rollup'а из хранилища; batchHash — накопительный хеш
+/// данных батча, опубликованных в TON (см. takeBatchData). Из сообщения берутся только
+/// два значения: новый корень состояния и корень выводов.
+fun batchDigest(chainId: int, state: RollupState, queue: DepositQueue, roots: BatchRoots, batchHash: int): int {
+  // Четыре 256-битных значения не помещаются в одну ячейку, поэтому строителей три.
   val first = beginCell()
+    .storeUint(chainId, 256)
     .storeUint(state.stateRoot, 256)
-    .storeUint(roots.newStateRoot, 256)
-    .storeUint(batchHash, 256);
+    .storeUint(roots.newStateRoot, 256);
   val second = beginCell()
+    .storeUint(batchHash, 256)
     .storeUint(roots.withdrawalsRoot, 256)
-    .storeUint(queue.processedHash, 256)
-    .storeUint(queue.targetHash, 256);
-  return sha256OfTwo(first, second, 2) & DIGEST_MASK_253;
+    .storeUint(queue.processedHash, 256);
+  val third = beginCell().storeUint(queue.targetHash, 256);
+  return sha256OfThree(first, second, third, 3) & DIGEST_MASK_253;
 }
 
 /// Шаг накопительного хеша данных батча: sha256(предыдущий ‖ хеш ячейки с порцией).

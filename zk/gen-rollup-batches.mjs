@@ -70,11 +70,20 @@ const chunkBytes = (text, length) => {
 };
 
 const batchDigest = (v) =>
-    sha256Int(v.prevStateRoot, v.newStateRoot, v.batchHash, v.withdrawalsRoot, v.prevDepositHash, v.newDepositHash) &
-    MASK_253;
+    sha256Int(
+        CHAIN_ID,
+        v.prevStateRoot,
+        v.newStateRoot,
+        v.batchHash,
+        v.withdrawalsRoot,
+        v.prevDepositHash,
+        v.newDepositHash,
+    ) & MASK_253;
 
 // --- сценарий ---
 const TON = 1_000_000_000n;
+// Идентификатор rollup'а этого сценария: тест развёртывает контракт с ним же.
+const CHAIN_ID = 20261113n;
 const genesisStateRoot = label('stage1:genesis');
 const deposit = { l2Recipient: label('stage1:l2-recipient') >> 96n, value: 1n * TON, fee: TON / 100n };
 const depositAmount = deposit.value - deposit.fee;
@@ -161,6 +170,7 @@ writeFileSync(
     JSON.stringify({
         source: 'Сгенерировано zk/gen-rollup-batches.mjs; не редактировать вручную',
         note: 'Пруфы игрушечной схемы Multiplier: публичный вход равен дайджесту батча, переход состояния НЕ доказывается',
+        chainId: s(CHAIN_ID),
         genesisStateRoot: s(genesisStateRoot),
         deposit: {
             l2Recipient: s(deposit.l2Recipient),

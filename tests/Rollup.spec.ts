@@ -23,6 +23,7 @@ import {
 // пруфа заменена заглушкой «первое число пруфа равно 1». Настоящая проверка —
 // в tests/RollupProof.spec.ts.
 const GENESIS_ROOT = sha256Int(1n);
+const CHAIN_ID = 4242n;
 const DEPOSIT_FEE = toNano('0.01');
 const mockProof = (valid: boolean): Bn254Proof => ({
     a: [valid ? 1n : 2n, 0n],
@@ -71,7 +72,13 @@ describe('Rollup: логика на тестовом двойнике', () => {
         user = await blockchain.treasury('user');
         rollup = blockchain.openContract(
             Rollup.createFromConfig(
-                { owner: owner.address, sequencer: sequencer.address, nullifierCode, genesisStateRoot: GENESIS_ROOT },
+                {
+                    owner: owner.address,
+                    sequencer: sequencer.address,
+                    nullifierCode,
+                    genesisStateRoot: GENESIS_ROOT,
+                    chainId: CHAIN_ID,
+                },
                 code,
             ),
         );
@@ -155,6 +162,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
             const before = await rollup.getExpectedPublicInput(roots1);
             expect(before).toBe(
                 batchDigest({
+                    chainId: CHAIN_ID,
                     prevStateRoot: GENESIS_ROOT,
                     ...roots1,
                     batchHash: 0n,
@@ -169,6 +177,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
             expect(after).not.toBe(before);
             expect(after).toBe(
                 batchDigest({
+                    chainId: CHAIN_ID,
                     prevStateRoot: roots1.newStateRoot,
                     ...roots1,
                     batchHash: 0n,
@@ -187,6 +196,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
             // поэтому этот батч его ещё не обрабатывает.
             expect(await rollup.getExpectedPublicInput(roots1)).toBe(
                 batchDigest({
+                    chainId: CHAIN_ID,
                     prevStateRoot: GENESIS_ROOT,
                     ...roots1,
                     batchHash: 0n,
@@ -203,6 +213,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
             const roots2 = { newStateRoot: sha256Int(4n), withdrawalsRoot: 0n };
             expect(await rollup.getExpectedPublicInput(roots2)).toBe(
                 batchDigest({
+                    chainId: CHAIN_ID,
                     prevStateRoot: roots1.newStateRoot,
                     ...roots2,
                     batchHash: 0n,
@@ -227,6 +238,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
             rollup.sendPublishData(from.getSender(), { batchIndex, data, value: toNano('0.05') });
         const digestWith = (batchHash: bigint) =>
             batchDigest({
+                chainId: CHAIN_ID,
                 prevStateRoot: GENESIS_ROOT,
                 ...roots1,
                 batchHash,
@@ -277,6 +289,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
             const roots2 = { newStateRoot: sha256Int(4n), withdrawalsRoot: 0n };
             expect(await rollup.getExpectedPublicInput(roots2)).toBe(
                 batchDigest({
+                    chainId: CHAIN_ID,
                     prevStateRoot: roots1.newStateRoot,
                     ...roots2,
                     batchHash: batchDataHash([chunkB, chunkC]),

@@ -63,6 +63,7 @@ describe('Программа zkVM и rollup-контракт согласова�
                     sequencer: sequencer.address,
                     nullifierCode: await compile('RollupNullifier'),
                     genesisStateRoot: BigInt(program.genesisStateRoot),
+                    chainId: BigInt(program.chainId),
                 },
                 await compile('RollupMock'),
             ),
@@ -73,11 +74,12 @@ describe('Программа zkVM и rollup-контракт согласова�
     it('дайджест публичных значений считается так же, как в верификаторе SP1', () => {
         for (const batch of program.batches) {
             const bytes = Buffer.from(batch.publicValuesHex, 'hex');
-            expect(bytes).toHaveLength(192);
+            expect(bytes).toHaveLength(224);
             const digest = BigInt('0x' + createHash('sha256').update(bytes).digest('hex')) & MASK_253;
             expect(digest).toBe(BigInt(batch.publicInput));
             expect(digest).toBe(
                 batchDigest({
+                    chainId: BigInt(program.chainId),
                     prevStateRoot: BigInt(batch.prevStateRoot),
                     ...rootsOf(batch),
                     batchHash: BigInt(batch.roots.batchHash),

@@ -30,6 +30,7 @@ type BatchFixture = {
 };
 const read = (...parts: string[]) => JSON.parse(readFileSync(path.join(__dirname, '..', 'fixtures', ...parts), 'utf8'));
 const scenario = read('rollup_batches', 'batches.json') as {
+    chainId: string;
     genesisStateRoot: string;
     deposit: { l2Recipient: string; value: string; amount: string; hashAfter: string };
     withdrawal: { leafIndex: number; recipientHash: string; amount: string; siblings: string[]; root: string };
@@ -60,6 +61,7 @@ const dataOf = (batch: BatchFixture) => batch.dataChunksHex.map((hex) => dataChu
 // не доказывают (см. zk/gen-rollup-batches.mjs).
 describe('Rollup: настоящая проверка пруфа', () => {
     const genesis = BigInt(scenario.genesisStateRoot);
+    const chainId = BigInt(scenario.chainId);
     const [batch1, batch2] = scenario.batches;
     const key = keyUploadFromJson(keyFixture.keyUpload);
     const gas: Record<string, number> = {};
@@ -104,7 +106,13 @@ describe('Rollup: настоящая проверка пруфа', () => {
         user = await blockchain.treasury('user');
         rollup = blockchain.openContract(
             Rollup.createFromConfig(
-                { owner: owner.address, sequencer: sequencer.address, nullifierCode, genesisStateRoot: genesis },
+                {
+                    owner: owner.address,
+                    sequencer: sequencer.address,
+                    nullifierCode,
+                    genesisStateRoot: genesis,
+                    chainId,
+                },
                 code,
             ),
         );
@@ -149,6 +157,7 @@ describe('Rollup: настоящая проверка пруфа', () => {
         expect(await rollup.getExpectedPublicInput(rootsOf(batch1))).toBe(BigInt(batch1.publicInput));
         expect(BigInt(batch1.publicInput)).toBe(
             batchDigest({
+                chainId,
                 prevStateRoot: genesis,
                 ...rootsOf(batch1),
                 batchHash: 0n,
@@ -277,6 +286,40 @@ describe('Rollup: настоящая проверка пруфа', () => {
         expect((await blockchain.getContract(recipient)).balance).toBe(amount);
     });
 
+    it("пруф одного rollup'а не подходит другому с тем же ключом и тем же состоянием", async () => {
+        // Двойник отличается только идентификатором: тот же код, тот же ключ, тот же генезис.
+        const twin = blockchain.openContract(
+            Rollup.createFromConfig(
+                {
+                    owner: owner.address,
+                    sequencer: sequencer.address,
+                    nullifierCode: await compile('RollupNullifier'),
+                    genesisStateRoot: genesis,
+                    chainId: chainId + 1n,
+                },
+                await compile('Rollup'),
+            ),
+        );
+        await twin.sendDeploy(owner.getSender(), toNano('5'));
+        for (const { slot, part } of Bn254Groth16Verifier.keyParts(key)) {
+            await twin.sendUploadKeyPart(owner.getSender(), { slot, part, value: toNano('0.1') });
+        }
+        await twin.sendFinalizeKey(owner.getSender(), { key, value: toNano('0.1') });
+        expect(await twin.getKeyHash()).toBe(await rollup.getKeyHash());
+        expect(await twin.getChainId()).toBe(chainId + 1n);
+
+        // Настоящий пруф батча 1 нашего rollup'а: у себя принимается, у двойника — нет.
+        const result = await twin.sendSubmitBatch(sequencer.getSender(), {
+            proof: proofOf(batch1),
+            hints: Cell.fromBase64(batch1.hintsBoc),
+            roots: rootsOf(batch1),
+            value: toNano('0.3'),
+        });
+        expect(result.transactions).toHaveTransaction({ to: twin.address, success: false });
+        expect((await twin.getRollupState()).batchIndex).toBe(0);
+        expect((await submit(batch1)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+    });
+
     it('до фиксации ключа батчи не принимаются', async () => {
         const fresh = blockchain.openContract(
             Rollup.createFromConfig(
@@ -285,6 +328,7 @@ describe('Rollup: настоящая проверка пруфа', () => {
                     sequencer: sequencer.address,
                     nullifierCode: await compile('RollupNullifier'),
                     genesisStateRoot: genesis + 1n,
+                    chainId,
                 },
                 await compile('Rollup'),
             ),

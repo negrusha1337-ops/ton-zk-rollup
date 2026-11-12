@@ -15,7 +15,7 @@ const read = (...parts: string[]) => JSON.parse(readFileSync(path.join(FIXTURES,
 export type BatchOutput = {
     /** Порции данных батча в порядке публикации (hex). */
     dataChunksHex: string[];
-    /** 192 байта публичных значений программы (hex). */
+    /** 224 байта публичных значений программы (hex). */
     publicValuesHex: string;
     publicInput: string;
     prevStateRoot: string;
@@ -25,6 +25,8 @@ export type BatchOutput = {
 };
 
 export type ZkvmScenario = {
+    /** Идентификатор rollup'а, под который построены пруфы и подписаны транзакции. */
+    chainId: string;
     genesisStateRoot: string;
     deposit: { l2Recipient: string; value: string; amount: string };
     withdrawal: { leafIndex: number; recipientHash: string; amount: string };

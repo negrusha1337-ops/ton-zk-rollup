@@ -5,7 +5,7 @@
 //!   cargo run -p rollup-native            (из каталога zkvm/)
 use std::{fs, path::PathBuf};
 
-use rollup_native::{Scenario, DEPOSIT_VALUE};
+use rollup_native::{Scenario, CHAIN_ID, DEPOSIT_VALUE};
 use rollup_stf::{apply_batch, data_chunk_hash, BatchInput, PublicValues};
 use serde_json::{json, Value};
 
@@ -69,7 +69,8 @@ fn main() {
 
     let output = json!({
         "source": "Сгенерировано нативным запуском zkvm/native (cargo run -p rollup-native); не редактировать вручную",
-        "note": "Публичные значения программы перехода состояния. Пруфа здесь нет: это сверка формата с контрактом",
+        "note": "Публичные значения программы перехода состояния (7 слов, первое — chainId). Пруфа здесь нет: это сверка формата с контрактом",
+        "chainId": CHAIN_ID.to_string(),
         "genesisStateRoot": decimal(&values1.prev_state_root),
         "deposit": {
             "l2Recipient": decimal(&scenario.deposit.l2_recipient),
@@ -84,6 +85,7 @@ fn main() {
         "finalBalances": accounts2.iter().map(|account| json!({
             "address": hex::encode(account.address),
             "balance": account.balance.to_string(),
+            "nonce": account.nonce,
         })).collect::<Vec<_>>(),
         "batches": [describe(&values1, &input1), describe(&values2, &input2)],
         "chunkHashVectors": {

@@ -101,6 +101,10 @@ fn main() {
         println!("Циклов zkVM: {}", report.total_instruction_count());
         println!("Данных батча: {} байт в {} порциях", data_bytes, input.data_chunks.len());
         println!("Циклов на хеш данных (привязка к TON): {data_hash_cycles}");
+        println!(
+            "Циклов на переход состояния (разбор, подписи, балансы): {}",
+            report.cycle_tracker.get("state-transition").copied().unwrap_or(0)
+        );
         return;
     }
 

@@ -1,25 +1,91 @@
 {
-  "description": "Цена привязки к данным, опубликованным в TON, внутри zkVM: исполнение (--execute) программы zkvm/program в SP1 6.10.0, счётчик cycle-tracker «data-hash». Один прогон на строку.",
+  "description": "Цена данных и подписей внутри zkVM: исполнение (--execute) программы zkvm/program в SP1 6.10.0, счётчики cycle-tracker. Один прогон на строку.",
   "date": "2026-11-12",
   "what": "data-hash — хеш дерева ячеек TON по каждой порции и накопительный хеш порций (zkvm/lib, batch_data_hash). Нагрузочный батч — переводы по 57 байт, порции до 60 000 байт.",
   "softwareSha256": {
-    "note": "Обычный крейт sha2 0.10.9: SHA-256 исполняется как программный код RISC-V",
-    "batch2": { "dataBytes": 126, "totalCycles": 640343, "dataHashCycles": 22812 },
-    "transfers200": { "dataBytes": 11400, "totalCycles": 2428317, "dataHashCycles": 1354155 },
-    "transfers1000": { "dataBytes": 57000, "totalCycles": 9655882, "dataHashCycles": 6750686 },
-    "transfers2000": { "dataBytes": 114000, "totalCycles": 18728110, "dataHashCycles": 13509375 }
+    "note": "Обычный крейт sha2 0.10.9: SHA-256 исполняется как программный код RISC-V. Замер первой версии программы: транзакции без подписей, 57 байт на перевод",
+    "batch2": {
+      "dataBytes": 126,
+      "totalCycles": 640343,
+      "dataHashCycles": 22812
+    },
+    "transfers200": {
+      "dataBytes": 11400,
+      "totalCycles": 2428317,
+      "dataHashCycles": 1354155
+    },
+    "transfers1000": {
+      "dataBytes": 57000,
+      "totalCycles": 9655882,
+      "dataHashCycles": 6750686
+    },
+    "transfers2000": {
+      "dataBytes": 114000,
+      "totalCycles": 18728110,
+      "dataHashCycles": 13509375
+    }
   },
   "precompileSha256": {
-    "note": "Крейт sha2 из sp1-patches (тег patch-sha2-0.10.9-sp1-6.10.0): сжатие SHA-256 — системный вызов SP1. Циклы не учитывают собственную цену доказательства прекомпиляции.",
-    "batch1": { "dataBytes": 0, "totalCycles": null },
-    "batch2": { "dataBytes": 126, "totalCycles": 130911, "dataHashCycles": 5224 },
-    "transfers200": { "dataBytes": 11400, "totalCycles": 833497, "dataHashCycles": 247641 },
-    "transfers1000": { "dataBytes": 57000, "totalCycles": 3645824, "dataHashCycles": 1228934 },
-    "transfers2000": { "dataBytes": 114000, "totalCycles": 7189326, "dataHashCycles": 2458897 }
+    "note": "Крейт sha2 из sp1-patches (тег patch-sha2-0.10.9-sp1-6.10.0): сжатие SHA-256 — системный вызов SP1. Циклы не учитывают собственную цену доказательства прекомпиляции. Замер версии без подписей, 57 байт на перевод.",
+    "batch1": {
+      "dataBytes": 0,
+      "totalCycles": null
+    },
+    "batch2": {
+      "dataBytes": 126,
+      "totalCycles": 130911,
+      "dataHashCycles": 5224
+    },
+    "transfers200": {
+      "dataBytes": 11400,
+      "totalCycles": 833497,
+      "dataHashCycles": 247641
+    },
+    "transfers1000": {
+      "dataBytes": 57000,
+      "totalCycles": 3645824,
+      "dataHashCycles": 1228934
+    },
+    "transfers2000": {
+      "dataBytes": 114000,
+      "totalCycles": 7189326,
+      "dataHashCycles": 2458897
+    }
   },
   "perByte": {
     "softwareSha256DataHashCyclesPerByte": 118.4,
     "precompileSha256DataHashCyclesPerByte": 21.6,
     "basis": "transfers1000: dataHashCycles / dataBytes"
+  },
+  "signedTransactions": {
+    "date": "2026-11-13",
+    "note": "Нынешняя программа: каждая транзакция подписана (secp256k1, отправитель восстанавливается из подписи), 110 байт на перевод. Крейты sha2, sha3 и k256 — из sp1-patches с прекомпиляциями; циклы не включают собственную цену доказательства прекомпиляций.",
+    "batch1": {
+      "dataBytes": 0,
+      "totalCycles": 8650,
+      "dataHashCycles": 532,
+      "stateTransitionCycles": 3156
+    },
+    "batch2": {
+      "dataBytes": 232,
+      "transactions": 2,
+      "totalCycles": 212317,
+      "dataHashCycles": 7434,
+      "stateTransitionCycles": 194302
+    },
+    "transfers100": {
+      "dataBytes": 11000,
+      "totalCycles": 4469828,
+      "dataHashCycles": 240000,
+      "stateTransitionCycles": 4055402
+    },
+    "transfers500": {
+      "dataBytes": 55000,
+      "totalCycles": 21812009,
+      "dataHashCycles": 1187184,
+      "stateTransitionCycles": 19790399
+    },
+    "stateTransitionCyclesPerSignedTransfer": 39337,
+    "basis": "(transfers500 − transfers100) / 400 переводов"
   }
 }

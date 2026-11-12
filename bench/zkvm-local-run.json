@@ -80,5 +80,27 @@
       },
       "note": "Параллельно на машине шли посторонние тесты; свободное место доходило до порога сторожа (4 ГБ), подкачка — до 17 ГБ."
     }
+  },
+  "reproveSigned": {
+    "date": "2026-11-13",
+    "program": "с подписями транзакций (secp256k1), nonce счетов и идентификатором rollup'а; 7 слов публичных значений",
+    "programVKey": "0x0083d39d600c4fc58d1d2a6542614bd0241944e66c3ea235dc759b47461eaf58",
+    "executeCycles": {
+      "batch1": 8650,
+      "batch2": 212317
+    },
+    "groth16": {
+      "batch1": {
+        "wallClockSeconds": 854.24,
+        "minFreeDiskGb": 6,
+        "freeDiskAtStartGb": 19
+      },
+      "batch2": {
+        "wallClockSeconds": 990.76,
+        "peakMemoryFootprintBytes": 27590824960,
+        "minFreeDiskGb": 5,
+        "freeDiskAtStartGb": 7
+      }
+    }
   }
 }
