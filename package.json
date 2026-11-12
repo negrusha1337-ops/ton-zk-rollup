@@ -13,7 +13,8 @@
         "zk:bn254-constants": "node zk/gen-bn254-constants.mjs",
         "zk:bn254-vectors": "node zk/gen-bn254-vectors.mjs",
         "zk:bn254-hints": "node zk/gen-bn254-groth16-fixture.mjs multiplier_bn254 && node zk/gen-bn254-groth16-fixture.mjs sp1_v6_fibonacci && node zk/gen-bn254-groth16-fixture.mjs risc0_v3_test_receipt",
-        "zk:bn254-cases": "node zk/gen-bn254-cases.mjs"
+        "zk:bn254-cases": "node zk/gen-bn254-cases.mjs",
+        "zk:rollup-batches": "node zk/gen-rollup-batches.mjs"
     },
     "dependencies": {
         "@ton/core": "~0"

@@ -22,7 +22,10 @@ Groth16 (BLS12-381) в TVM и сколько она стоит. Ответ: ра
   запас до лимита 5%. Разбор корректности агентом-рецензентом критичного не нашёл; аудита нет. Прогон в testnet выполнен 12.11.2026: пруф SP1 принят,
   расход 943 702 gas — ровно как в Sandbox (`bench/testnet-run-sp1_v6_fibonacci.json`).
 - Стандартный путь (обёртка в схеме) уже есть прототипом у IOG для Cardano.
-- `contracts/rollup_skeleton.tolk` — **скелет без логики**, только типы. Не деплоить.
+- Rollup-контракт, минимальная версия: `contracts/rollup.tolk` (логика в `contracts/rollup/`,
+  нуллификатор `contracts/rollup_nullifier.tolk`). `submit_batch` с настоящей проверкой —
+  946 898 gas. Не реализованы jetton'ы, аварийный выход, управление; DA не решено.
+- `contracts/rollup_mock.tolk` — двойник с заглушкой проверки пруфа, ТОЛЬКО для тестов логики.
 - `contracts/bn254/` — исследовательский код без аудита. Проверки точек есть только в
   `hinted.tolk`; `groth16.tolk` (наивный вариант и вариант со свидетелем) их не делает.
 
@@ -46,7 +49,9 @@ npm run zk:cost-report      # таблица «газ → TON» из измер�
 - `fixtures/<схема>/` — ключ верификации, доказательство, публичные сигналы. Коммитятся.
 - `contracts/generated/` — вывод `export-ton-verifier`. **Руками не править.**
 - `contracts/hashed_inputs_verifier.tolk` — вариант с одним публичным входом (SHA-256).
-- `contracts/rollup/` — черновик типов rollup-контракта (см. `ARCHITECTURE.md`).
+- `contracts/rollup/` — хранилище, сообщения и логика rollup-контракта (см. `ARCHITECTURE.md`);
+  `wrappers/rollupMath.ts` и `zk/gen-rollup-batches.mjs` повторяют его арифметику вне цепочки —
+  все три обязаны совпадать.
 - `contracts/bn254/` — программное спаривание BN254; `constants.tolk` генерируется
   `node zk/gen-bn254-constants.mjs`, эталонные векторы — `node zk/gen-bn254-vectors.mjs`,
   константы ключа, свидетель и подсказки — `node zk/gen-bn254-groth16-fixture.mjs [имя фикстуры]`;

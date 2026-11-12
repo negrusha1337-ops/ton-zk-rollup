@@ -1,0 +1,10 @@
+{
+  "source": "Измерено в @ton/sandbox тестом tests/RollupProof.spec.ts; не редактировать вручную",
+  "note": "Газ транзакций rollup-контракта с настоящей проверкой пруфа BN254 (один переменный публичный вход)",
+  "gasLimit": 1000000,
+  "submitBatch": 946898,
+  "submitBatchHeadroom": 53102,
+  "deposit": 4440,
+  "submitBatchWithDeposit": 948635,
+  "withdraw": 21197
+}

@@ -77,7 +77,8 @@ export function buildVerificationKeyData(key, inputs, variableInputs) {
     const alphaBetaCell = fpChain(flat12(alphaBeta));
     const fixedLinesCell = fpChainAligned(lineValues);
     const table0 = windowTable(key.ic[firstIndex + 1]);
-    const table1 = secondIndex === undefined ? { root: assembleTable([]), parts: [] } : windowTable(key.ic[secondIndex + 1]);
+    const table1 =
+        secondIndex === undefined ? { root: assembleTable([]), parts: [] } : windowTable(key.ic[secondIndex + 1]);
     const vkData = ton
         .beginCell()
         .storeUint(affine(ic0Folded).x, 254)

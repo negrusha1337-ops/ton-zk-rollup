@@ -47,7 +47,11 @@ const bip39Key = (() => {
     const seed = pbkdf2Sync(words.join(' ').normalize('NFKD'), 'mnemonic', 2048, 64, 'sha512');
     let node = createHmac('sha512', 'ed25519 seed').update(seed).digest();
     for (const index of [44, 607, 0]) {
-        const data = Buffer.concat([Buffer.from([0]), node.subarray(0, 32), Buffer.from([0x80 | (index >>> 24), (index >>> 16) & 0xff, (index >>> 8) & 0xff, index & 0xff])]);
+        const data = Buffer.concat([
+            Buffer.from([0]),
+            node.subarray(0, 32),
+            Buffer.from([0x80 | (index >>> 24), (index >>> 16) & 0xff, (index >>> 8) & 0xff, index & 0xff]),
+        ]);
         node = createHmac('sha512', node.subarray(32)).update(data).digest();
     }
     return keyPairFromSeed(node.subarray(0, 32));
@@ -58,7 +62,12 @@ const schemes = [
 ];
 
 const variants = schemes.flatMap(({ scheme, usable, publicKey }) => [
-    { label: `v4R2, ${scheme}`, usable, env: ['WALLET_VERSION=v4'], wallet: WalletContractV4.create({ workchain: 0, publicKey }) },
+    {
+        label: `v4R2, ${scheme}`,
+        usable,
+        env: ['WALLET_VERSION=v4'],
+        wallet: WalletContractV4.create({ workchain: 0, publicKey }),
+    },
     {
         label: `W5 (v5r1), адрес тестовой сети, ${scheme}`,
         usable,
@@ -91,7 +100,9 @@ for (const variant of variants) {
 }
 
 if (!target) {
-    console.log('\nУкажите адрес, отправленный крану, чтобы скрипт подобрал настройки: node zk/which-wallet.mjs <адрес>');
+    console.log(
+        '\nУкажите адрес, отправленный крану, чтобы скрипт подобрал настройки: node zk/which-wallet.mjs <адрес>',
+    );
 } else {
     const match = variants.find((variant) => variant.wallet.address.equals(target));
     if (match && match.usable) {

@@ -259,7 +259,12 @@ export function assembleTable(parts) {
     if (parts.length > 16) throw new Error('assembleTable: больше 16 частей не помещается в двухуровневый корень');
     const level1 = [];
     for (let i = 0; i < parts.length; i += 4) {
-        level1.push(parts.slice(i, i + 4).reduce((builder, part) => builder.storeRef(part), beginCell()).endCell());
+        level1.push(
+            parts
+                .slice(i, i + 4)
+                .reduce((builder, part) => builder.storeRef(part), beginCell())
+                .endCell(),
+        );
     }
     return level1.reduce((builder, node) => builder.storeRef(node), beginCell()).endCell();
 }
