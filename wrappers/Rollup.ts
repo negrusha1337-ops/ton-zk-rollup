@@ -126,6 +126,17 @@ export class Rollup implements Contract {
         return keys.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell()).keys();
     }
 
+    /**
+     * Задан ли ключ программы выхода — по ячейке данных контракта. До фиксации основного
+     * ключа get-метод exitKeyHash возвращает 0, поэтому скрипту развёртывания нужен этот разбор.
+     */
+    static isExitKeySet(data: Cell): boolean {
+        const keys = data.beginParse().loadRef().beginParse(); // RollupKeys
+        keys.loadMaybeRef(); // vkData
+        keys.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell()); // keyParts
+        return keys.loadUintBig(254) !== 0n || keys.loadUintBig(254) !== 0n;
+    }
+
     private async send(provider: ContractProvider, via: Sender, value: bigint, body: Cell) {
         await provider.internal(via, { value, sendMode: SendMode.PAY_GAS_SEPARATELY, body });
     }

@@ -25,3 +25,9 @@ export const WITHDRAW_VALUE = toNano('0.12');
 export const ESCAPE_TIMEOUT_SECONDS = 7 * 24 * 3600;
 /** Аварийный выход: газ проверки пруфа плюс цепочка через нуллификатор; контракт требует не меньше 0,2 TON. */
 export const FORCE_EXIT_VALUE = toNano('0.2');
+/** Срок аварийного выхода для стенда в testnet: короткий, чтобы прогон не ждал неделю. */
+export const TESTNET_ESCAPE_TIMEOUT_SECONDS = 180;
+/** Заморозка и возврат депозита: несколько тысяч gas. */
+export const ESCAPE_SERVICE_VALUE = toNano('0.05');
+/** Депозит, который в прогоне testnet остаётся необработанным и запускает срок заморозки. */
+export const LATE_DEPOSIT_VALUE = toNano('0.06');

@@ -5,17 +5,22 @@ import { Rollup } from '../wrappers/Rollup';
 import { batchDataHash, dataHashStep, depositHash, merkleProofCell, withdrawalTree } from '../wrappers/rollupMath';
 import {
     DEPLOY_VALUE,
+    ESCAPE_SERVICE_VALUE,
+    FORCE_EXIT_VALUE,
     KEY_FINALIZE_VALUE,
     KEY_PART_VALUE,
+    LATE_DEPOSIT_VALUE,
     PUBLISH_DATA_VALUE,
     SUBMIT_BATCH_VALUE,
     WITHDRAW_VALUE,
-    ESCAPE_TIMEOUT_SECONDS,
+    TESTNET_ESCAPE_TIMEOUT_SECONDS,
 } from '../wrappers/rollupValues';
-import { loadProvenBatch, loadProvenExit, loadZkvmScenario, ProvenBatch } from '../wrappers/zkvmProofs';
+import { loadProvenBatch, loadProvenExit, loadZkvmScenario, ProvenBatch, ProvenExit } from '../wrappers/zkvmProofs';
 
 // Полный путь rollup-контракта в testnet на настоящих пруфах SP1:
-// развёртывание → ключ частями → депозит → батч 1 → данные батча 2 → батч 2 → вывод.
+// развёртывание → ключ частями → депозит → батч 1 → данные батча 2 → батч 2 → вывод,
+// затем аварийный путь: поздний депозит → срок → заморозка → выход обоих счетов L2 по
+// пруфам программы выхода → возврат необработанного депозита.
 //
 //   npx blueprint run runRollupTestnet --testnet --mnemonic
 //
@@ -57,7 +62,8 @@ export async function run(provider: NetworkProvider) {
     const scenario = loadZkvmScenario();
     const batches = [loadProvenBatch(1), loadProvenBatch(2)];
     const key = keyUploadFromJson(batches[0].hinted.keyUpload);
-    const exitKeyIc0 = keyUploadFromJson(loadProvenExit('alice').hinted.keyUpload).ic0;
+    const exits = [loadProvenExit('alice'), loadProvenExit('bob')];
+    const exitKeyIc0 = keyUploadFromJson(exits[0].hinted.keyUpload).ic0;
     const expectedKeyHash = BigInt('0x' + Cell.fromBase64(batches[0].hinted.vkDataBoc).hash().toString('hex'));
     const parts = Bn254Groth16Verifier.keyParts(key);
     const depositValue = BigInt(scenario.deposit.value);
@@ -71,13 +77,17 @@ export async function run(provider: NetworkProvider) {
                 nullifierCode: await compile('RollupNullifier'),
                 genesisStateRoot: BigInt(scenario.genesisStateRoot),
                 chainId: BigInt(scenario.chainId),
-                escapeTimeout: ESCAPE_TIMEOUT_SECONDS,
+                escapeTimeout: TESTNET_ESCAPE_TIMEOUT_SECONDS,
             },
             await compile('Rollup'),
         ),
     );
     ui.write(`Rollup-контракт: ${rollup.address.toString()}`);
 
+    const exitKeySet = async (): Promise<boolean> => {
+        const { state } = await provider.getContractState(rollup.address);
+        return state.type === 'active' && !!state.data && Rollup.isExitKeySet(Cell.fromBoc(state.data)[0]);
+    };
     const uploadedSlots = async (): Promise<number[]> => {
         const { state } = await provider.getContractState(rollup.address);
         if (state.type !== 'active' || !state.data) return [];
@@ -98,7 +108,7 @@ export async function run(provider: NetworkProvider) {
     const batchesLeft = BigInt(Math.max(0, batches.length - batchIndex));
     // Порции данных ещё не принятых батчей; уже опубликованные не вычитаем — оценка сверху.
     const chunksLeft = BigInt(batches.slice(batchIndex).reduce((sum, batch) => sum + batch.dataChunks.length, 0));
-    const needed =
+    const normalNeeded =
         (deployed ? 0n : DEPLOY_VALUE + WALLET_FEE_SMALL) +
         BigInt(missingParts.length) * (KEY_PART_VALUE + WALLET_FEE_LARGE) +
         (keyReady ? 0n : 2n * (KEY_FINALIZE_VALUE + WALLET_FEE_SMALL)) +
@@ -106,6 +116,15 @@ export async function run(provider: NetworkProvider) {
         chunksLeft * (PUBLISH_DATA_VALUE + WALLET_FEE_SMALL) +
         batchesLeft * (SUBMIT_BATCH_VALUE + WALLET_FEE_BATCH) +
         (withdrawn ? 0n : WITHDRAW_VALUE + WALLET_FEE_SMALL);
+    // Аварийный путь: поздний депозит, заморозка, выход двух счетов, возврат депозита.
+    // Сделанные шаги не вычитаем — оценка сверху.
+    const frozenAlready = deployed && (await rollup.getEscapeState()).frozen;
+    const escapeNeeded =
+        (frozenAlready ? 0n : LATE_DEPOSIT_VALUE + ESCAPE_SERVICE_VALUE + 2n * WALLET_FEE_SMALL) +
+        BigInt(exits.length) * (FORCE_EXIT_VALUE + WALLET_FEE_BATCH) +
+        ESCAPE_SERVICE_VALUE +
+        WALLET_FEE_SMALL;
+    const needed = normalNeeded + escapeNeeded;
     const { balance } = await provider.getContractState(owner);
     ui.write(`Осталось шагов примерно на ${fromNano(needed)} TON, на кошельке ${fromNano(balance)} TON.`);
     if (balance < needed) {
@@ -128,12 +147,11 @@ export async function run(provider: NetworkProvider) {
             await rollup.sendUploadKeyPart(sender, { slot, part, value: KEY_PART_VALUE });
             await waitFor(`часть ${slot} в контракте`, async () => (await uploadedSlots()).includes(slot));
         }
-        if ((await rollup.getExitKeyHash()) === 0n) {
+        if (!(await exitKeySet())) {
             // Ключ программы выхода: без него контракт не даст зафиксировать основной ключ.
-            // Повторная отправка после сбоя отклоняется контрактом и ничего не портит.
             ui.write('Ключ программы аварийного выхода');
-            await rollup.sendSetExitKey(sender, { ic0: exitKeyIc0, value: KEY_FINALIZE_VALUE }).catch(() => undefined);
-            await sleep(POLL_DELAY_MS * 4);
+            await rollup.sendSetExitKey(sender, { ic0: exitKeyIc0, value: KEY_FINALIZE_VALUE });
+            await waitFor('ключ программы выхода задан', exitKeySet);
         }
         ui.write('Фиксация ключа');
         await rollup.sendFinalizeKey(sender, { key, value: KEY_FINALIZE_VALUE });
@@ -236,6 +254,57 @@ export async function run(provider: NetworkProvider) {
         await waitFor('нуллификатор вывода развёрнут', () => provider.isContractDeployed(leafNullifier));
     }
 
-    ui.write('Готово: депозит, два батча с пруфами SP1 и вывод прошли в testnet.');
+    ui.write('Обычный путь пройден: депозит, два батча с пруфами SP1 и вывод.');
+
+    // --- аварийный путь: секвенсор «пропал» ---
+    if (!(await rollup.getEscapeState()).frozen) {
+        const queue = await rollup.getDepositQueue();
+        if (queue.head.count === queue.processed.count) {
+            // Депозит, который никто не обработает: с него начинается срок заморозки.
+            ui.write(`Поздний депозит ${fromNano(LATE_DEPOSIT_VALUE)} TON — его никто не обработает`);
+            await rollup.sendDeposit(sender, { l2Recipient: 0xdeadn, value: LATE_DEPOSIT_VALUE });
+            await waitFor('поздний депозит в очереди', async () => {
+                const now = await rollup.getDepositQueue();
+                return now.head.count > now.processed.count;
+            });
+        }
+        const escape = await rollup.getEscapeState();
+        // Запас в полминуты: время блока отстаёт от часов этой машины.
+        const waitSeconds = escape.oldestPendingAt + escape.timeout + 30 - Math.floor(Date.now() / 1000);
+        if (waitSeconds > 0) {
+            ui.write(`Жду срок заморозки: ${waitSeconds} с`);
+            await sleep(waitSeconds * 1000);
+        }
+        ui.write("Заморозка rollup'а");
+        await rollup.sendActivateEscapeHatch(sender, ESCAPE_SERVICE_VALUE);
+        await waitFor('rollup заморожен', async () => (await rollup.getEscapeState()).frozen);
+    }
+
+    const forceExit = async (exit: ProvenExit) => {
+        const exitNullifier = await rollup.getExitNullifierAddress(exit.claim.l2Account);
+        if (await provider.isContractDeployed(exitNullifier)) return;
+        if ((await rollup.getExpectedExitInput(exit.claim)) !== BigInt(exit.output.publicInput)) {
+            throw new Error(`Выход ${exit.output.name}: контракт ждёт другой публичный вход, пруф не подходит.`);
+        }
+        ui.write(`Выход ${exit.output.name}: ${fromNano(exit.claim.amount)} TON на ${exit.claim.recipient.toString()}`);
+        await rollup.sendForceExit(sender, {
+            proof: exit.proof,
+            hints: Cell.fromBase64(exit.hinted.hintsBoc),
+            claim: exit.claim,
+            value: FORCE_EXIT_VALUE,
+        });
+        await waitFor(`выход ${exit.output.name} оплачен`, () => provider.isContractDeployed(exitNullifier));
+    };
+    for (const exit of exits) await forceExit(exit);
+
+    // Поздний депозит — второй в очереди; он не попал в батч и возвращается вносителю.
+    const lateDepositIndex = 2;
+    if ((await rollup.getDepositReceipt(lateDepositIndex)) !== null) {
+        ui.write('Возврат необработанного депозита');
+        await rollup.sendCancelDeposit(sender, { depositIndex: lateDepositIndex, value: ESCAPE_SERVICE_VALUE });
+        await waitFor('депозит возвращён', async () => (await rollup.getDepositReceipt(lateDepositIndex)) === null);
+    }
+
+    ui.write('Готово: обычный путь и аварийный выход прошли в testnet.');
     ui.write(`Газ и коды выхода: node zk/testnet-rollup-report.mjs ${rollup.address.toString()}`);
 }

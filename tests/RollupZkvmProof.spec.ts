@@ -114,7 +114,15 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
         }
         // Скрипт testnet определяет, что уже загружено, по данным контракта.
         expect((await uploadedSlots()).sort((a, b) => a - b)).toEqual(parts.map((p) => p.slot).sort((a, b) => a - b));
+        // Скрипт testnet узнаёт, задан ли ключ выхода, по данным контракта.
+        const exitKeySet = async () => {
+            const account = (await blockchain.getContract(rollup.address)).accountState;
+            if (account?.type !== 'active' || !account.state.data) throw new Error('контракт не развёрнут');
+            return Rollup.isExitKeySet(account.state.data);
+        };
+        expect(await exitKeySet()).toBe(false);
         await rollup.sendSetExitKey(owner.getSender(), { ic0: exitKeyIc0, value: KEY_FINALIZE_VALUE });
+        expect(await exitKeySet()).toBe(true);
         const finalize = await rollup.sendFinalizeKey(owner.getSender(), { key, value: KEY_FINALIZE_VALUE });
         expect(finalize.transactions).toHaveTransaction({ to: rollup.address, success: true });
         ready = blockchain.snapshot();

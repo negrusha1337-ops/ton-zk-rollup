@@ -25,6 +25,10 @@ const STEPS = {
     '0x52420002': 'deposit',
     '0x52420003': 'publishData',
     '0x52420004': 'withdraw',
+    '0x52420006': 'activateEscapeHatch',
+    '0x52420007': 'forceExit',
+    '0x52420008': 'cancelDeposit',
+    '0x52420009': 'setExitKey',
     '0x52420011': 'withdrawPayout',
 };
 
@@ -66,6 +70,8 @@ const rows = transactions.map((tx) => {
 const sandboxPath = path.join(ROOT, 'bench', 'rollup-zkvm-proof.json');
 const sandbox = existsSync(sandboxPath) ? JSON.parse(readFileSync(sandboxPath, 'utf8')) : {};
 const sandboxBatchGas = [sandbox.submitBatch, sandbox.submitBatchWithDeposit];
+const escapePath = path.join(ROOT, 'bench', 'rollup-escape.json');
+const escapeSandbox = existsSync(escapePath) ? JSON.parse(readFileSync(escapePath, 'utf8')) : {};
 
 const pick = ({ hash, time, success, exitCode, gasUsed, gasFeeNano }) => ({
     transactionHash: hash,
@@ -111,6 +117,21 @@ const report = {
     withdrawPayout: of('withdrawPayout')
         .filter((row) => row.success)
         .map(pick),
+    escape: {
+        activateEscapeHatch: of('activateEscapeHatch')
+            .filter((row) => row.success)
+            .map(pick),
+        forceExit: of('forceExit')
+            .filter((row) => row.success)
+            .map((row) => ({
+                ...pick(row),
+                sandboxGasUsed: escapeSandbox.forceExit ?? null,
+                // Газ зависит от пруфа; с Sandbox сравним только выход первого счёта сценария.
+            })),
+        cancelDeposit: of('cancelDeposit')
+            .filter((row) => row.success)
+            .map(pick),
+    },
     totalFeesNano: rows.reduce((sum, row) => sum + row.totalFeesNano, 0),
     valueReceivedNano: rows.reduce((sum, row) => sum + row.valueNano, 0),
 };
