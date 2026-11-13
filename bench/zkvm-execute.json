@@ -1,0 +1,38 @@
+{
+  "description": "Исполнение нынешних программ zkVM в SP1 без пруфа (zkvm/script --execute): публичные значения сверены с нативным запуском. Пруфы для этой версии программ НЕ построены.",
+  "date": "2026-11-13",
+  "machine": "Apple M4, 10 ядер, 16 ГБ памяти, macOS (Darwin 25.3.0)",
+  "sp1Sdk": "6.10.0",
+  "sourcesSha256": "702fea2e601b560c5073b1f94017bfa49699a5d16948ce18a8f83d55f87f1207",
+  "programVKey": "0x00a14e16c1a59d90c4268e765945b8bc0ca25015541f447d62565fbdbe4bb640",
+  "exitProgramVKey": "0x00948e47c49b39cd5589ef920123202f8bd537335e9862a9f47dc4790dbdb50a",
+  "execute": {
+    "batch1": {
+      "cycles": 8929,
+      "publicValuesMatchNative": true
+    },
+    "batch2": {
+      "cycles": 661015,
+      "publicValuesMatchNative": true,
+      "dataBytes": 1662,
+      "note": "Очередь L1: депозит, принудительный вывод, мусор. Данные: две исполняемые транзакции и тринадцать отклоняемых — по одной на каждую причину отказа, включая шесть подписей, отвергаемых арифметикой кривой через прекомпиляцию secp256k1 (high-s, бит восстановления 2 и 3, r вне кривой, бесконечно удалённая точка)"
+    },
+    "exitAlice": {
+      "cycles": 47925,
+      "publicValuesMatchNative": true
+    },
+    "exitBob": {
+      "cycles": 47542,
+      "publicValuesMatchNative": true
+    },
+    "batch3": {
+      "cycles": 287055,
+      "publicValuesMatchNative": true,
+      "note": "Продолжает ненулевые прежние корни: дерево выводов батча 2 и хеш очереди L1; обрабатывает второй депозит"
+    },
+    "exitNote": "Выходы — из состояния после батча 3"
+  },
+  "programElfSha256": "a748c3bbd68820e8217e667afa2ca7271b026f299e00749b000fdede08dfa88f",
+  "exitProgramElfSha256": "a93bfc0888a419a063d87ac9de9ffcb982dfaedfcd1bf79c24ccbeb51931bbda",
+  "elfVerification": "zkvm/script/verify-elf.sh: чистая пересборка обоих ELF побайтно совпала с program.json; путей из домашнего каталога в ELF нет"
+}

@@ -5,6 +5,7 @@ import path from 'path';
 import { Address, beginCell, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
+import { finalizeDummyKeys } from './helpers/rollupSetup';
 import { computePhaseOf } from './helpers/gas';
 import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
 import { NullifierErrors, Rollup, RollupErrors, RollupOpcodes } from '../wrappers/Rollup';
@@ -86,6 +87,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
         );
         const deploy = await rollup.sendDeploy(owner.getSender(), toNano('5'));
         expect(deploy.transactions).toHaveTransaction({ to: rollup.address, deploy: true, success: true });
+        await finalizeDummyKeys(rollup, owner);
     });
 
     describe('депозит TON', () => {
@@ -168,6 +170,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
                     prevStateRoot: GENESIS_ROOT,
                     ...roots1,
                     batchHash: 0n,
+                    prevWithdrawalsRoot: 0n,
                     prevDepositHash: 0n,
                     newDepositHash: 0n,
                 }),
@@ -183,6 +186,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
                     prevStateRoot: roots1.newStateRoot,
                     ...roots1,
                     batchHash: 0n,
+                    prevWithdrawalsRoot: 0n,
                     prevDepositHash: 0n,
                     newDepositHash: 0n,
                 }),
@@ -202,6 +206,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
                     prevStateRoot: GENESIS_ROOT,
                     ...roots1,
                     batchHash: 0n,
+                    prevWithdrawalsRoot: 0n,
                     prevDepositHash: 0n,
                     newDepositHash: 0n,
                 }),
@@ -219,6 +224,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
                     prevStateRoot: roots1.newStateRoot,
                     ...roots2,
                     batchHash: 0n,
+                    prevWithdrawalsRoot: 0n,
                     prevDepositHash: 0n,
                     newDepositHash: afterDeposit,
                 }),
@@ -244,6 +250,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
                 prevStateRoot: GENESIS_ROOT,
                 ...roots1,
                 batchHash,
+                prevWithdrawalsRoot: 0n,
                 prevDepositHash: 0n,
                 newDepositHash: 0n,
             });
@@ -295,6 +302,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
                     prevStateRoot: roots1.newStateRoot,
                     ...roots2,
                     batchHash: batchDataHash([chunkB, chunkC]),
+                    prevWithdrawalsRoot: 0n,
                     prevDepositHash: 0n,
                     newDepositHash: 0n,
                 }),
@@ -302,6 +310,59 @@ describe('Rollup: логика на тестовом двойнике', () => {
             await submit(roots2);
             expect(await rollup.getBatchDataHash(2)).toBe(0n);
             expect((await rollup.getRollupState()).batchIndex).toBe(2);
+        });
+
+        it('данные нельзя публиковать дальше чем на четыре батча вперёд', async () => {
+            // Иначе словарь данных можно было бы растить записями для батчей, которые не наступят.
+            expect((await publish(4, chunkA)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+            const tooFar = await publish(5, chunkA);
+            expect(tooFar.transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: RollupErrors.dataTooFarAhead,
+            });
+            expect(await rollup.getBatchDataHash(5)).toBe(0n);
+            await submit(roots1);
+            // Окно сдвинулось вместе с номером последнего принятого батча.
+            expect((await publish(5, chunkA)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+        });
+
+        it('секвенсор может сбросить данные батча и опубликовать заново; посторонний — нет', async () => {
+            // Ошибка публикации: порция, которую программа zkVM не воспроизведёт, — ячейка с
+            // раскладкой не по протоколу (те же байты цепочкой, а не «кучей»). Контракт её
+            // форму не проверяет, хеш уже испорчен, и без сброса батч стал бы недоказуемым.
+            const bytes = Buffer.alloc(300, 0xc2);
+            const misplaced = beginCell()
+                .storeBuffer(bytes.subarray(0, 127))
+                .storeRef(
+                    beginCell()
+                        .storeBuffer(bytes.subarray(127, 254))
+                        .storeRef(beginCell().storeBuffer(bytes.subarray(254)).endCell())
+                        .endCell(),
+                )
+                .endCell();
+            expect(misplaced.hash().equals(chunkC.hash())).toBe(false);
+            await publish(1, chunkA);
+            await publish(1, misplaced);
+            expect(await rollup.getBatchDataHash(1)).not.toBe(batchDataHash([chunkA, chunkC]));
+
+            const discard = (from: typeof sequencer, batchIndex = 1) =>
+                rollup.sendDiscardBatchData(from.getSender(), { batchIndex, value: toNano('0.05') });
+            expect((await discard(user)).transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: RollupErrors.notSequencer,
+            });
+            expect(await rollup.getBatchDataHash(1)).not.toBe(0n);
+
+            expect((await discard(sequencer)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+            expect(await rollup.getBatchDataHash(1)).toBe(0n);
+            await publish(1, chunkA);
+            await publish(1, chunkC);
+            expect(await rollup.getBatchDataHash(1)).toBe(batchDataHash([chunkA, chunkC]));
+            expect(await rollup.getExpectedPublicInput(roots1)).toBe(digestWith(batchDataHash([chunkA, chunkC])));
+            // Сброс того, чего нет, ничего не ломает.
+            expect((await discard(sequencer, 3)).transactions).toHaveTransaction({ to: rollup.address, success: true });
         });
 
         it('газ публикации не зависит от размера порции', async () => {
@@ -444,13 +505,81 @@ describe('Rollup: логика на тестовом двойнике', () => {
             expect(await balanceOf(recipients[1])).toBe(0n);
         });
 
+        /** Верное доказательство, у последней ячейки которого висит лишняя пустая ссылка. */
+        const proofWithTrailingRef = (siblings: bigint[]): Cell => {
+            let tail: Cell | null = null;
+            for (let chunk = Math.ceil(siblings.length / 3) - 1; chunk >= 0; chunk--) {
+                const builder = beginCell();
+                for (const sibling of siblings.slice(chunk * 3, chunk * 3 + 3)) builder.storeUint(sibling, 256);
+                builder.storeRef(tail ?? beginCell().endCell());
+                tail = builder.endCell();
+            }
+            return tail!;
+        };
+
+        it('подмена суммы, получателя, номера листа или доказательства не проходит', async () => {
+            const send = (overrides: Partial<Parameters<typeof rollup.sendWithdraw>[1]>) =>
+                rollup.sendWithdraw(user.getSender(), {
+                    leafIndex: 1,
+                    recipient: recipients[1],
+                    amount: leaves[1].amount,
+                    merkleProof: merkleProofCell(tree.proofFor(1)),
+                    value: toNano('0.2'),
+                    ...overrides,
+                });
+            const siblings = tree.proofFor(1);
+            const wrongProof: Partial<Parameters<typeof rollup.sendWithdraw>[1]>[] = [
+                { amount: leaves[1].amount + 1n },
+                { recipient: recipients[2] },
+                // Чужое доказательство под свой лист и свой лист под чужим номером.
+                { merkleProof: merkleProofCell(tree.proofFor(2)) },
+                { leafIndex: 2 },
+                { leafIndex: 0 },
+                // Лишний хеш в конце доказательства; лишняя полная ячейка с хешами.
+                { merkleProof: merkleProofCell([...siblings, 0n]) },
+                { merkleProof: merkleProofCell([...siblings, 0n, 0n, 0n]) },
+                // Все 32 хеша на месте, лишних бит нет, но у последней ячейки лишняя ссылка.
+                { merkleProof: proofWithTrailingRef(siblings) },
+            ];
+            for (const overrides of wrongProof) {
+                expect((await send(overrides)).transactions).toHaveTransaction({
+                    to: rollup.address,
+                    success: false,
+                    exitCode: RollupErrors.wrongMerkleProof,
+                });
+            }
+            // Короткое доказательство: чтение за концом ячейки (исключение TVM 9).
+            expect((await send({ merkleProof: merkleProofCell(siblings.slice(0, 31)) })).transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: 9,
+            });
+            // Получатель вне basechain: тот же хеш адреса в masterchain — другой адрес.
+            const masterchain = new Address(-1, recipients[1].hash);
+            expect((await send({ recipient: masterchain })).transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: RollupErrors.wrongRecipient,
+            });
+            for (const recipient of [...recipients, masterchain]) expect(await balanceOf(recipient)).toBe(0n);
+            // Ни одна из попыток не пометила лист: честный вывод проходит.
+            expect((await send({})).transactions).toHaveTransaction({
+                from: rollup.address,
+                to: recipients[1],
+                value: leaves[1].amount,
+            });
+        });
+
         it('требует достаточно монет на цепочку сообщений', async () => {
-            const result = await withdraw(1, { value: toNano('0.05') });
+            // Порог задан в газе и пересчитывается по ценам сети; на одну нанотону меньше — отказ.
+            const { withdraw: minimum } = await rollup.getMinimumValues();
+            const result = await withdraw(1, { value: minimum - 1n });
             expect(result.transactions).toHaveTransaction({
                 to: rollup.address,
                 success: false,
                 exitCode: RollupErrors.notEnoughValue,
             });
+            expect(await balanceOf(recipients[1])).toBe(0n);
         });
 
         it('подтверждение не от нуллификатора не приводит к выплате', async () => {

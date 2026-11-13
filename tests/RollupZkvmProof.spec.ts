@@ -1,15 +1,22 @@
-import { mkdirSync, writeFileSync } from 'fs';
-import path from 'path';
 import { Blockchain, BlockchainSnapshot, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Address, Cell } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
-import { Bn254Groth16Verifier, keyUploadFromJson } from '../wrappers/Bn254Groth16Verifier';
-import { Rollup } from '../wrappers/Rollup';
-import { batchDataHash, dataChunkCell, depositHash, merkleProofCell, withdrawalTree } from '../wrappers/rollupMath';
+import { Bn254Groth16Verifier } from '../wrappers/Bn254Groth16Verifier';
+import { Rollup, RollupErrors, VerifierErrors } from '../wrappers/Rollup';
+import { loadRollupKey } from '../wrappers/rollupDeployment';
+import {
+    batchDataHash,
+    dataChunkCell,
+    depositHash,
+    forcedTransactionHash,
+    merkleProofCell,
+    withdrawalTree,
+} from '../wrappers/rollupMath';
 import {
     DEPLOY_VALUE,
     KEY_FINALIZE_VALUE,
+    FORCE_TRANSACTION_VALUE,
     KEY_PART_VALUE,
     PUBLISH_DATA_VALUE,
     SUBMIT_BATCH_VALUE,
@@ -17,13 +24,17 @@ import {
     ESCAPE_TIMEOUT_SECONDS,
 } from '../wrappers/rollupValues';
 import {
+    forcedTransactionsOf,
     loadProgramVKey,
     loadProvenBatch,
-    loadProvenExit,
     loadZkvmScenario,
     ProvenBatch,
+    withdrawalLeavesAfterBatch3Of,
+    withdrawalLeavesOf,
 } from '../wrappers/zkvmProofs';
+import { saveGasReport } from './helpers/benchResults';
 import { computePhaseOf } from './helpers/gas';
+import { loadProgramKeys, sp1ProofsStatus } from '../wrappers/sp1Proofs';
 
 // Лимит газа на транзакцию: конфиг сети, параметр 21 (gas_limit).
 const TX_GAS_LIMIT = 1_000_000;
@@ -36,14 +47,29 @@ const program = loadZkvmScenario();
 // публичных значений контракт считает сам из своего состояния), и к данным батча,
 // опубликованным в TON: транзакции программа берёт из тех же порций, хеш которых
 // накопил контракт (DA.md).
-describe('Rollup: пруфы SP1 нашей программы перехода состояния', () => {
+const SUITE = 'Rollup: пруфы SP1 нашей программы перехода состояния';
+const proofs = sp1ProofsStatus();
+if (proofs.current) {
+    describe(SUITE, suite);
+} else {
+    // Пруфов для нынешних программ нет (или они от прежней версии): набор ждёт их, а не
+    // падает и не проходит молча. Пруфы строятся только по команде пользователя.
+    describe(SUITE, () => {
+        it.todo(`ждёт пруфов SP1 для нынешних программ (${proofs.reason})`);
+    });
+}
+
+function suite() {
     const genesis = BigInt(program.genesisStateRoot);
     const batch1 = loadProvenBatch(1);
     const batch2 = loadProvenBatch(2);
-    const key = keyUploadFromJson(batch1.hinted.keyUpload);
+    const batch3 = loadProvenBatch(3);
+    // Ключ контракта выведен из исходников, а не взят из фикстуры пруфа (zk/gen-rollup-key.mjs).
     // Ключ программы выхода отличается от ключа программы батчей только константой IC0
     // (сам аварийный выход проверяется в tests/RollupEscapeProof.spec.ts).
-    const exitKeyIc0 = keyUploadFromJson(loadProvenExit('alice').hinted.keyUpload).ic0;
+    const expectedKey = loadRollupKey();
+    const key = expectedKey.upload;
+    const exitKeyIc0 = expectedKey.exitIc0;
     const gas: Record<string, number> = {};
 
     let blockchain: Blockchain;
@@ -53,13 +79,19 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
     let rollup: SandboxContract<Rollup>;
     let ready: BlockchainSnapshot;
 
-    const submit = (batch: ProvenBatch, overrides: { nonce?: bigint; newStateRoot?: bigint } = {}) =>
+    const submit = (batch: ProvenBatch, overrides: { newStateRoot?: bigint; hintsBoc?: string } = {}) =>
         rollup.sendSubmitBatch(sequencer.getSender(), {
             proof: batch.proof,
-            hints: Cell.fromBase64(batch.hinted.hintsBoc),
+            hints: Cell.fromBase64(overrides.hintsBoc ?? batch.hinted.hintsBoc),
             roots: { ...batch.roots, newStateRoot: overrides.newStateRoot ?? batch.roots.newStateRoot },
-            nonce: overrides.nonce,
             value: SUBMIT_BATCH_VALUE,
+        });
+    /** Отказ верификатора на проверке наклона: подсказки посчитаны под другой публичный вход. */
+    const rejectedBySlopeCheck = (result: { transactions: unknown }, address = rollup.address) =>
+        expect(result.transactions).toHaveTransaction({
+            to: address,
+            success: false,
+            exitCode: VerifierErrors.wrongSlope,
         });
     /** Публикует порции данных батча в том порядке, в каком их разбирала программа. */
     const publishData = async (batch: ProvenBatch, batchIndex: number, chunks = batch.dataChunks) => {
@@ -78,6 +110,28 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
             l2Recipient: BigInt(program.deposit.l2Recipient),
             value: BigInt(program.deposit.value),
         });
+    /** Принудительные транзакции сценария: их ставит в очередь пользователь, не секвенсор. */
+    const forceTransactions = async () => {
+        for (const l2Transaction of forcedTransactionsOf(program)) {
+            const result = await rollup.sendForceTransaction(user.getSender(), {
+                l2Transaction,
+                value: FORCE_TRANSACTION_VALUE,
+            });
+            expect(result.transactions).toHaveTransaction({ to: rollup.address, success: true });
+            gas.forceTransaction = Number(computePhaseOf(result.transactions, rollup.address).gasUsed);
+        }
+    };
+    /** Второй депозит сценария: приходит после батча 1, его обязан обработать батч 3. */
+    const secondDeposit = () =>
+        rollup.sendDeposit(user.getSender(), {
+            l2Recipient: BigInt(program.secondDeposit.l2Recipient),
+            value: BigInt(program.secondDeposit.value),
+        });
+    /** Очередь L1 сценария до батча 1: депозит Алисы, её принудительный вывод и мусор. */
+    const queueScenario = async () => {
+        expect((await deposit()).transactions).toHaveTransaction({ to: rollup.address, success: true });
+        await forceTransactions();
+    };
 
     beforeAll(async () => {
         const code = await compile('Rollup');
@@ -133,31 +187,40 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
     });
 
     afterAll(() => {
-        const file = path.join(__dirname, '..', 'bench', 'rollup-zkvm-proof.json');
-        mkdirSync(path.dirname(file), { recursive: true });
-        writeFileSync(
-            file,
-            JSON.stringify(
-                {
-                    source: 'Измерено в @ton/sandbox тестом tests/RollupZkvmProof.spec.ts; не редактировать вручную',
-                    note: 'Газ rollup-контракта с Groth16-пруфами SP1 (схема v6.1.0) нашей программы перехода состояния; nonce = 0; данные батча 2 опубликованы сообщением PublishData',
-                    gasLimit: TX_GAS_LIMIT,
-                    ...gas,
-                },
-                null,
-                2,
-            ) + '\n',
+        saveGasReport(
+            'rollup-zkvm-proof.json',
+            {
+                source: 'Измерено в @ton/sandbox тестом tests/RollupZkvmProof.spec.ts; не редактировать вручную',
+                note: 'Газ rollup-контракта с Groth16-пруфами SP1 (схема v6.1.0) нашей программы перехода состояния; нонс SP1 равен нулю и свёрнут в ключ; данные батча 2 опубликованы сообщением PublishData',
+                gasLimit: TX_GAS_LIMIT,
+                // Для каких программ сняты замеры: по этому полю отчёт о прогоне в testnet
+                // (zk/testnet-rollup-report.mjs) решает, можно ли с ними сравнивать.
+                sourcesSha256: loadProgramKeys().sourcesSha256,
+            },
+            gas,
+            [
+                'submitBatch',
+                'submitBatchWithDeposit',
+                'submitBatchThird',
+                'publishData',
+                'forceTransaction',
+                'rejectedForgery',
+            ],
         );
         console.table(gas);
     });
 
     it('пруфы построены для нашей программы и для этих батчей', async () => {
-        // Оба пруфа проверяются одним ключом: меняются только дайджест и nonce.
+        // Оба пруфа проверяются одним ключом: меняется только дайджест. Ключ в контракте —
+        // выведенный из исходников; ключ, под который построены подсказки пруфов, — тот же.
         expect(batch2.hinted.vkDataBoc).toBe(batch1.hinted.vkDataBoc);
-        expect(await rollup.getKeyHash()).toBe(
-            BigInt('0x' + Cell.fromBase64(batch1.hinted.vkDataBoc).hash().toString('hex')),
+        expect(await rollup.getKeyHash()).toBe(expectedKey.keyHash);
+        expect(BigInt('0x' + Cell.fromBase64(batch1.hinted.vkDataBoc).hash().toString('hex'))).toBe(
+            expectedKey.keyHash,
         );
-        for (const batch of [batch1, batch2]) {
+        expect(await rollup.getExitKeyHash()).toBe(expectedKey.exitKeyHash);
+        expect(batch3.hinted.vkDataBoc).toBe(batch1.hinted.vkDataBoc);
+        for (const batch of [batch1, batch2, batch3]) {
             const [programVKey, digest, exitCode, , nonce] = batch.publicInputs;
             expect(programVKey).toBe(loadProgramVKey());
             // Дайджест в пруфе — тот, что дал нативный запуск программы.
@@ -184,20 +247,34 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
     });
 
     it('чужой корень состояния с настоящим пруфом не проходит', async () => {
-        const result = await submit(batch1, { newStateRoot: batch1.roots.newStateRoot ^ 1n });
-        expect(result.transactions).toHaveTransaction({ to: rollup.address, success: false });
+        rejectedBySlopeCheck(await submit(batch1, { newStateRoot: batch1.roots.newStateRoot ^ 1n }));
         expect(await rollup.getRollupState()).toMatchObject({ stateRoot: genesis, batchIndex: 0 });
     });
 
-    it('чужой nonce с настоящим пруфом не проходит', async () => {
-        const result = await submit(batch1, { nonce: 1n });
-        expect(result.transactions).toHaveTransaction({ to: rollup.address, success: false });
-        expect((await rollup.getRollupState()).batchIndex).toBe(0);
+    it('«лучшая подделка»: пруф SP1 под чужой корень состояния отклоняется замыкающим равенством', async () => {
+        // Подсказки посчитаны честно для ложного утверждения (другой новый корень состояния),
+        // поэтому все промежуточные проверки проходят; ложно только само утверждение.
+        // Контракт обязан дойти до конца и отказать кодом WrongProof.
+        const forgery = batch1.hinted.statementForgery;
+        expect(forgery.alteredWord).toBe(2);
+        const forgedRoot = BigInt(forgery.alteredValue);
+        expect(forgedRoot).toBe(batch1.roots.newStateRoot ^ 1n);
+        expect(await rollup.getExpectedPublicInput({ ...batch1.roots, newStateRoot: forgedRoot })).toBe(
+            BigInt(forgery.input),
+        );
+        const result = await submit(batch1, { newStateRoot: forgedRoot, hintsBoc: forgery.hintsBoc });
+        expect(result.transactions).toHaveTransaction({
+            to: rollup.address,
+            success: false,
+            exitCode: RollupErrors.wrongProof,
+        });
+        gas.rejectedForgery = Number(computePhaseOf(result.transactions, rollup.address).gasUsed);
+        expect(gas.rejectedForgery).toBeLessThan(TX_GAS_LIMIT);
+        expect(await rollup.getRollupState()).toMatchObject({ stateRoot: genesis, batchIndex: 0 });
     });
 
     it('пруф батча 2 нельзя применить вместо батча 1', async () => {
-        const result = await submit(batch2);
-        expect(result.transactions).toHaveTransaction({ to: rollup.address, success: false });
+        rejectedBySlopeCheck(await submit(batch2));
         expect((await rollup.getRollupState()).batchIndex).toBe(0);
     });
 
@@ -231,35 +308,53 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
             roots: batch1.roots,
             value: SUBMIT_BATCH_VALUE,
         });
-        expect(result.transactions).toHaveTransaction({ to: twin.address, success: false });
+        rejectedBySlopeCheck(result, twin.address);
         expect((await twin.getRollupState()).batchIndex).toBe(0);
     });
 
     it('батч не принимается, пока его данные не опубликованы в TON', async () => {
-        await deposit();
+        await queueScenario();
         await submit(batch1);
         expect(batch2.dataChunks.length).toBeGreaterThan(0);
 
         // Данные не опубликованы: контракт подставляет нулевой хеш, пруф SP1 к нему не подходит.
         const withoutData = await submit(batch2);
-        expect(withoutData.transactions).toHaveTransaction({ to: rollup.address, success: false });
+        rejectedBySlopeCheck(withoutData);
         expect((await rollup.getRollupState()).batchIndex).toBe(1);
 
         // Опубликованы не те данные — тоже отказ.
         await publishData(batch2, 2, [dataChunkCell(Buffer.from('не те данные'))]);
         const wrongData = await submit(batch2);
-        expect(wrongData.transactions).toHaveTransaction({ to: rollup.address, success: false });
+        rejectedBySlopeCheck(wrongData);
         expect((await rollup.getRollupState()).batchIndex).toBe(1);
     });
 
-    it('полный путь на настоящих пруфах: депозит → батч 1 → данные → батч 2 → вывод', async () => {
-        // Депозит приходит до первого батча; батч 2 обязан его обработать.
-        expect((await deposit()).transactions).toHaveTransaction({ to: rollup.address, success: true });
-        const queued = (await rollup.getDepositQueue()).head.hash;
-        expect(queued).toBe(depositHash(0n, BigInt(program.deposit.l2Recipient), BigInt(program.deposit.amount)));
+    it('секвенсор не может пропустить принудительную транзакцию из очереди', async () => {
+        // Пруф батча 2 построен для очереди «депозит, вывод Алисы, мусор». Если бы секвенсор
+        // обработал только депозит, ему понадобился бы пруф с другим хешем очереди — а хеш
+        // контракт берёт из своего хранилища. И наоборот: пруф, честно обработавший всю
+        // очередь, не подходит контракту, в очереди которого транзакций не было.
+        await deposit();
+        await submit(batch1);
+        await publishData(batch2, 2);
+        rejectedBySlopeCheck(await submit(batch2));
+        expect((await rollup.getRollupState()).batchIndex).toBe(1);
+    });
+
+    it('полный путь на настоящих пруфах: очередь L1 → батч 1 → второй депозит → батч 2 → батч 3 → выводы', async () => {
+        // Депозит и принудительные транзакции встают в очередь L1 до первого батча; батч 2
+        // обязан обработать их целиком.
+        await queueScenario();
+        const afterDeposit = depositHash(0n, BigInt(program.deposit.l2Recipient), BigInt(program.deposit.amount));
+        const queue = await rollup.getDepositQueue();
+        const queued = queue.head.hash;
+        expect(queue.head.count).toBe(3n);
+        expect(queued).toBe(forcedTransactionsOf(program).reduce(forcedTransactionHash, afterDeposit));
         expect(BigInt(batch2.output.newDepositHash)).toBe(queued);
 
         expect((await submit(batch1)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+        // Второй депозит приходит после батча 1: его цель — батч 3.
+        expect((await secondDeposit()).transactions).toHaveTransaction({ to: rollup.address, success: true });
 
         // Данные батча 2 — те самые байты, из которых программа в zkVM взяла транзакции.
         await publishData(batch2, 2);
@@ -276,22 +371,57 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
             withdrawalsRoot: batch2.roots.withdrawalsRoot,
             batchIndex: 2,
         });
+        expect(withdrawalTree(withdrawalLeavesOf(program)).root).toBe(batch2.roots.withdrawalsRoot);
 
-        // Вывод по корню, который программа посчитала внутри zkVM.
-        const { leafIndex } = program.withdrawal;
-        const recipientHash = BigInt(program.withdrawal.recipientHash);
-        const amount = BigInt(program.withdrawal.amount);
-        const tree = withdrawalTree([{ leafIndex, recipientHash, amount }]);
-        expect(tree.root).toBe(batch2.roots.withdrawalsRoot);
-        const recipient = new Address(0, Buffer.from(recipientHash.toString(16).padStart(64, '0'), 'hex'));
-        const withdraw = await rollup.sendWithdraw(user.getSender(), {
-            leafIndex,
-            recipient,
-            amount,
-            merkleProof: merkleProofCell(tree.proofFor(leafIndex)),
-            value: WITHDRAW_VALUE,
+        // Батч 3 продолжает НЕНУЛЕВЫЕ прежние корни: дерево выводов батча 2 и хеш очереди, на
+        // котором тот остановился. Пруф батча 3 — единственное свидетельство на контракте, что
+        // программа действительно коммитит прежние корни (в батчах 1 и 2 они оба нулевые).
+        expect(BigInt(batch3.output.prevWithdrawalsRoot)).toBe(batch2.roots.withdrawalsRoot);
+        expect(BigInt(batch3.output.prevWithdrawalsRoot)).not.toBe(0n);
+        expect(BigInt(batch3.output.prevDepositHash)).toBe(queued);
+        await publishData(batch3, 3);
+        expect(await rollup.getExpectedPublicInput(batch3.roots)).toBe(BigInt(batch3.output.publicInput));
+        const third = await submit(batch3);
+        expect(third.transactions).toHaveTransaction({ to: rollup.address, success: true });
+        gas.submitBatchThird = Number(computePhaseOf(third.transactions, rollup.address).gasUsed);
+        expect(gas.submitBatchThird).toBeLessThan(TX_GAS_LIMIT);
+        expect(await rollup.getRollupState()).toEqual({
+            stateRoot: batch3.roots.newStateRoot,
+            withdrawalsRoot: batch3.roots.withdrawalsRoot,
+            batchIndex: 3,
         });
-        expect(withdraw.transactions).toHaveTransaction({ from: rollup.address, to: recipient });
-        expect((await blockchain.getContract(recipient)).balance).toBe(amount);
+        expect((await rollup.getDepositQueue()).processed.count).toBe(4n);
+
+        // Выводы по корню, который программа посчитала внутри zkVM. Лист 0 — вывод Алисы,
+        // проведённый через очередь L1 без участия секвенсора; лист 1 — вывод Боба; лист 2 —
+        // вывод Алисы в батче 3.
+        const leaves = withdrawalLeavesAfterBatch3Of(program);
+        expect(leaves.length).toBe(3);
+        const tree = withdrawalTree(leaves);
+        expect(tree.root).toBe(batch3.roots.withdrawalsRoot);
+        for (const { leafIndex, recipientHash, amount } of leaves) {
+            const recipient = new Address(0, Buffer.from(recipientHash.toString(16).padStart(64, '0'), 'hex'));
+            const withdraw = await rollup.sendWithdraw(user.getSender(), {
+                leafIndex,
+                recipient,
+                amount,
+                merkleProof: merkleProofCell(tree.proofFor(leafIndex)),
+                value: WITHDRAW_VALUE,
+            });
+            expect(withdraw.transactions).toHaveTransaction({ from: rollup.address, to: recipient });
+            expect((await blockchain.getContract(recipient)).balance).toBe(amount);
+        }
     });
-});
+
+    it('батч 3 не принять, если очередь или дерево выводов в контракте не те, что в пруфе', async () => {
+        // Без второго депозита хеш очереди, который подставляет контракт, другой: настоящий
+        // пруф батча 3 к такому состоянию не подходит.
+        await queueScenario();
+        await submit(batch1);
+        await publishData(batch2, 2);
+        await submit(batch2);
+        await publishData(batch3, 3);
+        rejectedBySlopeCheck(await submit(batch3));
+        expect((await rollup.getRollupState()).batchIndex).toBe(2);
+    });
+}

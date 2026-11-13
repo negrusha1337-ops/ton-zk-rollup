@@ -2,17 +2,30 @@
 // выход с баланса L2 по пруфу. Проверка пруфа сюда не входит — её делает файл точки
 // входа (настоящая в rollup.tolk, заглушка для тестов в rollup_mock.tolk).
 //
-// Чего здесь нет: принудительных транзакций L2. Секвенсор, который продолжает
-// выпускать батчи и обрабатывать депозиты, но не включает чьи-то транзакции,
-// заморозку не вызывает. Это следующий шаг, см. ARCHITECTURE.md.
+// Срок заморозки считается по очереди L1→L2, в которую попадают и депозиты, и
+// принудительные транзакции (ForceTransaction в logic.tolk): пользователь, которого
+// секвенсор не включает, ставит транзакцию в очередь сам, и дальше её либо обработают,
+// либо rollup заморозят.
 import "storage"
 import "messages"
 import "logic"
+import "nullifier_types"
 import "../bn254/verifier_api"
+import "../bn254/hinted"
+import "@stdlib/gas-payments"
 
-/// Минимум монет на аварийный выход: газ проверки пруфа (до 1 млн gas) плюс цепочка
-/// «rollup → нуллификатор → rollup → получатель».
-const FORCE_EXIT_MIN_VALUE: coins = ton("0.2")
+/// Предел газа одной транзакции: столько проверка пруфа выхода потратить не может.
+const FORCE_EXIT_STEP_GAS: int = 1000000
+
+/// Минимум монет на аварийный выход: газ проверки пруфа (до предела транзакции), заявка в
+/// нуллификатор и всё, что нужно ему самому. В газе, а не в монетах: при смене цен сети
+/// порог меняется вместе с ними.
+@inline
+fun forceExitMinValue(): coins {
+  return calculateGasFee(BASECHAIN, FORCE_EXIT_STEP_GAS)
+    + calculateForwardFee(BASECHAIN, CLAIM_MESSAGE_BITS, CLAIM_MESSAGE_CELLS)
+    + nullifierMinValue();
+}
 /// Основание ключей нуллификатора для аварийных выходов: номера листьев дерева выводов
 /// занимают 32 бита, счета L2 — 160, так что пространства не пересекаются.
 const EXIT_NULLIFIER_BASE: int = 1 << 255
@@ -22,8 +35,8 @@ fun exitNullifierKey(l2Account: int): int {
   return EXIT_NULLIFIER_BASE + l2Account;
 }
 
-/// Момент, когда в очередь встал самый старый необработанный депозит; 0, если очередь
-/// обработана целиком.
+/// Момент, когда в очередь встал самый старый необработанный элемент (депозит или
+/// принудительная транзакция); 0, если очередь обработана целиком.
 @inline
 fun oldestPendingDepositAt(state: RollupState, queue: DepositQueue): int {
   if (queue.processedCount < queue.targetCount) {
@@ -41,8 +54,11 @@ fun handleSetExitKey(sender: address, msg: SetExitKey) {
   var keys = storage.keys.load();
   // Ключ выхода неизменяем: задаётся один раз и только до фиксации основного ключа.
   assert (keys.vkData == null) throw RollupErrors.KeyAlreadyFinalized;
+  assert (!storage.state.load().frozen) throw RollupErrors.RollupFrozen;
   assert ((keys.exitIc0x == 0) && (keys.exitIc0y == 0)) throw RollupErrors.KeyAlreadyFinalized;
-  assert ((msg.ic0x != 0) || (msg.ic0y != 0)) throw KEY_ERROR_BAD_PART;
+  // Точка обязана лежать на кривой; (0, 0) на ней не лежит, поэтому «не задан» и
+  // «задан» не спутать.
+  assert (g1IsValid(msg.ic0x, msg.ic0y)) throw RollupErrors.BadKeyPoint;
   keys.exitIc0x = msg.ic0x;
   keys.exitIc0y = msg.ic0y;
   storage.keys = keys.toCell();
@@ -87,13 +103,15 @@ fun exitDigest(chainId: int, stateRoot: int, l2Account: int, amount: int, recipi
   return sha256OfTwo(first, second, 2) & DIGEST_MASK_253;
 }
 
-/// Проверки аварийного выхода до пруфа. Возвращает публичный вход, который обязан
-/// подтвердить пруф.
+/// Проверки аварийного выхода до пруфа — общие для настоящего контракта и тестового
+/// двойника. Возвращает публичный вход, который обязан подтвердить пруф.
 fun prepareForceExit(valueCoins: coins, storage: RollupStorage, claim: ExitClaim): int {
-  assert (valueCoins >= FORCE_EXIT_MIN_VALUE) throw RollupErrors.NotEnoughValue;
+  assert (storage.keys.load().vkData != null) throw RollupErrors.KeyNotFinalized;
+  assert (valueCoins >= forceExitMinValue()) throw RollupErrors.NotEnoughValue;
   val state = storage.state.load();
   assert (state.frozen) throw RollupErrors.RollupNotFrozen;
   assert (claim.amount > 0) throw RollupErrors.NothingToExit;
+  assertCanPay(claim.amount as coins, valueCoins);
   val (workchain, recipientHash) = claim.recipient.getWorkchainAndHash();
   assert (workchain == BASECHAIN) throw RollupErrors.WrongRecipient;
   return exitDigest(storage.chainId, state.stateRoot, claim.l2Account, claim.amount, recipientHash);
@@ -122,16 +140,12 @@ fun handleCancelDeposit(msg: CancelDeposit) {
   val receipt = state.depositReceipts.deleteAndGetDeleted(msg.depositIndex);
   assert (receipt.isFound) throw RollupErrors.NoSuchDeposit;
   val deposit = receipt.loadValue();
+  // Нет денег — исключение: квитанция остаётся, возврат можно повторить позже. Монеты
+  // этого сообщения остаются на контракте и в возврате участвуют.
+  assert (canPay(deposit.amount, 0)) throw RollupErrors.InsufficientFunds;
   storage.state = state.toCell();
   storage.save();
-
-  // Без bounce: если вноситель не развёрнут, монеты всё равно остаются у него.
-  val refund = createMessage({
-    bounce: BounceMode.NoBounce,
-    value: deposit.amount,
-    dest: deposit.depositor,
-  });
-  refund.send(SEND_MODE_PAY_FEES_SEPARATELY);
+  sendPayout(deposit.depositor, deposit.amount);
 }
 
 /// Уборка: квитанции обработанных депозитов больше не нужны. Удаляет не больше count

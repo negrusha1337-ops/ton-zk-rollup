@@ -1,0 +1,8 @@
+{
+  "source": "Измерено в @ton/sandbox тестом tests/RollupKeys.spec.ts; не редактировать вручную",
+  "note": "Газ загрузки и фиксации ключа rollup-контракта (ключ SP1 v6.1.0, одна оконная таблица)",
+  "keyParts": 12,
+  "uploadKeyPart": 7403,
+  "setExitKey": 5816,
+  "finalizeKey": 21346
+}

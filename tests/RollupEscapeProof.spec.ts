@@ -1,14 +1,15 @@
-import { mkdirSync, writeFileSync } from 'fs';
-import path from 'path';
 import { Blockchain, BlockchainSnapshot, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Address, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
-import { Bn254Groth16Verifier, keyUploadFromJson } from '../wrappers/Bn254Groth16Verifier';
-import { NullifierErrors, Rollup, RollupErrors } from '../wrappers/Rollup';
+import { Bn254Groth16Verifier } from '../wrappers/Bn254Groth16Verifier';
+import { NullifierErrors, Rollup, RollupErrors, VerifierErrors } from '../wrappers/Rollup';
+import { loadRollupKey } from '../wrappers/rollupDeployment';
 import {
     DEPLOY_VALUE,
+    ESCAPE_SERVICE_VALUE,
     FORCE_EXIT_VALUE,
+    FORCE_TRANSACTION_VALUE,
     KEY_FINALIZE_VALUE,
     KEY_PART_VALUE,
     PUBLISH_DATA_VALUE,
@@ -17,13 +18,17 @@ import {
 } from '../wrappers/rollupValues';
 import { merkleProofCell, withdrawalTree } from '../wrappers/rollupMath';
 import {
+    forcedTransactionsOf,
     loadExitScenario,
     loadProvenBatch,
     loadProvenExit,
     loadZkvmScenario,
     ProvenExit,
+    withdrawalLeavesAfterBatch3Of,
 } from '../wrappers/zkvmProofs';
+import { saveGasReport } from './helpers/benchResults';
 import { computePhaseOf } from './helpers/gas';
+import { loadProgramKeys, sp1ProofsStatus } from '../wrappers/sp1Proofs';
 
 // Лимит газа на транзакцию: конфиг сети, параметр 21 (gas_limit).
 const TX_GAS_LIMIT = 1_000_000;
@@ -34,16 +39,30 @@ const program = loadZkvmScenario();
 const exits = loadExitScenario();
 
 // Аварийный выход без заглушек: настоящий rollup-контракт, настоящие пруфы SP1.
-// Сценарий: депозит → два батча (как в tests/RollupZkvmProof.spec.ts) → секвенсор
+// Сценарий: депозит → три батча (как в tests/RollupZkvmProof.spec.ts) → секвенсор
 // пропадает → новый депозит висит дольше срока → rollup заморожен → счета L2 выходят
 // по пруфам программы выхода (zkvm/exit-program), необработанный депозит возвращается.
-describe('Rollup: аварийный выход по пруфам SP1', () => {
+const SUITE = 'Rollup: аварийный выход по пруфам SP1';
+const proofs = sp1ProofsStatus();
+if (proofs.current) {
+    describe(SUITE, suite);
+} else {
+    // Пруфов для нынешних программ нет (или они от прежней версии): набор ждёт их, а не
+    // падает и не проходит молча. Пруфы строятся только по команде пользователя.
+    describe(SUITE, () => {
+        it.todo(`ждёт пруфов SP1 для нынешних программ (${proofs.reason})`);
+    });
+}
+
+function suite() {
     const batch1 = loadProvenBatch(1);
     const batch2 = loadProvenBatch(2);
+    const batch3 = loadProvenBatch(3);
     const alice = loadProvenExit('alice');
     const bob = loadProvenExit('bob');
-    const key = keyUploadFromJson(batch1.hinted.keyUpload);
-    const exitKey = keyUploadFromJson(alice.hinted.keyUpload);
+    // Ключи контракта выведены из исходников, а не взяты из фикстур пруфов (zk/gen-rollup-key.mjs).
+    const expectedKey = loadRollupKey();
+    const key = expectedKey.upload;
     const gas: Record<string, number> = {};
 
     let blockchain: Blockchain;
@@ -56,10 +75,10 @@ describe('Rollup: аварийный выход по пруфам SP1', () => {
     let beforeFreeze: BlockchainSnapshot;
     let frozen: BlockchainSnapshot;
 
-    const forceExit = (exit: ProvenExit, claim = exit.claim) =>
+    const forceExit = (exit: ProvenExit, claim = exit.claim, hintsBoc = exit.hinted.hintsBoc) =>
         rollup.sendForceExit(anyone.getSender(), {
             proof: exit.proof,
-            hints: Cell.fromBase64(exit.hinted.hintsBoc),
+            hints: Cell.fromBase64(hintsBoc),
             claim,
             value: FORCE_EXIT_VALUE,
         });
@@ -90,15 +109,26 @@ describe('Rollup: аварийный выход по пруфам SP1', () => {
         for (const { slot, part } of Bn254Groth16Verifier.keyParts(key)) {
             await rollup.sendUploadKeyPart(owner.getSender(), { slot, part, value: KEY_PART_VALUE });
         }
-        await rollup.sendSetExitKey(owner.getSender(), { ic0: exitKey.ic0, value: KEY_FINALIZE_VALUE });
+        await rollup.sendSetExitKey(owner.getSender(), { ic0: expectedKey.exitIc0, value: KEY_FINALIZE_VALUE });
         await rollup.sendFinalizeKey(owner.getSender(), { key, value: KEY_FINALIZE_VALUE });
 
-        // Обычная жизнь rollup'а: депозит, два батча с пруфами SP1.
+        // Обычная жизнь rollup'а: депозиты, три батча с пруфами SP1.
         await rollup.sendDeposit(user.getSender(), {
             l2Recipient: BigInt(program.deposit.l2Recipient),
             value: BigInt(program.deposit.value),
         });
-        for (const [index, batch] of [batch1, batch2].entries()) {
+        // Принудительные транзакции сценария: вывод Алисы и мусор — элементы очереди 2 и 3.
+        for (const l2Transaction of forcedTransactionsOf(program)) {
+            await rollup.sendForceTransaction(user.getSender(), { l2Transaction, value: FORCE_TRANSACTION_VALUE });
+        }
+        for (const [index, batch] of [batch1, batch2, batch3].entries()) {
+            if (index === 1) {
+                // Второй депозит сценария приходит после батча 1: его обрабатывает батч 3.
+                await rollup.sendDeposit(user.getSender(), {
+                    l2Recipient: BigInt(program.secondDeposit.l2Recipient),
+                    value: BigInt(program.secondDeposit.value),
+                });
+            }
             for (const data of batch.dataChunks) {
                 await rollup.sendPublishData(sequencer.getSender(), {
                     batchIndex: index + 1,
@@ -122,7 +152,7 @@ describe('Rollup: аварийный выход по пруфам SP1', () => {
         beforeFreeze = blockchain.snapshot();
 
         blockchain.now = START + 100 + TIMEOUT + 1;
-        const activation = await rollup.sendActivateEscapeHatch(anyone.getSender(), toNano('0.05'));
+        const activation = await rollup.sendActivateEscapeHatch(anyone.getSender(), ESCAPE_SERVICE_VALUE);
         expect(activation.transactions).toHaveTransaction({ to: rollup.address, success: true });
         gas.activateEscapeHatch = Number(computePhaseOf(activation.transactions, rollup.address).gasUsed);
         frozen = blockchain.snapshot();
@@ -133,20 +163,18 @@ describe('Rollup: аварийный выход по пруфам SP1', () => {
     });
 
     afterAll(() => {
-        const file = path.join(__dirname, '..', 'bench', 'rollup-escape.json');
-        mkdirSync(path.dirname(file), { recursive: true });
-        writeFileSync(
-            file,
-            JSON.stringify(
-                {
-                    source: 'Измерено в @ton/sandbox тестом tests/RollupEscapeProof.spec.ts; не редактировать вручную',
-                    note: 'Газ аварийного выхода на настоящем rollup-контракте с Groth16-пруфами SP1 программы выхода; nonce = 0',
-                    gasLimit: TX_GAS_LIMIT,
-                    ...gas,
-                },
-                null,
-                2,
-            ) + '\n',
+        saveGasReport(
+            'rollup-escape.json',
+            {
+                source: 'Измерено в @ton/sandbox тестом tests/RollupEscapeProof.spec.ts; не редактировать вручную',
+                note: 'Газ аварийного выхода на настоящем rollup-контракте с Groth16-пруфами SP1 программы выхода; нонс SP1 равен нулю и свёрнут в ключ',
+                gasLimit: TX_GAS_LIMIT,
+                // Для каких программ сняты замеры: по этому полю отчёт о прогоне в testnet
+                // (zk/testnet-rollup-report.mjs) решает, можно ли с ними сравнивать.
+                sourcesSha256: loadProgramKeys().sourcesSha256,
+            },
+            gas,
+            ['activateEscapeHatch', 'forceExit', 'cancelDeposit', 'rejectedForgery'],
         );
         console.table(gas);
     });
@@ -156,9 +184,12 @@ describe('Rollup: аварийный выход по пруфам SP1', () => {
         expect(parts(alice.hinted.keyUpload)).toEqual(parts(batch1.hinted.keyUpload));
         expect(alice.hinted.keyUpload.ic0).not.toEqual(batch1.hinted.keyUpload.ic0);
         expect(bob.hinted.vkDataBoc).toBe(alice.hinted.vkDataBoc);
-        // Контракт собирает ключ выхода сам — из частей ключа батчей и заданного IC0.
-        expect(await rollup.getExitKeyHash()).toBe(
-            BigInt('0x' + Cell.fromBase64(alice.hinted.vkDataBoc).hash().toString('hex')),
+        // Контракт собирает ключ выхода сам — из частей ключа батчей и заданного IC0. Оба
+        // ключа — те, что выведены из исходников; под них же построены подсказки пруфов.
+        expect(await rollup.getExitKeyHash()).toBe(expectedKey.exitKeyHash);
+        expect(await rollup.getKeyHash()).toBe(expectedKey.keyHash);
+        expect(BigInt('0x' + Cell.fromBase64(alice.hinted.vkDataBoc).hash().toString('hex'))).toBe(
+            expectedKey.exitKeyHash,
         );
         expect(await rollup.getExitKeyHash()).not.toBe(await rollup.getKeyHash());
     });
@@ -212,22 +243,51 @@ describe('Rollup: аварийный выход по пруфам SP1', () => {
             bob.claim,
         ];
         for (const claim of forgeries) {
+            // Подсказки посчитаны под настоящую заявку: отказ на первой же проверке наклона.
             const result = await forceExit(alice, claim);
-            expect(result.transactions).toHaveTransaction({ to: rollup.address, success: false });
+            expect(result.transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: VerifierErrors.wrongSlope,
+            });
         }
         expect(await balanceOf(stranger)).toBe(0n);
         expect(await balanceOf(alice.claim.recipient)).toBe(0n);
         expect(await balanceOf(bob.claim.recipient)).toBe(0n);
     });
 
+    it('«лучшая подделка»: пруф выхода под сумму на единицу больше отклоняется замыкающим равенством', async () => {
+        // Подсказки посчитаны честно для ложной заявки, поэтому контракт доходит до конца
+        // проверки и обязан отказать кодом WrongProof; пометка в нуллификаторе не ставится.
+        const forgery = alice.hinted.statementForgery;
+        expect(forgery.alteredWord).toBe(3);
+        const greedy = { ...alice.claim, amount: BigInt(forgery.alteredValue) };
+        expect(greedy.amount).toBe(alice.claim.amount + 1n);
+        expect(await rollup.getExpectedExitInput(greedy)).toBe(BigInt(forgery.input));
+        const result = await forceExit(alice, greedy, forgery.hintsBoc);
+        expect(result.transactions).toHaveTransaction({
+            to: rollup.address,
+            success: false,
+            exitCode: RollupErrors.wrongProof,
+        });
+        gas.rejectedForgery = Number(computePhaseOf(result.transactions, rollup.address).gasUsed);
+        expect(await balanceOf(alice.claim.recipient)).toBe(0n);
+        const nullifier = await rollup.getExitNullifierAddress(alice.claim.l2Account);
+        expect((await blockchain.getContract(nullifier)).accountState?.type ?? 'uninit').toBe('uninit');
+    });
+
     it('пруф программы батчей не годится как пруф выхода', async () => {
         const result = await rollup.sendForceExit(anyone.getSender(), {
-            proof: batch2.proof,
-            hints: Cell.fromBase64(batch2.hinted.hintsBoc),
+            proof: batch3.proof,
+            hints: Cell.fromBase64(batch3.hinted.hintsBoc),
             claim: alice.claim,
             value: FORCE_EXIT_VALUE,
         });
-        expect(result.transactions).toHaveTransaction({ to: rollup.address, success: false });
+        expect(result.transactions).toHaveTransaction({
+            to: rollup.address,
+            success: false,
+            exitCode: VerifierErrors.wrongSlope,
+        });
         expect(await balanceOf(alice.claim.recipient)).toBe(0n);
     });
 
@@ -240,25 +300,32 @@ describe('Rollup: аварийный выход по пруфам SP1', () => {
             expect(await balanceOf(exit.claim.recipient)).toBe(exit.claim.amount);
         }
 
-        // Вывод, который Боб оформил ещё в батче 2, идёт обычным путём.
-        const { leafIndex } = program.withdrawal;
-        const recipientHash = BigInt(program.withdrawal.recipientHash);
-        const amount = BigInt(program.withdrawal.amount);
-        const tree = withdrawalTree([{ leafIndex, recipientHash, amount }]);
-        const withdrawRecipient = new Address(0, Buffer.from(recipientHash.toString(16).padStart(64, '0'), 'hex'));
-        await rollup.sendWithdraw(anyone.getSender(), {
-            leafIndex,
-            recipient: withdrawRecipient,
-            amount,
-            merkleProof: merkleProofCell(tree.proofFor(leafIndex)),
-            value: WITHDRAW_VALUE,
-        });
-        expect(await balanceOf(withdrawRecipient)).toBe(amount);
+        // Выводы, оформленные ещё в батчах 2 и 3, идут обычным путём.
+        const leaves = withdrawalLeavesAfterBatch3Of(program);
+        const tree = withdrawalTree(leaves);
+        let withdrawn = 0n;
+        for (const { leafIndex, recipientHash, amount } of leaves) {
+            const recipient = new Address(0, Buffer.from(recipientHash.toString(16).padStart(64, '0'), 'hex'));
+            await rollup.sendWithdraw(anyone.getSender(), {
+                leafIndex,
+                recipient,
+                amount,
+                merkleProof: merkleProofCell(tree.proofFor(leafIndex)),
+                value: WITHDRAW_VALUE,
+            });
+            expect(await balanceOf(recipient)).toBe(amount);
+            withdrawn += amount;
+        }
 
-        // Депозит, не попавший в батч, возвращается вносителю (депозит 1 обработан, это второй).
-        const receipt = await rollup.getDepositReceipt(2);
+        // Депозит, не попавший в батч, возвращается вносителю. В очереди он пятый: депозит
+        // сценария, две принудительные транзакции, второй депозит — и только потом он.
+        const lateDepositIndex = 5;
+        const receipt = await rollup.getDepositReceipt(lateDepositIndex);
         expect(receipt?.depositor.equals(lateDepositor.address)).toBe(true);
-        const refund = await rollup.sendCancelDeposit(anyone.getSender(), { depositIndex: 2, value: toNano('0.05') });
+        const refund = await rollup.sendCancelDeposit(anyone.getSender(), {
+            depositIndex: lateDepositIndex,
+            value: ESCAPE_SERVICE_VALUE,
+        });
         expect(refund.transactions).toHaveTransaction({
             from: rollup.address,
             to: lateDepositor.address,
@@ -266,10 +333,12 @@ describe('Rollup: аварийный выход по пруфам SP1', () => {
         });
         gas.cancelDeposit = Number(computePhaseOf(refund.transactions, rollup.address).gasUsed);
 
-        // Обязательства rollup'а: балансы L2 + неоплаченный вывод + необработанный депозит.
-        // Выплачено ровно столько; контракт не ушёл в минус и лишнего не отдал.
-        const owed = alice.claim.amount + bob.claim.amount + amount + receipt!.amount;
-        expect(owed).toBe(BigInt(program.deposit.amount) + receipt!.amount);
+        // Обязательства rollup'а: балансы L2 + неоплаченные выводы + необработанный депозит.
+        // Это ровно депозит сценария и поздний депозит; контракт не ушёл в минус и лишнего не отдал.
+        const owed = alice.claim.amount + bob.claim.amount + withdrawn + receipt!.amount;
+        expect(owed).toBe(
+            BigInt(program.deposit.amount) + BigInt(program.secondDeposit.amount) + receipt!.amount,
+        );
         expect(before - (await balanceOf(rollup.address))).toBeLessThanOrEqual(owed);
     });
-});
+}

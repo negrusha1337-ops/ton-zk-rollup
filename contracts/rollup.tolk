@@ -5,8 +5,10 @@
 // сообщениями PublishData (DA.md). Если секвенсор перестал обрабатывать депозиты,
 // rollup замораживается и средства забираются без него (rollup/escape.tolk).
 //
-// НЕ ДЛЯ ПРОДАКШЕНА. Код не проходил аудит, нет jetton'ов, принудительных транзакций
-// L2 и управления обновлениями. Только Sandbox и testnet.
+// Транзакцию L2 можно поставить в ту же очередь в обход секвенсора (ForceTransaction).
+//
+// НЕ ДЛЯ ПРОДАКШЕНА. Код не проходил аудит, нет jetton'ов и управления обновлениями.
+// Только Sandbox и testnet.
 import "rollup/storage"
 import "rollup/messages"
 import "rollup/logic"
@@ -24,32 +26,26 @@ fun onInternalMessage(inMsg: InMessage) {
 
   match (msg) {
     SubmitBatch => {
-      var storage = RollupStorage.load();
-      assert (inMsg.senderAddress == storage.sequencer) throw RollupErrors.NotSequencer;
-      val keys = storage.keys.load();
-      assert (keys.vkData != null) throw RollupErrors.KeyNotFinalized;
-      var state = storage.state.load();
-      assert (!state.frozen) throw RollupErrors.RollupFrozen;
-      val queue = state.queue.load();
-      val roots = msg.roots.load();
-      // Хеш данных батча контракт берёт из своего хранилища: пруф для данных, которые не
-      // были опубликованы в TON, не сойдётся.
-      val batchHash = takeBatchData(mutate state);
-      val ok = verifyBn254Proof(
-        msg.proof,
-        batchDigest(storage.chainId, state, queue, roots, batchHash),
-        msg.nonce,
-        keys.vkData!,
-        msg.hints
-      );
+      var batch = prepareSubmitBatch(inMsg.senderAddress, msg);
+      // Второй вход верификатора — нонс SP1 — равен нулю и свёрнут в ключ.
+      val ok = verifyBn254Proof(msg.proof, batch.digest, 0, batch.vkData, msg.hints);
       assert (ok) throw RollupErrors.WrongProof;
-      applyBatch(mutate storage, state, queue, roots);
+      applyBatch(mutate batch.storage, batch.state, batch.queue, batch.roots);
     }
     PublishData => {
       handlePublishData(inMsg.senderAddress, msg);
     }
+    DiscardBatchData => {
+      handleDiscardBatchData(inMsg.senderAddress, msg);
+    }
+    PayOwed => {
+      handlePayOwed(msg);
+    }
     DepositTon => {
       handleDeposit(inMsg.senderAddress, inMsg.valueCoins, msg);
+    }
+    ForceTransaction => {
+      handleForceTransaction(inMsg.valueCoins, msg);
     }
     Withdraw => {
       handleWithdraw(inMsg.valueCoins, msg);
@@ -71,11 +67,9 @@ fun onInternalMessage(inMsg: InMessage) {
     }
     ForceExit => {
       val storage = RollupStorage.load();
-      val keys = storage.keys.load();
-      assert (keys.vkData != null) throw RollupErrors.KeyNotFinalized;
       val claim = msg.claim.load();
       val digest = prepareForceExit(inMsg.valueCoins, storage, claim);
-      val ok = verifyBn254Proof(msg.proof, digest, msg.nonce, exitVkData(keys), msg.hints);
+      val ok = verifyBn254Proof(msg.proof, digest, 0, exitVkData(storage.keys.load()), msg.hints);
       assert (ok) throw RollupErrors.WrongProof;
       completeForceExit(storage, msg.queryId, claim);
     }
@@ -160,4 +154,32 @@ get fun expectedExitInput(l2Account: int, amount: int, recipientHash: int): int 
 /// (вноситель, сумма) по номеру депозита; сумма 0, если квитанции нет.
 get fun depositReceipt(depositIndex: int): (address?, int) {
   return depositReceiptView(depositIndex);
+}
+
+/// Параметры развёртывания: (владелец, секвенсор, chainId, срок заморозки, хеш кода нуллификатора).
+get fun deployment(): (address, address, int, int, int) {
+  return deploymentView();
+}
+
+/// (получатель, сумма) долга по ключу нуллификатора; сумма 0, если долга нет.
+get fun owedPayout(key: int): (address?, int) {
+  return owedPayoutView(key);
+}
+
+/// Минимум монет для Withdraw и для ForceExit при текущих ценах сети.
+get fun minimumValues(): (int, int) {
+  return (withdrawMinValue(), forceExitMinValue());
+}
+
+/// Запасы газа, из которых считаются пороги, и то, что из них получается в монетах:
+/// (газ шага Withdraw, газ шага нуллификатора, газ шага выплаты, монет на шаг выплаты,
+/// сколько сверх суммы должно быть на балансе для выплаты). Тесты сверяют измеренный расход
+/// с этими значениями, а не со своими копиями констант.
+get fun payoutBudgets(): (int, int, int, int, int) {
+  return payoutBudgetsView();
+}
+
+/// (газ шага депозита, газ постановки принудительной транзакции, плата за неё при текущих ценах).
+get fun queueBudgets(): (int, int, int) {
+  return queueBudgetsView();
 }

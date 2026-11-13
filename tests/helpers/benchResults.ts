@@ -34,3 +34,25 @@ export function saveBenchSection(section: string, rows: BenchRow[], extra: Recor
     mkdirSync(RESULTS_DIR, { recursive: true });
     writeFileSync(path.join(RESULTS_DIR, `${section}.json`), JSON.stringify(content, null, 2) + '\n');
 }
+
+/**
+ * Записывает измерения газа одного набора тестов в bench/<файл>. Пишет, только если
+ * набор отработал целиком — собраны все обязательные измерения и все они положительны.
+ * Иначе файл не трогается: прогон с упавшими тестами не должен затирать верные цифры
+ * неполными (так уже однажды были потеряны bench/rollup-zkvm-proof.json и rollup-escape.json).
+ */
+export function saveGasReport(
+    fileName: string,
+    header: Record<string, unknown>,
+    gas: Record<string, number>,
+    required: string[],
+) {
+    const missing = required.filter((name) => !(gas[name] > 0));
+    if (missing.length > 0) {
+        console.warn(`bench/${fileName} не обновлён: нет измерений ${missing.join(', ')}`);
+        return;
+    }
+    const file = path.join(__dirname, '..', '..', 'bench', fileName);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ ...header, ...gas }, null, 2) + '\n');
+}

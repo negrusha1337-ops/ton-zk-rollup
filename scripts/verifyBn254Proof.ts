@@ -1,4 +1,5 @@
 import { readFileSync } from 'fs';
+import { assertTestnetWithMnemonic } from '../wrappers/testnetGuard';
 import path from 'path';
 import { Address, Cell, toNano } from '@ton/core';
 import { NetworkProvider, sleep } from '@ton/blueprint';
@@ -18,9 +19,7 @@ const POLL_DELAY_MS = 3000;
 
 export async function run(provider: NetworkProvider, args: string[]) {
     const ui = provider.ui();
-    if (provider.network() === 'mainnet') {
-        throw new Error('Этот контракт — стенд без аудита. Работа с mainnet запрещена скриптом.');
-    }
+    assertTestnetWithMnemonic(provider);
     if (!args[0])
         throw new Error('Укажи адрес контракта: npx blueprint run verifyBn254Proof --testnet <адрес> [фикстура]');
     const verifier = provider.open(Bn254Groth16Verifier.createFromAddress(Address.parse(args[0])));
@@ -65,7 +64,10 @@ export async function run(provider: NetworkProvider, args: string[]) {
             return;
         }
     }
-    ui.write('Счётчик не изменился. Открой последнюю транзакцию контракта в обозревателе:');
-    ui.write('  код выхода -14 — не хватило газа (лимит или версия TVM отличаются от Sandbox);');
-    ui.write('  коды 7002–7010 и 7100 — отказ верификатора (см. contracts/bn254/hinted.tolk).');
+    // Неудача — это ошибка, а не тихое завершение: иначе обёртка над скриптом сочтёт прогон успешным.
+    throw new Error(
+        'Счётчик принятых пруфов не изменился. Открой последнюю транзакцию контракта в обозревателе: ' +
+            'код выхода -14 — не хватило газа (лимит или версия TVM отличаются от Sandbox); ' +
+            'коды 7002–7010 и 7100 — отказ верификатора (см. contracts/bn254/hinted.tolk).',
+    );
 }

@@ -75,6 +75,7 @@ const batchDigest = (v) =>
         v.prevStateRoot,
         v.newStateRoot,
         v.batchHash,
+        v.prevWithdrawalsRoot,
         v.withdrawalsRoot,
         v.prevDepositHash,
         v.newDepositHash,
@@ -98,7 +99,10 @@ for (const sibling of siblings) withdrawalsRoot = sha256Int(withdrawalsRoot, sib
 
 // Данные батчей (data availability): батч 1 — без данных, батч 2 — две порции, вторая
 // длиннее одной ячейки. Содержимое произвольное: игрушечная схема его не исполняет.
-const batchData = [[], [chunkBytes('stage1:data-2a', 100), chunkBytes('stage1:data-2b', 700)]];
+const batchData = [[], [chunkBytes('stage1:data-2a', 100), chunkBytes('stage1:data-2b', 700)], []];
+// Корень дерева выводов после батча 3: к листу 0 добавился ещё один вывод. Само дерево
+// тесту не нужно — важно, что батч 3 продолжает НЕнулевой прежний корень.
+const withdrawalsRootAfter3 = label('stage1:withdrawals-root-3');
 
 const batchValues = [
     {
@@ -106,6 +110,7 @@ const batchValues = [
         prevStateRoot: genesisStateRoot,
         newStateRoot: label('stage1:state-1'),
         batchHash: batchDataHash(batchData[0]),
+        prevWithdrawalsRoot: 0n,
         withdrawalsRoot: 0n,
         prevDepositHash: 0n,
         newDepositHash: 0n,
@@ -115,8 +120,21 @@ const batchValues = [
         prevStateRoot: label('stage1:state-1'),
         newStateRoot: label('stage1:state-2'),
         batchHash: batchDataHash(batchData[1]),
+        // Батч 1 выводов не публиковал: прежний корень дерева — ноль.
+        prevWithdrawalsRoot: 0n,
         withdrawalsRoot,
         prevDepositHash: 0n,
+        newDepositHash: depositHashAfter,
+    },
+    {
+        // Батч 3: без данных и без новых депозитов; дерево выводов продолжается от корня,
+        // который опубликовал батч 2 (он уже не нулевой).
+        prevStateRoot: label('stage1:state-2'),
+        newStateRoot: label('stage1:state-3'),
+        batchHash: batchDataHash(batchData[2]),
+        prevWithdrawalsRoot: withdrawalsRoot,
+        withdrawalsRoot: withdrawalsRootAfter3,
+        prevDepositHash: depositHashAfter,
         newDepositHash: depositHashAfter,
     },
 ];
@@ -132,15 +150,73 @@ if (prepared.vkData.toBoc().toString('base64') !== expectedVk) {
 }
 
 const s = (v) => v.toString();
+const proofArray = (proof) => [
+    proof.pi_a[0],
+    proof.pi_a[1],
+    proof.pi_b[0][0],
+    proof.pi_b[0][1],
+    proof.pi_b[1][0],
+    proof.pi_b[1][1],
+    proof.pi_c[0],
+    proof.pi_c[1],
+];
+/**
+ * Пруф игрушечной схемы и подсказки к нему. Контракт проверяет его под вход `digest` ключом
+ * `usedKey`; сама схема при этом доказывает вход `digest + shift`. Для ключа батчей сдвиг
+ * нулевой. Для ключа выхода — EXIT_KEY_SHIFT: его IC0 сдвинут на shift·IC1, поэтому
+ *   IC0' + digest·IC1 = IC0 + (digest + shift)·IC1,
+ * и пруф для входа digest + shift проходит под ключом выхода со входом digest — и только
+ * под ним. Так ключ выхода в тестах отличается от ключа батчей, как у настоящих программ.
+ */
+async function proveDigest(digest, what, usedKey = key, usedPrepared = prepared, shift = 0n) {
+    const circuitInput = digest + shift;
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(
+        { a: circuitInput.toString(), b: '1' },
+        wasm,
+        zkey,
+    );
+    if (BigInt(publicSignals[0]) !== circuitInput || !(await snarkjs.groth16.verify(vkJson, publicSignals, proof))) {
+        throw new Error(`${what}: пруф не сошёлся с дайджестом`);
+    }
+    const points = parseProof(proof);
+    return { proof, points, hints: buildProofHints(usedKey, usedPrepared, points, [digest]).hints };
+}
+/**
+ * «Лучшая подделка»: настоящий пруф предъявлен под другой публичный вход, а все
+ * подсказки посчитаны честно для этого ложного утверждения. Не сходится только
+ * замыкающее равенство — контракт обязан отказать именно на нём (WrongProof).
+ */
+const forgedHints = (points, falseDigest, usedKey = key, usedPrepared = prepared) =>
+    buildProofHints(usedKey, usedPrepared, points, [falseDigest], { forge: true })
+        .hints.toBoc()
+        .toString('base64');
+/**
+ * Подделка второго вида: вход верный, а сам пруф испорчен — к точке C прибавлена образующая
+ * (точка остаётся на кривой). Подсказки снова честные для этого негодного пруфа.
+ */
+function tamperedProof(points, digest) {
+    const tampered = { ...points, C: points.C.add(points.C.constructor.BASE) };
+    const { x, y } = tampered.C.toAffine();
+    return {
+        c: [s(x), s(y)],
+        hintsBoc: buildProofHints(key, prepared, tampered, [digest], { forge: true }).hints.toBoc().toString('base64'),
+    };
+}
+
 const batches = [];
+let batch2Points;
 for (const [index, values] of batchValues.entries()) {
     const digest = batchDigest(values);
-    const { proof, publicSignals } = await snarkjs.groth16.fullProve({ a: digest.toString(), b: '1' }, wasm, zkey);
-    if (BigInt(publicSignals[0]) !== digest || !(await snarkjs.groth16.verify(vkJson, publicSignals, proof))) {
-        throw new Error(`Батч ${index + 1}: пруф не сошёлся с дайджестом`);
-    }
-    const { hints } = buildProofHints(key, prepared, parseProof(proof), [digest]);
+    const { proof, points, hints } = await proveDigest(digest, `Батч ${index + 1}`);
+    if (index === 1) batch2Points = points;
+    // Подделка: тот же пруф под батч с другим новым корнем состояния.
+    const forgedStateRoot = label(`stage1:forged-state-${index + 1}`);
     batches.push({
+        forgery: {
+            newStateRoot: s(forgedStateRoot),
+            hintsBoc: forgedHints(points, batchDigest({ ...values, newStateRoot: forgedStateRoot })),
+        },
+        tamperedProof: tamperedProof(points, digest),
         roots: {
             newStateRoot: s(values.newStateRoot),
             withdrawalsRoot: s(values.withdrawalsRoot),
@@ -149,20 +225,83 @@ for (const [index, values] of batchValues.entries()) {
         dataChunksHex: batchData[index].map((chunk) => chunk.toString('hex')),
         batchHash: s(values.batchHash),
         publicInput: s(digest),
-        proof: [
-            proof.pi_a[0],
-            proof.pi_a[1],
-            proof.pi_b[0][0],
-            proof.pi_b[0][1],
-            proof.pi_b[1][0],
-            proof.pi_b[1][1],
-            proof.pi_c[0],
-            proof.pi_c[1],
-        ],
+        proof: proofArray(proof),
         hintsBoc: hints.toBoc().toString('base64'),
     });
     console.log(`  батч ${index + 1}: готово`);
 }
+
+// --- аварийный выход на игрушечной схеме ---
+// Ключ выхода в тесте — ключ игрушечной схемы со сдвинутым IC0 (см. proveDigest): как и у
+// настоящих программ, он отличается от ключа батчей одной константой, и пруф выхода проходит
+// только под ним. Так проверяется весь путь выхода, разделение ключей и отказ на подделке —
+// без пруфов SP1. Состояние — после батча 2.
+const EXIT_KEY_SHIFT = 0x5eedn;
+const exitKey = { ...key, ic: [key.ic[0].add(key.ic[1].multiply(EXIT_KEY_SHIFT)), ...key.ic.slice(1)] };
+const exitPrepared = buildVerificationKeyData(exitKey, [0n], [0]);
+const exitDigest = (claim) =>
+    sha256Int(CHAIN_ID, batchValues[1].newStateRoot, claim.l2Account, claim.amount, claim.recipientHash) & MASK_253;
+const exitClaim = {
+    l2Account: label('stage1:exit-account') >> 96n,
+    amount: TON / 2n,
+    recipientHash: label('stage1:exit-recipient'),
+};
+const provenExit = await proveDigest(exitDigest(exitClaim), 'Выход', exitKey, exitPrepared, EXIT_KEY_SHIFT);
+// Подделка: тот же пруф под заявку с суммой вдвое больше.
+const forgedExitAmount = exitClaim.amount * 2n;
+const exit = {
+    l2Account: s(exitClaim.l2Account),
+    amount: s(exitClaim.amount),
+    recipientHash: s(exitClaim.recipientHash),
+    publicInput: s(exitDigest(exitClaim)),
+    proof: proofArray(provenExit.proof),
+    hintsBoc: provenExit.hints.toBoc().toString('base64'),
+    forgery: {
+        amount: s(forgedExitAmount),
+        hintsBoc: forgedHints(
+            provenExit.points,
+            exitDigest({ ...exitClaim, amount: forgedExitAmount }),
+            exitKey,
+            exitPrepared,
+        ),
+    },
+    // IC0 ключа выхода: тест задаёт его сообщением SetExitKey.
+    keyIc0: exitPrepared.upload.ic0.map(s),
+    // Пруф батча 2, предъявленный как пруф выхода: подсказки честные для ключа выхода и
+    // дайджеста заявки. Отказать обязано замыкающее равенство: ключ не тот и вход не тот.
+    batchProofAsExit: {
+        proof: batches[1].proof,
+        hintsBoc: forgedHints(batch2Points, exitDigest(exitClaim), exitKey, exitPrepared),
+    },
+};
+console.log('  выход: готово');
+
+// --- атака «приписать лист в дерево выводов» (REVIEW.md, круг 1, находка 2) ---
+// Секвенсор строит батч 3 от ПОДДЕЛЬНОГО прежнего дерева выводов (в нём лишний лист в его
+// пользу) и публикует корень, включающий этот лист. Пруф честный — для того утверждения,
+// которое секвенсор выбрал сам. Контракт подставляет прежний корень из своего хранилища,
+// и утверждения расходятся: пруф не подходит.
+const forgedPriorRoot = label('stage1:forged-prior-withdrawals');
+const forgedPriorValues = {
+    ...batchValues[2],
+    prevWithdrawalsRoot: forgedPriorRoot,
+    withdrawalsRoot: label('stage1:withdrawals-root-with-planted-leaf'),
+};
+const forgedPrior = await proveDigest(batchDigest(forgedPriorValues), 'Батч 3 от поддельного дерева');
+const attacks = {
+    forgedPriorWithdrawals: {
+        note: 'Честный пруф батча 3, построенного от поддельного прежнего корня выводов',
+        roots: {
+            newStateRoot: s(forgedPriorValues.newStateRoot),
+            withdrawalsRoot: s(forgedPriorValues.withdrawalsRoot),
+        },
+        claimedPrevWithdrawalsRoot: s(forgedPriorRoot),
+        publicInput: s(batchDigest(forgedPriorValues)),
+        proof: proofArray(forgedPrior.proof),
+        hintsBoc: forgedPrior.hints.toBoc().toString('base64'),
+    },
+};
+console.log('  атака на дерево выводов: готово');
 
 mkdirSync(OUT, { recursive: true });
 writeFileSync(
@@ -186,6 +325,8 @@ writeFileSync(
             root: s(withdrawalsRoot),
         },
         batches,
+        exit,
+        attacks,
     }) + '\n',
 );
 console.log(`Записано: fixtures/rollup_batches/batches.json (батчей: ${batches.length})`);

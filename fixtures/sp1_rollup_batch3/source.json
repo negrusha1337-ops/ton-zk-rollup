@@ -1,0 +1,23 @@
+{
+ "description": "Настоящий пруф SP1 нашей программы (перехода состояния) и ключ Groth16-верификатора v6.1.0",
+ "verifier": "https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/v6.1.0/Groth16Verifier.sol",
+ "wrapper": "https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/v6.1.0/SP1VerifierGroth16.sol",
+ "proof": "fixtures/zkvm_batches/proof-batch3.json",
+ "verifierHash": "0x4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696",
+ "programVKey": "0x00a14e16c1a59d90c4268e765945b8bc0ca25015541f447d62565fbdbe4bb640",
+ "publicValues": "0x000000000000000000000000000000000000000000000000000000544f4e5a4b039cf4391930e17d8550d79c5b0b5149b5f922d048b47cb477df9991954915a7edc6bffd111ded40de4e211a157ec6a13f1952701d11d4f7a0c3a2bd7024d6db81f9cb02ba95b5ef91c7a454048ae581264cbeae1b74fe8c78d23435d9095b84de886ae05ff8d41fa27c05d7a1ad4a6af106b879b12669a6c270d6c010f239b1818d190ec644a905cc4b7789d34ccad889c34aa4ef9d491b7cd0e5970d74cd2f5da8c9a383a54336fcf8cf26194130c8147bda2f03c70037fc0617aa571d5191beaa6ffc898f4155c01cddabb7c9957439396cb6aea2ea473722f4c0f22fb9ce",
+ "inputNames": [
+  "programVKey",
+  "publicValuesDigest",
+  "exitCode",
+  "vkRoot",
+  "nonce"
+ ],
+ "variableInputs": [
+  1
+ ],
+ "kind": "batch",
+ "sourcesSha256": "702fea2e601b560c5073b1f94017bfa49699a5d16948ce18a8f83d55f87f1207",
+ "elfSha256": "a748c3bbd68820e8217e667afa2ca7271b026f299e00749b000fdede08dfa88f",
+ "verifierConstantsSha256": "391e915f0ec0dfe137dc5ccbf1f8d4c3934320c649d17994e1aeff95881690eb"
+}

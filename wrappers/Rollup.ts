@@ -14,6 +14,7 @@ import { Bn254Groth16Verifier, Bn254Proof, KeyUpload } from './Bn254Groth16Verif
 export const RollupOpcodes = {
     submitBatch: 0x52420001,
     depositTon: 0x52420002,
+    forceTransaction: 0x52420005,
     publishData: 0x52420003,
     withdraw: 0x52420004,
     activateEscapeHatch: 0x52420006,
@@ -21,6 +22,8 @@ export const RollupOpcodes = {
     cancelDeposit: 0x52420008,
     setExitKey: 0x52420009,
     pruneDepositReceipts: 0x5242000a,
+    discardBatchData: 0x5242000b,
+    payOwed: 0x5242000c,
     nullifierClaim: 0x52420010,
     nullifierClaimed: 0x52420011,
 };
@@ -45,11 +48,30 @@ export const RollupErrors = {
     depositAlreadyProcessed: 7316,
     noSuchDeposit: 7317,
     exitKeyNotSet: 7318,
+    malformedForcedTransaction: 7319,
+    insufficientFunds: 7320,
+    badDeployment: 7321,
+    dataTooFarAhead: 7322,
+    nothingOwed: 7323,
+    badKeyPoint: 7324,
+    feeBelowGasCost: 7325,
 };
 
 export const NullifierErrors = {
     notRollup: 7200,
     alreadyClaimed: 7201,
+    unknownMessage: 7202,
+    notEnoughValue: 7203,
+};
+
+/** Коды отказа верификатора BN254 (contracts/bn254/hinted.tolk, verifier_api.tolk). */
+export const VerifierErrors = {
+    inputOutOfRange: 7003,
+    malformedHints: 7004,
+    degenerateSlope: 7005,
+    wrongSlope: 7006,
+    pointNotOnCurve: 7010,
+    badKeyPart: 7105,
 };
 
 export type RollupConfig = {
@@ -94,6 +116,7 @@ export class Rollup implements Contract {
             .storeBit(false) // frozen
             .storeUint(0, 32) // queuedAfterTargetAt
             .storeUint(0, 32) // queuedAfterProcessedAt
+            .storeBit(false) // owed: долгов нет
             .endCell();
         const keys = beginCell()
             .storeBit(false) // vkData: ещё нет
@@ -120,10 +143,21 @@ export class Rollup implements Contract {
      * (contracts/rollup/storage.tolk) и createFromConfig выше.
      */
     static uploadedKeySlots(data: Cell): number[] {
-        const slice = data.beginParse();
         const keys = data.beginParse().loadRef().beginParse(); // первая ссылка корня — RollupKeys
         keys.loadMaybeRef(); // vkData
         return keys.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell()).keys();
+    }
+
+    /**
+     * Хеши загруженных частей ключа по номерам — по ячейке данных контракта. Скрипт
+     * развёртывания сверяет их с ожидаемыми ДО фиксации: до неё часть можно перезаписать,
+     * после — ключ неизменяем.
+     */
+    static uploadedKeyPartHashes(data: Cell): Map<number, string> {
+        const keys = data.beginParse().loadRef().beginParse(); // RollupKeys
+        keys.loadMaybeRef(); // vkData
+        const parts = keys.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell());
+        return new Map(parts.keys().map((slot) => [slot, parts.get(slot)!.hash().toString('hex')]));
     }
 
     /**
@@ -135,6 +169,18 @@ export class Rollup implements Contract {
         keys.loadMaybeRef(); // vkData
         keys.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell()); // keyParts
         return keys.loadUintBig(254) !== 0n || keys.loadUintBig(254) !== 0n;
+    }
+
+    /**
+     * IC0 ключа программы выхода, как он записан в данных контракта; (0, 0) — не задан.
+     * Скрипт развёртывания сверяет его с ожидаемым ДО фиксации ключа: после неё ключ
+     * выхода уже не исправить.
+     */
+    static exitKeyIc0(data: Cell): [bigint, bigint] {
+        const keys = data.beginParse().loadRef().beginParse(); // RollupKeys
+        keys.loadMaybeRef(); // vkData
+        keys.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell()); // keyParts
+        return [keys.loadUintBig(254), keys.loadUintBig(254)];
     }
 
     private async send(provider: ContractProvider, via: Sender, value: bigint, body: Cell) {
@@ -174,7 +220,7 @@ export class Rollup implements Contract {
             .endCell();
     }
 
-    static buildSubmitBatchBody(opts: { proof: Bn254Proof; hints: Cell; roots: BatchRoots; nonce?: bigint }): Cell {
+    static buildSubmitBatchBody(opts: { proof: Bn254Proof; hints: Cell; roots: BatchRoots }): Cell {
         const roots = beginCell()
             .storeUint(opts.roots.newStateRoot, 256)
             .storeUint(opts.roots.withdrawalsRoot, 256)
@@ -182,7 +228,6 @@ export class Rollup implements Contract {
         return beginCell()
             .storeUint(RollupOpcodes.submitBatch, 32)
             .storeUint(0, 64)
-            .storeUint(opts.nonce ?? 0n, 256)
             .storeRef(Rollup.buildProofCell(opts.proof))
             .storeRef(opts.hints)
             .storeRef(roots)
@@ -192,7 +237,7 @@ export class Rollup implements Contract {
     async sendSubmitBatch(
         provider: ContractProvider,
         via: Sender,
-        opts: { proof: Bn254Proof; hints: Cell; roots: BatchRoots; nonce?: bigint; value: bigint },
+        opts: { proof: Bn254Proof; hints: Cell; roots: BatchRoots; value: bigint },
     ) {
         await this.send(provider, via, opts.value, Rollup.buildSubmitBatchBody(opts));
     }
@@ -218,7 +263,7 @@ export class Rollup implements Contract {
     async sendForceExit(
         provider: ContractProvider,
         via: Sender,
-        opts: { proof: Bn254Proof; hints: Cell; claim: ExitClaim; nonce?: bigint; value: bigint },
+        opts: { proof: Bn254Proof; hints: Cell; claim: ExitClaim; value: bigint },
     ) {
         const claim = beginCell()
             .storeUint(opts.claim.l2Account, 160)
@@ -228,7 +273,6 @@ export class Rollup implements Contract {
         const body = beginCell()
             .storeUint(RollupOpcodes.forceExit, 32)
             .storeUint(0, 64)
-            .storeUint(opts.nonce ?? 0n, 256)
             .storeRef(Rollup.buildProofCell(opts.proof))
             .storeRef(opts.hints)
             .storeRef(claim)
@@ -257,7 +301,7 @@ export class Rollup implements Contract {
     }
 
     /**
-     * Порция данных батча (data availability). `data` — цепочка ячеек из
+     * Порция данных батча (data availability). `data` — дерево ячеек из
      * `dataChunkCell` (wrappers/rollupMath.ts): программа zkVM считает хеш такой раскладки.
      */
     async sendPublishData(
@@ -274,12 +318,45 @@ export class Rollup implements Contract {
         await this.send(provider, via, opts.value, body);
     }
 
+    /** Сбросить всё, что опубликовано для ещё не принятого батча (только секвенсор). */
+    async sendDiscardBatchData(provider: ContractProvider, via: Sender, opts: { batchIndex: number; value: bigint }) {
+        const body = beginCell()
+            .storeUint(RollupOpcodes.discardBatchData, 32)
+            .storeUint(0, 64)
+            .storeUint(opts.batchIndex, 64)
+            .endCell();
+        await this.send(provider, via, opts.value, body);
+    }
+
+    /** Выплатить записанный долг по уже погашенной заявке; `key` — ключ нуллификатора. */
+    async sendPayOwed(provider: ContractProvider, via: Sender, opts: { key: bigint; value: bigint }) {
+        const body = beginCell()
+            .storeUint(RollupOpcodes.payOwed, 32)
+            .storeUint(0, 64)
+            .storeUint(opts.key, 256)
+            .endCell();
+        await this.send(provider, via, opts.value, body);
+    }
+
     /** Депозит TON: на L2 зачтётся приложенная сумма минус комиссия 0,01 TON. */
     async sendDeposit(provider: ContractProvider, via: Sender, opts: { l2Recipient: bigint; value: bigint }) {
         const body = beginCell()
             .storeUint(RollupOpcodes.depositTon, 32)
             .storeUint(0, 64)
             .storeUint(opts.l2Recipient, 160)
+            .endCell();
+        await this.send(provider, via, opts.value, body);
+    }
+
+    /**
+     * Поставить транзакцию L2 в очередь L1 в обход секвенсора. `l2Transaction` — ячейка из
+     * `forcedTransactionCell` (wrappers/rollupMath.ts): одна ячейка без ссылок.
+     */
+    async sendForceTransaction(provider: ContractProvider, via: Sender, opts: { l2Transaction: Cell; value: bigint }) {
+        const body = beginCell()
+            .storeUint(RollupOpcodes.forceTransaction, 32)
+            .storeUint(0, 64)
+            .storeRef(opts.l2Transaction)
             .endCell();
         await this.send(provider, via, opts.value, body);
     }
@@ -379,4 +456,56 @@ export class Rollup implements Contract {
         const { stack } = await provider.get('nullifierAddress', [{ type: 'int', value: BigInt(leafIndex) }]);
         return stack.readAddress();
     }
+
+    /** Параметры развёртывания, как их хранит контракт. */
+    async getDeployment(provider: ContractProvider) {
+        const { stack } = await provider.get('deployment', []);
+        return {
+            owner: stack.readAddress(),
+            sequencer: stack.readAddress(),
+            chainId: stack.readBigNumber(),
+            escapeTimeout: stack.readNumber(),
+            nullifierCodeHash: stack.readBigNumber(),
+        };
+    }
+
+    /** Долг по уже погашенной заявке; null, если его нет. `key` — ключ нуллификатора. */
+    async getOwedPayout(provider: ContractProvider, key: bigint) {
+        const { stack } = await provider.get('owedPayout', [{ type: 'int', value: key }]);
+        const recipient = stack.readAddressOpt();
+        const amount = stack.readBigNumber();
+        return recipient ? { recipient, amount } : null;
+    }
+
+    /** Запасы газа шагов очереди L1 и плата за принудительную транзакцию при текущих ценах. */
+    async getQueueBudgets(provider: ContractProvider) {
+        const { stack } = await provider.get('queueBudgets', []);
+        return {
+            depositStepGas: stack.readNumber(),
+            forceTransactionStepGas: stack.readNumber(),
+            forceTransactionFee: stack.readBigNumber(),
+        };
+    }
+
+    /** Запасы газа цепочки вывода и производные от них суммы — как их считает контракт. */
+    async getPayoutBudgets(provider: ContractProvider) {
+        const { stack } = await provider.get('payoutBudgets', []);
+        return {
+            withdrawStepGas: stack.readNumber(),
+            nullifierClaimGas: stack.readNumber(),
+            payoutStepGas: stack.readNumber(),
+            payoutStepValue: stack.readBigNumber(),
+            payoutOverhead: stack.readBigNumber(),
+        };
+    }
+
+    /** Минимум монет для Withdraw и для ForceExit при текущих ценах сети. */
+    async getMinimumValues(provider: ContractProvider) {
+        const { stack } = await provider.get('minimumValues', []);
+        return { withdraw: stack.readBigNumber(), forceExit: stack.readBigNumber() };
+    }
 }
+
+/** Основание ключей нуллификатора аварийных выходов (EXIT_NULLIFIER_BASE в escape.tolk). */
+export const EXIT_NULLIFIER_BASE = 1n << 255n;
+export const exitNullifierKey = (l2Account: bigint): bigint => EXIT_NULLIFIER_BASE + l2Account;

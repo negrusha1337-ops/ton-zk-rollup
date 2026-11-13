@@ -1,5 +1,6 @@
 // Хранилище контракта-нуллификатора. Вынесено отдельно: rollup-контракт строит по
 // нему начальное состояние дочернего контракта и вычисляет его адрес.
+import "@stdlib/gas-payments"
 
 struct NullifierStorage {
   rollup: address
@@ -7,4 +8,31 @@ struct NullifierStorage {
   /// выходе (см. exitNullifierKey в rollup/escape.tolk) — пространства не пересекаются.
   key: uint256
   claimed: bool
+}
+
+// ---------------------------------------------------------------------------
+// Сколько монет должно дойти до нуллификатора. Пороги заданы в газе и пересчитываются
+// в монеты по текущему конфигу сети (calculateGasFee, calculateForwardFee): при смене цен
+// пороги меняются вместе с ними. Запасы — с измерений в Sandbox (bench/rollup-payout-gas.json),
+// тест tests/RollupPayout.spec.ts следит, чтобы измеренный расход в них укладывался.
+// ---------------------------------------------------------------------------
+
+/// Газ шага «нуллификатор помечает заявку и отвечает», с запасом.
+const NULLIFIER_CLAIM_GAS: int = 12000
+/// Газ шага «rollup получает подтверждение и платит либо записывает долг», с запасом.
+/// Этот шаг не имеет права упасть: пометка в нуллификаторе к нему уже поставлена.
+const PAYOUT_STEP_GAS: int = 40000
+/// Верхняя оценка размера подтверждения NullifierClaimed и выплаты: биты и ячейки.
+const CONFIRMATION_BITS: int = 1023
+const CONFIRMATION_CELLS: int = 1
+
+/// Минимум монет, с которым нуллификатор соглашается пометить заявку: хватит на его
+/// собственный шаг, на пересылку подтверждения и на шаг выплаты в rollup-контракте.
+/// Если монет меньше, заявка НЕ помечается и возвращается bounce'ом: иначе подтверждение
+/// могло бы не дойти или не исполниться, а пометка осталась бы навсегда.
+@inline
+fun nullifierMinValue(): coins {
+  return calculateGasFee(BASECHAIN, NULLIFIER_CLAIM_GAS)
+    + calculateForwardFee(BASECHAIN, CONFIRMATION_BITS, CONFIRMATION_CELLS)
+    + calculateGasFee(BASECHAIN, PAYOUT_STEP_GAS);
 }

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import { Blockchain } from '@ton/sandbox';
 import { Address, beginCell, Cell, contractAddress, toNano, TupleItem } from '@ton/core';
@@ -50,6 +50,16 @@ describe('BN254: программное спаривание в TVM', () => {
     afterAll(() => {
         console.table(gasLog);
         const file = path.join(__dirname, '..', 'bench', 'bn254-software-pairing.json');
+        // Неполный прогон (упавшие или отфильтрованные тесты) не должен затирать замеры:
+        // пишем, только если есть всё, что было в прежнем файле, и профиль по стадиям.
+        const previous: Record<string, number> = existsSync(file)
+            ? (JSON.parse(readFileSync(file, 'utf8')).gas ?? {})
+            : {};
+        const missing = Object.keys(previous).filter((name) => !(gasLog[name] > 0));
+        if (missing.length > 0 || Object.keys(hintedProfile).length === 0) {
+            console.warn(`bench/bn254-software-pairing.json не обновлён: нет измерений ${missing.join(', ') || 'профиля'}`);
+            return;
+        }
         mkdirSync(path.dirname(file), { recursive: true });
         writeFileSync(
             file,

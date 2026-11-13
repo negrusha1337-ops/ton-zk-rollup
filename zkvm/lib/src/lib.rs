@@ -3,17 +3,26 @@
 //! значения ровно в том формате, который проверяет rollup-контракт на TON
 //! (contracts/rollup/logic.tolk):
 //!
-//!   chainId ‖ prevStateRoot ‖ newStateRoot ‖ batchHash ‖ withdrawalsRoot ‖ prevDepositHash ‖ newDepositHash
+//!   chainId ‖ prevStateRoot ‖ newStateRoot ‖ batchHash
+//!           ‖ prevWithdrawalsRoot ‖ withdrawalsRoot ‖ prevDepositHash ‖ newDepositHash
 //!
-//! семь слов по 32 байта. Контракт берёт от них SHA-256, обрезает до 253 бит и
+//! восемь слов по 32 байта. Контракт берёт от них SHA-256, обрезает до 253 бит и
 //! подаёт верификатору первым публичным входом — так же считает дайджест SP1.
 //!
 //! Что именно доказывает пруф:
 //!   - идентификатор rollup'а (chainId) — тот, под который подписаны транзакции; контракт
 //!     подставляет свой, поэтому пруф одного rollup'а не подойдёт другому;
 //!   - транзакции взяты из данных, опубликованных в TON (модуль `data`, DA.md);
-//!   - каждая транзакция подписана владельцем счёта и идёт по порядку его nonce (модуль `tx`);
-//!   - депозиты обработаны строго по очереди L1, выводы добавлены в дерево выводов.
+//!   - исполнены только транзакции, подписанные владельцем счёта и идущие по порядку его
+//!     nonce (модуль `tx`); некорректные пропущены — и из очереди L1, и из данных секвенсора.
+//!     Поэтому содержимое опубликованных данных не может сделать батч недоказуемым. Форма
+//!     может: порция длиннее MAX_DATA_CHUNK_BYTES или ячейка, разложенная не так, как
+//!     `data_chunk_hash`, дают хеш, который программа не воспроизведёт. Публикует данные
+//!     только секвенсор, и на этот случай у него есть сброс (DiscardBatchData в контракте);
+//!   - дерево выводов продолжено от того корня, который хранит контракт (prevWithdrawalsRoot):
+//!     приписать или стереть прежний лист нельзя;
+//!   - очередь L1 обработана строго по порядку: депозиты зачислены, принудительные
+//!     транзакции исполнены (или пропущены, если некорректны); выводы добавлены в дерево выводов.
 #![no_std]
 
 extern crate alloc;
@@ -37,8 +46,10 @@ pub type L2Address = [u8; 20];
 
 /// Глубина дерева выводов — как WITHDRAWAL_TREE_DEPTH в контракте.
 pub const WITHDRAWAL_TREE_DEPTH: usize = 32;
+/// Сколько листьев помещается в дерево выводов: номер листа в контракте — uint32.
+pub const MAX_WITHDRAWALS: u64 = 1 << WITHDRAWAL_TREE_DEPTH;
 /// Число слов публичных значений и их размер в байтах.
-pub const PUBLIC_VALUE_WORDS: usize = 7;
+pub const PUBLIC_VALUE_WORDS: usize = 8;
 pub const PUBLIC_VALUES_BYTES: usize = PUBLIC_VALUE_WORDS * 32;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,6 +67,29 @@ pub struct Deposit {
     pub amount: u128,
 }
 
+/// Элемент очереди L1→L2. Секвенсор обязан обработать очередь по порядку: это и есть
+/// защита от цензуры — то, что попало в очередь на L1, он не может не включить.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum QueueItem {
+    Deposit(Deposit),
+    /// Транзакция L2, которую пользователь поставил в очередь сам, в обход секвенсора:
+    /// байты одной подписанной транзакции в кодировке `encode_transactions`. Контракт их
+    /// не разбирает, поэтому здесь может быть что угодно; некорректная транзакция
+    /// пропускается, а не делает батч недоказуемым.
+    ForcedTransaction(Vec<u8>),
+}
+
+/// Метка принудительной транзакции в накопительном хеше очереди: стоит на месте
+/// получателя депозита, а получатель депозита — 160 бит, так что спутать их нельзя.
+/// Должна совпадать с FORCED_TRANSACTION_MARKER в contracts/rollup/logic.tolk.
+const FORCED_TRANSACTION_MARKER: Hash = {
+    let mut marker = [0u8; 32];
+    marker[0] = 0x80;
+    marker
+};
+/// Принудительная транзакция обязана помещаться в одну ячейку TON без ссылок.
+pub const MAX_FORCED_TRANSACTION_BYTES: usize = data::DATA_CELL_BYTES;
+
 /// Уже существующий лист дерева выводов (дерево накопительное).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WithdrawalLeaf {
@@ -72,8 +106,9 @@ pub struct BatchInput {
     pub accounts: Vec<Account>,
     /// Накопительный хеш очереди депозитов на момент предыдущего батча.
     pub prev_deposit_hash: Hash,
-    /// Депозиты, которые батч обязан обработать, в порядке очереди.
-    pub deposits: Vec<Deposit>,
+    /// Элементы очереди L1 (депозиты и принудительные транзакции), которые батч обязан
+    /// обработать, в порядке очереди.
+    pub queue_items: Vec<QueueItem>,
     /// Порции данных батча в том виде и порядке, в каком они опубликованы в TON.
     /// Транзакции — это их склейка в кодировке `encode_transactions`.
     pub data_chunks: Vec<Vec<u8>>,
@@ -87,13 +122,16 @@ pub struct PublicValues {
     pub prev_state_root: Hash,
     pub new_state_root: Hash,
     pub batch_hash: Hash,
+    /// Корень дерева выводов до батча: контракт подставляет свой, поэтому прежние выводы
+    /// (приватный вход программы) обязаны быть теми самыми, что уже приняты на L1.
+    pub prev_withdrawals_root: Hash,
     pub withdrawals_root: Hash,
     pub prev_deposit_hash: Hash,
     pub new_deposit_hash: Hash,
 }
 
 impl PublicValues {
-    /// 224 байта в порядке, зафиксированном протоколом.
+    /// 256 байт в порядке, зафиксированном протоколом.
     pub fn to_bytes(&self) -> [u8; PUBLIC_VALUES_BYTES] {
         let mut out = [0u8; PUBLIC_VALUES_BYTES];
         let chain_word = word(self.chain_id as u128);
@@ -102,6 +140,7 @@ impl PublicValues {
             &self.prev_state_root,
             &self.new_state_root,
             &self.batch_hash,
+            &self.prev_withdrawals_root,
             &self.withdrawals_root,
             &self.prev_deposit_hash,
             &self.new_deposit_hash,
@@ -122,7 +161,10 @@ impl PublicValues {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BatchError {
+    /// Счета во входе не отсортированы строго по адресу (или есть дубликат).
     AccountsNotSorted,
+    /// Причины, по которым отдельная транзакция не исполняется. Батч они не ломают:
+    /// такая транзакция пропускается.
     InsufficientBalance,
     BalanceOverflow,
     /// У адреса, восстановленного из подписи, нет счёта.
@@ -131,10 +173,18 @@ pub enum BatchError {
     BadSignature,
     /// Номер транзакции не совпал с nonce счёта: повтор или пропуск.
     BadNonce,
-    /// Данные батча не разбираются как список транзакций.
+    /// Байты не разбираются как транзакция.
     MalformedData,
     /// Порция длиннее, чем помещается в одно сообщение TON.
     DataChunkTooLarge,
+    /// Принудительная транзакция длиннее одной ячейки: контракт такую в очередь не ставит.
+    ForcedTransactionTooLarge,
+    /// Перевод или вывод нулевой суммы: ничего не двигает, но оставил бы вечную запись
+    /// (пустой счёт или лист дерева выводов). Пропускается, как любая некорректная транзакция.
+    ZeroAmount,
+    /// В дереве выводов не осталось листьев (2^32). Вывод пропускается; для прежних выводов
+    /// во входе батча это ошибка батча.
+    WithdrawalTreeFull,
 }
 
 pub fn sha256(parts: &[&[u8]]) -> Hash {
@@ -180,14 +230,33 @@ fn ledger_root(ledger: &Ledger) -> Hash {
     hasher.finalize().into()
 }
 
-/// Корень состояния для списка счетов, отсортированного по адресу.
-pub fn state_root(accounts: &[Account]) -> Hash {
-    ledger_root(&accounts.iter().map(|a| (a.address, AccountState { balance: a.balance, nonce: a.nonce })).collect())
+/// Счета идут строго по возрастанию адреса — значит, и без дубликатов.
+pub fn is_strictly_sorted(accounts: &[Account]) -> bool {
+    accounts.windows(2).all(|pair| pair[0].address < pair[1].address)
+}
+
+/// Корень состояния для списка счетов, строго отсортированного по адресу; `None` для любого
+/// другого списка. Отказ принципиален: у списка с дубликатом адреса «корень» совпал бы с
+/// корнем честного состояния, а сам список содержал бы приписанный баланс.
+pub fn state_root(accounts: &[Account]) -> Option<Hash> {
+    if !is_strictly_sorted(accounts) {
+        return None;
+    }
+    Some(ledger_root(
+        &accounts.iter().map(|a| (a.address, AccountState { balance: a.balance, nonce: a.nonce })).collect(),
+    ))
 }
 
 /// Шаг накопительного хеша очереди депозитов — как handleDeposit в контракте.
 pub fn deposit_hash(previous: &Hash, deposit: &Deposit) -> Hash {
     sha256(&[previous, &address_word(&deposit.l2_recipient), &word(deposit.amount)])
+}
+
+/// Шаг накопительного хеша очереди для принудительной транзакции — как
+/// handleForceTransaction в контракте: вместо получателя — метка, вместо суммы — хеш
+/// ячейки с байтами транзакции.
+pub fn forced_transaction_hash(previous: &Hash, transaction_bytes: &[u8]) -> Hash {
+    sha256(&[previous, &FORCED_TRANSACTION_MARKER, &data_chunk_hash(transaction_bytes)])
 }
 
 pub fn withdrawal_leaf_hash(leaf_index: u32, leaf: &WithdrawalLeaf) -> Hash {
@@ -225,20 +294,64 @@ fn credit(ledger: &mut Ledger, to: &L2Address, amount: u128) -> Result<(), Batch
     Ok(())
 }
 
-/// Проверяет подпись и nonce, списывает сумму со счёта отправителя и сдвигает его nonce.
-/// Возвращает ничего: всё, что нужно дальше, — в самой транзакции.
-fn authorize_and_debit(ledger: &mut Ledger, chain_id: u64, signed: &SignedTransaction) -> Result<(), BatchError> {
+/// Исполняет одну подписанную транзакцию. Либо применяет её целиком, либо ничего не
+/// меняет и возвращает причину отказа: сначала все проверки, потом изменения.
+fn apply_transaction(
+    ledger: &mut Ledger,
+    withdrawals: &mut Vec<WithdrawalLeaf>,
+    chain_id: u64,
+    signed: &SignedTransaction,
+) -> Result<(), BatchError> {
     let sender = recover_sender(chain_id, signed)?;
-    let account = ledger.get_mut(&sender).ok_or(BatchError::UnknownSender)?;
+    let account = *ledger.get(&sender).ok_or(BatchError::UnknownSender)?;
     if account.nonce != signed.nonce {
         return Err(BatchError::BadNonce);
     }
     let amount = match signed.transaction {
         Transaction::Transfer { amount, .. } | Transaction::Withdraw { amount, .. } => amount,
     };
-    account.balance = account.balance.checked_sub(amount).ok_or(BatchError::InsufficientBalance)?;
-    account.nonce += 1;
+    if amount == 0 {
+        return Err(BatchError::ZeroAmount);
+    }
+    if matches!(signed.transaction, Transaction::Withdraw { .. }) && withdrawals.len() as u64 >= MAX_WITHDRAWALS {
+        return Err(BatchError::WithdrawalTreeFull);
+    }
+    let debited = AccountState {
+        balance: account.balance.checked_sub(amount).ok_or(BatchError::InsufficientBalance)?,
+        nonce: account.nonce + 1,
+    };
+    match &signed.transaction {
+        Transaction::Transfer { to, .. } if *to == sender => {
+            // Перевод самому себе: меняется только nonce.
+            ledger.insert(sender, AccountState { balance: account.balance, nonce: debited.nonce });
+        }
+        Transaction::Transfer { to, .. } => {
+            let recipient = ledger.get(to).copied().unwrap_or_default();
+            let credited = recipient.balance.checked_add(amount).ok_or(BatchError::BalanceOverflow)?;
+            ledger.insert(sender, debited);
+            ledger.insert(*to, AccountState { balance: credited, nonce: recipient.nonce });
+        }
+        Transaction::Withdraw { l1_recipient_hash, .. } => {
+            ledger.insert(sender, debited);
+            withdrawals.push(WithdrawalLeaf { recipient_hash: *l1_recipient_hash, amount });
+        }
+    }
     Ok(())
+}
+
+/// Принудительная транзакция из очереди L1: исполняется, если это ровно одна корректная
+/// подписанная транзакция, и молча пропускается иначе. Пропуск обязателен: в очередь может
+/// поставить что угодно кто угодно, и мусор не должен останавливать rollup.
+fn apply_forced_transaction(
+    ledger: &mut Ledger,
+    withdrawals: &mut Vec<WithdrawalLeaf>,
+    chain_id: u64,
+    bytes: &[u8],
+) {
+    let (decoded, well_formed) = decode_transactions(core::slice::from_ref(&bytes.to_vec()));
+    if let ([signed], true) = (decoded.as_slice(), well_formed) {
+        let _skipped_if_invalid = apply_transaction(ledger, withdrawals, chain_id, signed);
+    }
 }
 
 /// Применяет батч и возвращает публичные значения и новое состояние.
@@ -254,7 +367,7 @@ pub fn apply_batch_with_data_hash(
     input: &BatchInput,
     batch_hash: Hash,
 ) -> Result<(PublicValues, Vec<Account>, Vec<WithdrawalLeaf>), BatchError> {
-    if input.accounts.windows(2).any(|pair| pair[0].address >= pair[1].address) {
+    if !is_strictly_sorted(&input.accounts) {
         return Err(BatchError::AccountsNotSorted);
     }
     let mut ledger: Ledger = input
@@ -263,23 +376,40 @@ pub fn apply_batch_with_data_hash(
         .map(|account| (account.address, AccountState { balance: account.balance, nonce: account.nonce }))
         .collect();
     let prev_state_root = ledger_root(&ledger);
-
-    // Депозиты из очереди L1 — строго по порядку, с тем же накопительным хешем, что в контракте.
-    let mut new_deposit_hash = input.prev_deposit_hash;
-    for deposit in &input.deposits {
-        new_deposit_hash = deposit_hash(&new_deposit_hash, deposit);
-        credit(&mut ledger, &deposit.l2_recipient, deposit.amount)?;
+    // Номер листа — 32 бита: список длиннее дерева дал бы повторяющиеся номера.
+    if input.prior_withdrawals.len() as u64 > MAX_WITHDRAWALS {
+        return Err(BatchError::WithdrawalTreeFull);
     }
 
+    // Очередь L1 — строго по порядку, с тем же накопительным хешем, что в контракте.
+    let prev_withdrawals_root = withdrawals_root(&input.prior_withdrawals);
     let mut withdrawals = input.prior_withdrawals.clone();
-    for signed in &decode_transactions(&input.data_chunks)? {
-        authorize_and_debit(&mut ledger, input.chain_id, signed)?;
-        match &signed.transaction {
-            Transaction::Transfer { to, amount } => credit(&mut ledger, to, *amount)?,
-            Transaction::Withdraw { l1_recipient_hash, amount } => {
-                withdrawals.push(WithdrawalLeaf { recipient_hash: *l1_recipient_hash, amount: *amount });
+    let mut new_deposit_hash = input.prev_deposit_hash;
+    for item in &input.queue_items {
+        match item {
+            QueueItem::Deposit(deposit) => {
+                new_deposit_hash = deposit_hash(&new_deposit_hash, deposit);
+                credit(&mut ledger, &deposit.l2_recipient, deposit.amount)?;
+            }
+            QueueItem::ForcedTransaction(bytes) => {
+                if bytes.len() > MAX_FORCED_TRANSACTION_BYTES {
+                    return Err(BatchError::ForcedTransactionTooLarge);
+                }
+                new_deposit_hash = forced_transaction_hash(&new_deposit_hash, bytes);
+                apply_forced_transaction(&mut ledger, &mut withdrawals, input.chain_id, bytes);
             }
         }
+    }
+
+    // Транзакции секвенсора из данных батча. Некорректная транзакция пропускается, а хвост
+    // данных, который не разбирается, отбрасывается: каким бы ни было содержимое порций —
+    // дубль порции, транзакция, которую уже исполнила очередь L1, просто мусор, — батч
+    // остаётся доказуемым. Иначе rollup мог бы остановить кто угодно, поставив в очередь
+    // копию транзакции из заранее опубликованных данных. (Порцию недопустимой формы
+    // отвергает `batch_data_hash` выше; это ошибка секвенсора, и исправляет её он сам.)
+    let (transactions, _whole_data_parsed) = decode_transactions(&input.data_chunks);
+    for signed in &transactions {
+        let _skipped_if_invalid = apply_transaction(&mut ledger, &mut withdrawals, input.chain_id, signed);
     }
 
     let public_values = PublicValues {
@@ -287,6 +417,7 @@ pub fn apply_batch_with_data_hash(
         prev_state_root,
         new_state_root: ledger_root(&ledger),
         batch_hash,
+        prev_withdrawals_root,
         withdrawals_root: withdrawals_root(&withdrawals),
         prev_deposit_hash: input.prev_deposit_hash,
         new_deposit_hash,

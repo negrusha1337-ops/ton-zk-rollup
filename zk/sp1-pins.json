@@ -1,0 +1,20 @@
+{
+  "note": "Закреплённые значения Groth16-верификатора SP1. Читает zk/sp1-verifier.mjs: при расхождении импорт пруфа и сборка ключа контракта останавливаются. Обновлять только вместе со сменой версии SP1 и только после сверки с первоисточником.",
+  "versions": {
+    "v6.1.0": {
+      "source": "https://github.com/succinctlabs/sp1-contracts/tree/main/contracts/src/v6.1.0",
+      "verifierHash": "0x4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696",
+      "vkRoot": "0x002f850ee998974d6cc00e50cd0814b098c05bfade466d28573240d057f25352",
+      "constantsSha256": "391e915f0ec0dfe137dc5ccbf1f8d4c3934320c649d17994e1aeff95881690eb",
+      "verificationKeySha256": "ff04f1faf9f2089837810f8bd56756721ce26dd3e2142679fc182fbd4cd5f2bb",
+      "checked": {
+        "date": "2026-11-13",
+        "wrapper": "SP1VerifierGroth16.sol из ~/.sp1/circuits/groth16/v6.1.0 побайтно совпал с файлом репозитория: git-blob c75aa1345af8730730a7f78c79d9fabffaefe364",
+        "verifier": "Groth16Verifier.sol: все 26 числовых констант совпали с файлом репозитория (git-blob 11ce7827407773604cd85cd4218ec7f2250a276a); сами файлы отличаются одной строкой — pragma solidity 0.8.20 против ^0.8.20",
+        "vkBin": "sha256 локального groth16_vk.bin равен verifierHash. Рецензент третьего круга разобрал файл (формат gnark, 492 байта): alpha, beta, gamma, delta и 6 точек IC равны константам Groth16Verifier.sol; четыре прежних настоящих пруфа v6.1.0 проходят спаривание под этим ключом",
+        "verificationKey": "verificationKeySha256 — sha256 от JSON ключа в раскладке snarkjs, получен из тех же констант (zk/sp1-verifier.mjs); по нему сверяется ключ, сохранённый в fixtures/zkvm_batches/key.json",
+        "notChecked": "Что сам ключ получен честной церемонией — это доверие к Succinct"
+      }
+    }
+  }
+}

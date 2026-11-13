@@ -1,0 +1,17 @@
+{
+  "source": "Измерено в @ton/sandbox тестом tests/RollupPayout.spec.ts; не редактировать вручную",
+  "note": "Газ шагов цепочки вывода на тестовом двойнике и запасы, заданные в контракте (пороги монет считаются из них по ценам сети)",
+  "budgets": {
+    "WITHDRAW_STEP_GAS": 40000,
+    "NULLIFIER_CLAIM_GAS": 12000,
+    "PAYOUT_STEP_GAS": 40000
+  },
+  "payoutPaid": 4417,
+  "payoutOwed": 6185,
+  "payOwed": 5559,
+  "withdrawStep": 22944,
+  "nullifierClaim": 4133,
+  "claimMessageCells": 9,
+  "claimMessageBits": 2429,
+  "payoutOwedDeep": 24685
+}

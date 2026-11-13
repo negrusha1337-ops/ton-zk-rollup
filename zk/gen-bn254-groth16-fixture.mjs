@@ -10,6 +10,7 @@
 // Публичные входы делятся на переменные (не больше двух, для них строятся оконные
 // таблицы) и постоянные — их вклад заранее складывается в IC0. Список переменных
 // берётся из source.json фикстуры (поле variableInputs); по умолчанию это вход 0.
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,7 +49,8 @@ const points = parseProof(proof);
 const { A, B, C } = points;
 
 const inputs = publicSignals.map(BigInt);
-const variableInputs = existsSync(path.join(DIR, 'source.json')) ? (read('source.json').variableInputs ?? [0]) : [0];
+const source = existsSync(path.join(DIR, 'source.json')) ? read('source.json') : {};
+const variableInputs = source.variableInputs ?? [0];
 if (variableInputs.length < 1 || variableInputs.length > 2) {
     throw new Error('Контракт поддерживает один или два переменных публичных входа');
 }
@@ -96,6 +98,37 @@ const [firstInput, secondInput] = onchainInputs;
 const forgedInputs = [...inputs];
 forgedInputs[variableInputs[0]] = inputs[variableInputs[0]] ^ 1n;
 const forgery = buildProofHints(key, prepared, points, forgedInputs, { forge: true });
+
+// Подделка утверждения для пруфов наших программ zkVM: настоящий пруф предъявляется под
+// ЧУЖИЕ публичные значения — те, что посчитает rollup-контракт, если в сообщении подменить
+// одно поле. Подсказки построены честно для этого ложного утверждения, так что контракт
+// доходит до замыкающего равенства и обязан отказать именно на нём (код WrongProof).
+//   • батч: слово 2 публичных значений (новый корень состояния) с перевёрнутым младшим битом;
+//   • выход: слово 3 (сумма) на единицу больше.
+function statementForgery() {
+    if (source.kind !== 'batch' && source.kind !== 'exit') return undefined;
+    const values = Buffer.from(source.publicValues.slice(2), 'hex');
+    const wordIndex = source.kind === 'batch' ? 2 : 3;
+    const original = BigInt('0x' + values.subarray(wordIndex * 32, (wordIndex + 1) * 32).toString('hex'));
+    const altered = source.kind === 'batch' ? original ^ 1n : original + 1n;
+    const forgedValues = Buffer.from(values);
+    Buffer.from(altered.toString(16).padStart(64, '0'), 'hex').copy(forgedValues, wordIndex * 32);
+    const digest = BigInt('0x' + createHash('sha256').update(forgedValues).digest('hex')) & ((1n << 253n) - 1n);
+    const statementInputs = [...inputs];
+    statementInputs[variableInputs[0]] = digest;
+    const forged = buildProofHints(key, prepared, points, statementInputs, { forge: true });
+    return {
+        note:
+            source.kind === 'batch'
+                ? 'Настоящий пруф под батч с другим новым корнем состояния (младший бит перевёрнут)'
+                : 'Настоящий пруф под заявку на выход с суммой на единицу больше',
+        alteredWord: wordIndex,
+        alteredValue: String(altered),
+        input: String(digest),
+        hintsBoc: forged.hints.toBoc().toString('base64'),
+    };
+}
+const forgedStatement = statementForgery();
 
 // Точка на скрученной кривой, но вне подгруппы G2 — для теста проверки подгруппы.
 // Наклоны для неё честные, остальные подсказки взяты от настоящего пруфа: контракт
@@ -160,6 +193,7 @@ const fixture = {
             inputs: strings(forgery.onchainInputs),
             hintsBoc: forgery.hints.toBoc().toString('base64'),
         },
+        ...(forgedStatement ? { statementForgery: forgedStatement } : {}),
         outsideSubgroup: {
             b: strings([affine(rogue).x.c0, affine(rogue).x.c1, affine(rogue).y.c0, affine(rogue).y.c1]),
             hintsBoc: rogueHints.toBoc().toString('base64'),

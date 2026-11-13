@@ -1,4 +1,5 @@
 import { readFileSync } from 'fs';
+import { assertTestnetWithMnemonic } from '../wrappers/testnetGuard';
 import path from 'path';
 import { Cell, toNano } from '@ton/core';
 import { compile, NetworkProvider, sleep } from '@ton/blueprint';
@@ -30,9 +31,7 @@ async function waitFor(description: string, check: () => Promise<boolean>) {
 
 export async function run(provider: NetworkProvider, args: string[]) {
     const ui = provider.ui();
-    if (provider.network() === 'mainnet') {
-        throw new Error('Этот контракт — стенд без аудита. Развёртывание в mainnet запрещено скриптом.');
-    }
+    assertTestnetWithMnemonic(provider);
     const owner = provider.sender().address;
     if (!owner) throw new Error('У отправителя нет адреса: подключи кошелёк.');
 

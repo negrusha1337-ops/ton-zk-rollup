@@ -1,0 +1,20 @@
+{
+  "description": "Построение пяти Groth16-пруфов SP1 нынешних программ на ноутбуке (zkvm/script/prove-polite.sh → prove-guarded.sh). Замеры /usr/bin/time -l, по одному прогону. Каждый пруф проверен SDK при построении и независимо — спариванием при импорте (zk/import-sp1-fixture.mjs).",
+  "date": "2026-11-13",
+  "machine": "Apple M4, 10 ядер, 16 ГБ памяти, macOS (Darwin 25.3.0)",
+  "sp1Sdk": "6.10.0",
+  "sp1CircuitVersion": "v6.1.0",
+  "backend": "нативный gnark (feature native-gnark), без Docker и без GPU; низкий приоритет (nice 15)",
+  "sourcesSha256": "702fea2e601b560c5073b1f94017bfa49699a5d16948ce18a8f83d55f87f1207",
+  "programVKey": "0x00a14e16c1a59d90c4268e765945b8bc0ca25015541f447d62565fbdbe4bb640",
+  "exitProgramVKey": "0x00948e47c49b39cd5589ef920123202f8bd537335e9862a9f47dc4790dbdb50a",
+  "proofs": {
+    "batch1": { "wallClockSeconds": 483.63, "peakMemoryFootprintBytes": 29117962176, "minFreeDiskGb": 17 },
+    "batch2": { "wallClockSeconds": 542.71, "peakMemoryFootprintBytes": 30589508864, "minFreeDiskGb": 19 },
+    "batch3": { "wallClockSeconds": 491.89, "peakMemoryFootprintBytes": 31392227088, "minFreeDiskGb": 19 },
+    "exitAlice": { "wallClockSeconds": 490.06, "peakMemoryFootprintBytes": 31559262136, "minFreeDiskGb": 19 },
+    "exitBob": { "wallClockSeconds": 519.12, "peakMemoryFootprintBytes": 32525918904, "minFreeDiskGb": 20 }
+  },
+  "freeDiskAtStartGb": 36,
+  "note": "Первая попытка батча 3 была остановлена обёрткой на девятой минуте: в другой сессии началась сборка .NET (посторонний CPU 267%). После этого обёртка переведена с остановки на паузу (SIGSTOP/SIGCONT); остальные пруфы построены с первой попытки, пауз не было."
+}

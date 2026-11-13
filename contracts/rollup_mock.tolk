@@ -19,24 +19,27 @@ fun onInternalMessage(inMsg: InMessage) {
 
   match (msg) {
     SubmitBatch => {
-      var storage = RollupStorage.load();
-      assert (inMsg.senderAddress == storage.sequencer) throw RollupErrors.NotSequencer;
-      // Двойнику ключ не нужен: пруф заменён заглушкой.
-      var state = storage.state.load();
-      assert (!state.frozen) throw RollupErrors.RollupFrozen;
-      val queue = state.queue.load();
-      val roots = msg.roots.load();
-      // ЗАГЛУШКА: пруф считается верным, если его первое число равно 1.
-      val ok = msg.proof.load().ax == 1;
+      var batch = prepareSubmitBatch(inMsg.senderAddress, msg);
+      // ЗАГЛУШКА — единственное отличие от rollup.tolk: пруф считается верным, если его
+      // первое число равно 1.
+      val ok = (msg.proof.load().ax == 1) && (batch.digest != 0);
       assert (ok) throw RollupErrors.WrongProof;
-      takeBatchData(mutate state);
-      applyBatch(mutate storage, state, queue, roots);
+      applyBatch(mutate batch.storage, batch.state, batch.queue, batch.roots);
     }
     PublishData => {
       handlePublishData(inMsg.senderAddress, msg);
     }
+    DiscardBatchData => {
+      handleDiscardBatchData(inMsg.senderAddress, msg);
+    }
+    PayOwed => {
+      handlePayOwed(msg);
+    }
     DepositTon => {
       handleDeposit(inMsg.senderAddress, inMsg.valueCoins, msg);
+    }
+    ForceTransaction => {
+      handleForceTransaction(inMsg.valueCoins, msg);
     }
     Withdraw => {
       handleWithdraw(inMsg.valueCoins, msg);
@@ -60,7 +63,8 @@ fun onInternalMessage(inMsg: InMessage) {
       val storage = RollupStorage.load();
       val claim = msg.claim.load();
       val digest = prepareForceExit(inMsg.valueCoins, storage, claim);
-      // ЗАГЛУШКА: пруф считается верным, если его первое число равно 1.
+      // ЗАГЛУШКА — единственное отличие от rollup.tolk: пруф считается верным, если его
+      // первое число равно 1.
       val ok = (msg.proof.load().ax == 1) && (digest != 0);
       assert (ok) throw RollupErrors.WrongProof;
       completeForceExit(storage, msg.queryId, claim);
@@ -146,4 +150,32 @@ get fun expectedExitInput(l2Account: int, amount: int, recipientHash: int): int 
 /// (вноситель, сумма) по номеру депозита; сумма 0, если квитанции нет.
 get fun depositReceipt(depositIndex: int): (address?, int) {
   return depositReceiptView(depositIndex);
+}
+
+/// Параметры развёртывания: (владелец, секвенсор, chainId, срок заморозки, хеш кода нуллификатора).
+get fun deployment(): (address, address, int, int, int) {
+  return deploymentView();
+}
+
+/// (получатель, сумма) долга по ключу нуллификатора; сумма 0, если долга нет.
+get fun owedPayout(key: int): (address?, int) {
+  return owedPayoutView(key);
+}
+
+/// Минимум монет для Withdraw и для ForceExit при текущих ценах сети.
+get fun minimumValues(): (int, int) {
+  return (withdrawMinValue(), forceExitMinValue());
+}
+
+/// Запасы газа, из которых считаются пороги, и то, что из них получается в монетах:
+/// (газ шага Withdraw, газ шага нуллификатора, газ шага выплаты, монет на шаг выплаты,
+/// сколько сверх суммы должно быть на балансе для выплаты). Тесты сверяют измеренный расход
+/// с этими значениями, а не со своими копиями констант.
+get fun payoutBudgets(): (int, int, int, int, int) {
+  return payoutBudgetsView();
+}
+
+/// (газ шага депозита, газ постановки принудительной транзакции, плата за неё при текущих ценах).
+get fun queueBudgets(): (int, int, int) {
+  return queueBudgetsView();
 }

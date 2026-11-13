@@ -121,8 +121,11 @@ fn amount_from(bytes: &[u8]) -> u128 {
 }
 
 /// Разбор данных батча: порции склеиваются, транзакция может пересекать границу порций.
-/// Любой хвост, который не разбирается целиком, — ошибка: пруфа для таких данных нет.
-pub fn decode_transactions(chunks: &[Vec<u8>]) -> Result<Vec<SignedTransaction>, BatchError> {
+/// Возвращает транзакции, которые удалось разобрать, и признак «данные разобраны целиком».
+/// Разбор останавливается на первом месте, которое не читается как транзакция: дальше
+/// границы транзакций неизвестны, и хвост отбрасывается. Ошибкой это не считается —
+/// данные публикует секвенсор, и мусор в них не должен делать батч недоказуемым.
+pub fn decode_transactions(chunks: &[Vec<u8>]) -> (Vec<SignedTransaction>, bool) {
     let data: Vec<u8> = chunks.iter().flat_map(|chunk| chunk.iter().copied()).collect();
     let mut transactions = Vec::new();
     let mut rest = data.as_slice();
@@ -130,10 +133,10 @@ pub fn decode_transactions(chunks: &[Vec<u8>]) -> Result<Vec<SignedTransaction>,
         let body_size = match tag {
             TAG_TRANSFER => TRANSFER_BODY_BYTES,
             TAG_WITHDRAW => WITHDRAW_BODY_BYTES,
-            _ => return Err(BatchError::MalformedData),
+            _ => return (transactions, false),
         };
         if rest.len() < body_size + SIGNATURE_BYTES {
-            return Err(BatchError::MalformedData);
+            return (transactions, false);
         }
         let (body, after_body) = rest.split_at(body_size);
         let (signature_bytes, tail) = after_body.split_at(SIGNATURE_BYTES);
@@ -155,7 +158,7 @@ pub fn decode_transactions(chunks: &[Vec<u8>]) -> Result<Vec<SignedTransaction>,
         transactions.push(SignedTransaction { nonce: u64::from_be_bytes(nonce), transaction, signature });
         rest = tail;
     }
-    Ok(transactions)
+    (transactions, true)
 }
 
 #[cfg(test)]
@@ -176,15 +179,17 @@ mod tests {
         let data = encode_transactions(&transactions);
         // Граница порций посреди транзакции: разбор идёт по склейке.
         let (head, tail) = data.split_at(70);
-        assert_eq!(decode_transactions(&[head.to_vec(), tail.to_vec()]).unwrap(), transactions);
+        assert_eq!(decode_transactions(&[head.to_vec(), tail.to_vec()]), (transactions, true));
     }
 
     #[test]
-    fn malformed_data_is_rejected() {
-        assert_eq!(decode_transactions(&[alloc::vec![7u8]]).unwrap_err(), BatchError::MalformedData);
-        let mut truncated = encode_transactions(&[unsigned(0, Transaction::Transfer { to: [2u8; 20], amount: 5 })]);
-        truncated.pop();
-        assert_eq!(decode_transactions(&[truncated]).unwrap_err(), BatchError::MalformedData);
+    fn malformed_tail_is_dropped_and_reported() {
+        assert_eq!(decode_transactions(&[alloc::vec![7u8]]), (Vec::new(), false));
+        let first = unsigned(0, Transaction::Transfer { to: [2u8; 20], amount: 5 });
+        // Обрезанная вторая транзакция: первая разобрана, хвост отброшен.
+        let mut data = encode_transactions(&[first.clone(), first.clone()]);
+        data.pop();
+        assert_eq!(decode_transactions(&[data]), (alloc::vec![first], false));
     }
 
     #[test]
@@ -218,7 +223,7 @@ mod tests {
     #[test]
     fn garbage_signature_is_rejected_or_recovers_a_stranger() {
         // Произвольные 65 байт либо не разбираются как подпись, либо «восстанавливают»
-        // случайный адрес, у которого нет счёта, — в обоих случаях батч некорректен.
+        // случайный адрес, у которого нет счёта, — в обоих случаях транзакция пропускается.
         let forged = unsigned(0, Transaction::Transfer { to: [2u8; 20], amount: 5 });
         let mut with_bad_recovery_bit = forged.clone();
         with_bad_recovery_bit.signature[64] = 9;

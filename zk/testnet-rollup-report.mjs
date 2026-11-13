@@ -25,10 +25,14 @@ const STEPS = {
     '0x52420002': 'deposit',
     '0x52420003': 'publishData',
     '0x52420004': 'withdraw',
+    '0x52420005': 'forceTransaction',
     '0x52420006': 'activateEscapeHatch',
     '0x52420007': 'forceExit',
     '0x52420008': 'cancelDeposit',
     '0x52420009': 'setExitKey',
+    '0x5242000a': 'pruneDepositReceipts',
+    '0x5242000b': 'discardBatchData',
+    '0x5242000c': 'payOwed',
     '0x52420011': 'withdrawPayout',
 };
 
@@ -38,10 +42,16 @@ async function getJson(url) {
     return response.json();
 }
 
-let transactions;
+// API отдаёт не больше PAGE транзакций за запрос: читаем страницами, пока не кончатся.
+const PAGE = 100;
+let transactions = [];
 try {
-    const query = `${API}/transactions?account=${encodeURIComponent(address)}&limit=100&sort=asc`;
-    ({ transactions } = await getJson(query));
+    for (let offset = 0; ; offset += PAGE) {
+        const query = `${API}/transactions?account=${encodeURIComponent(address)}&limit=${PAGE}&offset=${offset}&sort=asc`;
+        const page = (await getJson(query)).transactions ?? [];
+        transactions.push(...page);
+        if (page.length < PAGE) break;
+    }
 } catch (err) {
     console.error(`Не удалось получить транзакции: ${err.message}. Попробуй ещё раз через минуту.`);
     process.exit(1);
@@ -64,14 +74,27 @@ const rows = transactions.map((tx) => {
         gasFeeNano: compute.skipped ? 0 : Number(compute.gas_fees),
         totalFeesNano: Number(tx.total_fees),
         valueNano: Number(tx.in_msg?.value ?? 0),
+        // Сколько монет ушло исходящими сообщениями: у подтверждения от нуллификатора это
+        // отличает выплату от записи долга (долг — успешная транзакция без исходящих монет).
+        sentNano: (tx.out_msgs ?? []).reduce((sum, message) => sum + Number(message.value ?? 0), 0),
     };
 });
 
-const sandboxPath = path.join(ROOT, 'bench', 'rollup-zkvm-proof.json');
-const sandbox = existsSync(sandboxPath) ? JSON.parse(readFileSync(sandboxPath, 'utf8')) : {};
+// Замеры Sandbox годятся для сравнения, только если сняты для тех же программ, что и пруфы
+// прогона: тесты записывают рядом с замерами хеш исходников программ. Замеры прежней версии
+// (без этого поля или с другим хешем) в сравнение не идут.
+const readJson = (...parts) => {
+    const file = path.join(ROOT, ...parts);
+    return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+};
+const sourcesSha256 = readJson('fixtures', 'zkvm_batches', 'program.json').sourcesSha256 ?? null;
+const currentBench = (name) => {
+    const bench = readJson('bench', name);
+    return sourcesSha256 !== null && bench.sourcesSha256 === sourcesSha256 ? bench : {};
+};
+const sandbox = currentBench('rollup-zkvm-proof.json');
 const sandboxBatchGas = [sandbox.submitBatch, sandbox.submitBatchWithDeposit];
-const escapePath = path.join(ROOT, 'bench', 'rollup-escape.json');
-const escapeSandbox = existsSync(escapePath) ? JSON.parse(readFileSync(escapePath, 'utf8')) : {};
+const escapeSandbox = currentBench('rollup-escape.json');
 
 const pick = ({ hash, time, success, exitCode, gasUsed, gasFeeNano }) => ({
     transactionHash: hash,
@@ -97,6 +120,11 @@ const report = {
     network: 'testnet',
     contract: address,
     gasLimitPerTransaction: 1_000_000,
+    programSourcesSha256: sourcesSha256,
+    sandboxComparison:
+        sandbox.submitBatch === undefined
+            ? 'нет: замеры Sandbox сняты для другой версии программ или отсутствуют'
+            : 'bench/rollup-zkvm-proof.json, bench/rollup-escape.json',
     transactions: rows.length,
     failedTransactions: rows.filter((row) => !row.success).map(pick),
     keyUpload: {
@@ -114,7 +142,23 @@ const report = {
     withdraw: of('withdraw')
         .filter((row) => row.success)
         .map(pick),
+    // Подтверждение от нуллификатора: выплата получателю либо запись долга (монет не ушло).
     withdrawPayout: of('withdrawPayout')
+        .filter((row) => row.success && row.sentNano > 0)
+        .map(pick),
+    payoutRecordedAsDebt: of('withdrawPayout')
+        .filter((row) => row.success && row.sentNano === 0)
+        .map(pick),
+    payOwed: of('payOwed')
+        .filter((row) => row.success)
+        .map(pick),
+    forceTransaction: of('forceTransaction')
+        .filter((row) => row.success)
+        .map(pick),
+    setExitKey: of('setExitKey')
+        .filter((row) => row.success)
+        .map(pick),
+    discardBatchData: of('discardBatchData')
         .filter((row) => row.success)
         .map(pick),
     escape: {

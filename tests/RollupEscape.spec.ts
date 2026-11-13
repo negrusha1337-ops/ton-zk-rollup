@@ -2,6 +2,7 @@ import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Address, beginCell, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
+import { finalizeDummyKeys } from './helpers/rollupSetup';
 import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
 import { ExitClaim, NullifierErrors, Rollup, RollupErrors } from '../wrappers/Rollup';
 import { merkleProofCell, sha256Int, withdrawalTree } from '../wrappers/rollupMath';
@@ -82,6 +83,7 @@ describe('Rollup: аварийный выход на тестовом двойн
             ),
         );
         await rollup.sendDeploy(owner.getSender(), toNano('5'));
+        await finalizeDummyKeys(rollup, owner);
     });
 
     describe('заморозка', () => {
@@ -305,6 +307,24 @@ describe('Rollup: аварийный выход на тестовом двойн
             expect((await blockchain.getContract(recipient)).balance).toBe(claim.amount);
         });
 
+        it('получатель аварийного выхода — только в basechain', async () => {
+            // Пруф привязан к хешу адреса; адрес masterchain с тем же хешем дал бы тот же
+            // публичный вход, а выплата ушла бы по другому адресу.
+            await freeze();
+            const masterchain = new Address(-1, claim.recipient.hash);
+            expect(await rollup.getExpectedExitInput({ ...claim, recipient: masterchain })).toBe(
+                await rollup.getExpectedExitInput(claim),
+            );
+            expect((await forceExit({ ...claim, recipient: masterchain })).transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: RollupErrors.wrongRecipient,
+            });
+            expect((await blockchain.getContract(masterchain)).balance).toBe(0n);
+            const nullifier = await rollup.getExitNullifierAddress(claim.l2Account);
+            expect((await blockchain.getContract(nullifier)).accountState?.type ?? 'uninit').toBe('uninit');
+        });
+
         it('неверный пруф, нулевая сумма и нехватка монет отклоняются', async () => {
             await freeze();
             expect((await forceExit(claim, false)).transactions).toHaveTransaction({
@@ -317,7 +337,8 @@ describe('Rollup: аварийный выход на тестовом двойн
                 success: false,
                 exitCode: RollupErrors.nothingToExit,
             });
-            expect((await forceExit(claim, true, toNano('0.1'))).transactions).toHaveTransaction({
+            const { forceExit: minimum } = await rollup.getMinimumValues();
+            expect((await forceExit(claim, true, minimum - 1n)).transactions).toHaveTransaction({
                 to: rollup.address,
                 success: false,
                 exitCode: RollupErrors.notEnoughValue,

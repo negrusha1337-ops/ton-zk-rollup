@@ -4,6 +4,9 @@
 //
 // Повторная заявка бросает исключение и возвращается в rollup bounce'ом — к этому
 // моменту rollup ещё ничего не выплатил, так что откатывать нечего.
+//
+// Пометка необратима, поэтому ставится, только если приложенных монет хватит довести
+// цепочку до конца (nullifierMinValue в rollup/nullifier_types.tolk).
 import "rollup/messages"
 import "rollup/nullifier_types"
 
@@ -17,6 +20,7 @@ enum NullifierErrors {
   NotRollup = 7200,
   AlreadyClaimed = 7201,
   UnknownMessage = 7202,
+  NotEnoughValue = 7203,
 }
 
 fun onInternalMessage(inMsg: InMessage) {
@@ -27,6 +31,7 @@ fun onInternalMessage(inMsg: InMessage) {
       var storage = NullifierStorage.fromCell(contract.getData());
       assert (inMsg.senderAddress == storage.rollup) throw NullifierErrors.NotRollup;
       assert (!storage.claimed) throw NullifierErrors.AlreadyClaimed;
+      assert (inMsg.valueCoins >= nullifierMinValue()) throw NullifierErrors.NotEnoughValue;
       storage.claimed = true;
       contract.setData(storage.toCell());
 
@@ -48,6 +53,11 @@ fun onInternalMessage(inMsg: InMessage) {
       assert (inMsg.body.isEmpty()) throw NullifierErrors.UnknownMessage;
     }
   }
+}
+
+/// Минимум монет, с которым нуллификатор соглашается пометить заявку (при текущих ценах сети).
+get fun minimumValue(): coins {
+  return nullifierMinValue();
 }
 
 get fun isClaimed(): bool {

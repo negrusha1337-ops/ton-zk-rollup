@@ -15,6 +15,8 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bn254 } from '@noble/curves/bn254.js';
+import { loadProgramKeys } from './program-binding.mjs';
+import { g2FromParts, loadSp1Verifier, verificationKeyJson } from './sp1-verifier.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TEMPLATE_FIXTURE = 'sp1_v6_fibonacci';
@@ -29,79 +31,105 @@ if (!/^[a-z0-9_]+$/.test(fixtureName)) {
 }
 const OUT = path.join(ROOT, 'fixtures', fixtureName);
 
-const { Fp, Fp2 } = bn254.fields;
-const p = Fp.ORDER;
-const G1 = bn254.G1.Point;
-const G2 = bn254.G2.Point;
-
-// --- ключ: константы Solidity-верификатора (шаблон gnark) ---
-const solidity = readFileSync(verifierPath, 'utf8');
-const constant = (name) => {
-    const match = new RegExp(`uint256 constant ${name} = (\\d+);`).exec(solidity);
-    if (!match) throw new Error(`В ${path.basename(verifierPath)} нет константы ${name}`);
-    return BigInt(match[1]);
-};
-const g1 = (x, y) => G1.fromAffine({ x, y });
+// Чей это пруф. Пруфы наших программ привязаны к fixtures/zkvm_batches/program.json:
+// ключ программы обязан совпасть с записанным там, а тот — соответствовать нынешним
+// исходникам. Пруф от прежней версии программы импортировать нельзя.
+const KINDS = [
+    {
+        prefix: 'sp1_rollup_batch',
+        kind: 'batch',
+        vkeyField: 'programVKey',
+        elfField: 'programElfSha256',
+        publicValuesBytes: 256,
+    },
+    {
+        prefix: 'sp1_rollup_exit_',
+        kind: 'exit',
+        vkeyField: 'exitProgramVKey',
+        elfField: 'exitProgramElfSha256',
+        publicValuesBytes: 160,
+    },
+];
 /**
- * Точка G2 из двух пар чисел. Порядок частей (вещественная/мнимая) в разных местах
- * шаблона gnark разный, поэтому не гадаем: берём тот, при котором точка лежит на
- * кривой и в подгруппе. Если подходят оба или ни один — это ошибка импорта.
+ * Публичные значения, которые сценарий (zkvm/native) выдаёт для этой фикстуры: пруф батча 1,
+ * импортированный под именем батча 2, или пруф прежнего сценария иначе всплыли бы только в
+ * сквозном тесте.
  */
-function g2FromParts(xParts, yParts, label) {
-    const candidates = [
-        { x: { c0: xParts[0], c1: xParts[1] }, y: { c0: yParts[0], c1: yParts[1] } },
-        { x: { c0: xParts[1], c1: xParts[0] }, y: { c0: yParts[1], c1: yParts[0] } },
-    ].flatMap((coordinates) => {
-        try {
-            const point = G2.fromAffine(coordinates);
-            point.assertValidity();
-            return [point];
-        } catch {
-            return [];
-        }
-    });
-    if (candidates.length !== 1) {
-        throw new Error(
-            `${label}: порядок координат G2 не определился однозначно (подошло вариантов: ${candidates.length})`,
-        );
+function scenarioPublicValues(kind, name) {
+    const read = (...parts) => JSON.parse(readFileSync(path.join(ROOT, 'fixtures', ...parts), 'utf8'));
+    if (kind === 'batch') {
+        const index = Number(name.slice('sp1_rollup_batch'.length));
+        const batch = read('zkvm_batches', 'batches.json').batches[index - 1];
+        if (!batch) throw new Error(`В сценарии нет батча «${name.slice('sp1_rollup_batch'.length)}»`);
+        return batch.publicValuesHex;
     }
-    return candidates[0];
+    const who = name.slice('sp1_rollup_exit_'.length);
+    const claim = read('zkvm_exit', 'claims.json').claims.find((candidate) => candidate.name === who);
+    if (!claim) throw new Error(`В сценарии нет заявки на выход «${who}»`);
+    return claim.publicValuesHex;
 }
-const g2 = (prefix) =>
-    g2FromParts(
-        [constant(`${prefix}_X_0`), constant(`${prefix}_X_1`)],
-        [constant(`${prefix}_Y_0`), constant(`${prefix}_Y_1`)],
-        prefix,
+const program = KINDS.find(({ prefix }) => fixtureName.startsWith(prefix));
+if (!program && fixtureName !== TEMPLATE_FIXTURE) {
+    console.error(
+        `Имя фикстуры ${fixtureName} не говорит, чей это пруф: допустимы ${TEMPLATE_FIXTURE}, ` +
+            KINDS.map(({ prefix }) => `${prefix}*`).join(', '),
     );
-
-const alpha = g1(constant('ALPHA_X'), constant('ALPHA_Y'));
-// В контракте лежат отрицания β, γ, δ — возвращаем исходные точки.
-const beta = g2('BETA_NEG').negate();
-const gamma = g2('GAMMA_NEG').negate();
-const delta = g2('DELTA_NEG').negate();
-const ic = [g1(constant('CONSTANT_X'), constant('CONSTANT_Y'))];
-for (let i = 0; ; i++) {
-    if (!solidity.includes(`uint256 constant PUB_${i}_X`)) break;
-    ic.push(g1(constant(`PUB_${i}_X`), constant(`PUB_${i}_Y`)));
+    process.exit(1);
 }
-for (const point of [alpha, ...ic]) point.assertValidity();
+
+const G1 = bn254.G1.Point;
+const g1 = (x, y) => G1.fromAffine({ x, y });
+
+// --- ключ схемы: константы Solidity-верификатора, сверенные с zk/sp1-pins.json ---
+// Для пруфов наших программ закрепление обязательно; для пруфа шаблона Succinct (другая
+// версия схемы) — нет: он нужен только тестам самого верификатора.
+const verifier = loadSp1Verifier(verifierPath, wrapperPath, { requirePin: Boolean(program) });
+const { alpha, beta, gamma, delta, ic } = verifier.key;
+const { verifierHash, circuitVersion } = verifier;
+const contractsUrl = `https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/${circuitVersion}`;
+const expectedVkRoot = BigInt(verifier.vkRoot);
 
 // --- пруф: selector ‖ abi(exitCode, vkRoot, nonce, uint256[8]) ---
-const wrapper = readFileSync(wrapperPath, 'utf8');
-const wrapperConstant = (name) => {
-    const match = new RegExp(`function ${name}\\(\\)[^{]*\\{\\s*return (0x[0-9a-fA-F]+);`).exec(wrapper);
-    if (!match) throw new Error(`В ${path.basename(wrapperPath)} нет ${name}()`);
-    return match[1].toLowerCase();
-};
-const verifierHash = wrapperConstant('VERIFIER_HASH');
-const versionMatch = /function VERSION\(\)[^{]*\{\s*return "([^"]+)";/.exec(wrapper);
-if (!versionMatch) throw new Error(`В ${path.basename(wrapperPath)} нет VERSION()`);
-const circuitVersion = versionMatch[1];
-const contractsUrl = `https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/${circuitVersion}`;
-const expectedVkRoot = BigInt(wrapperConstant('VK_ROOT'));
-
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
+for (const field of ['vkey', 'publicValues', 'proof']) {
+    if (typeof fixture[field] !== 'string' || !/^0x([0-9a-fA-F]{2})*$/.test(fixture[field])) {
+        throw new Error(`Поле ${field} файла пруфа — не шестнадцатеричная строка`);
+    }
+}
 const proofBytes = Buffer.from(fixture.proof.slice(2), 'hex');
+if (proofBytes.length !== 4 + 11 * 32) {
+    throw new Error(`Длина пруфа ${proofBytes.length} байт, ожидалось ${4 + 11 * 32}`);
+}
+const publicValuesBytes = Buffer.from(fixture.publicValues.slice(2), 'hex');
+if (program) {
+    const programs = loadProgramKeys();
+    if (BigInt(fixture.vkey) !== BigInt(programs[program.vkeyField])) {
+        throw new Error(
+            `Пруф построен для другой программы: его ключ ${fixture.vkey}, а в program.json ` +
+                `${program.vkeyField} = ${programs[program.vkeyField]}. Это пруф прежней версии программы.`,
+        );
+    }
+    // Привязка — по ключу программы (он проверяется спариванием ниже) и по хешу ELF. Хеш
+    // исходников в файле пруфа — справочная запись: он меняется и от правки тестов, при
+    // которой ELF и ключ остаются прежними, и пруф остаётся годным.
+    if (typeof fixture.elfSha256 !== 'string' || fixture.elfSha256 !== programs[program.elfField]) {
+        throw new Error(
+            `Пруф построен для другого ELF (${fixture.elfSha256}), чем записан в program.json ` +
+                `(${program.elfField} = ${programs[program.elfField]})`,
+        );
+    }
+    if (publicValuesBytes.length !== program.publicValuesBytes) {
+        throw new Error(
+            `Публичные значения: ${publicValuesBytes.length} байт, у программы «${program.kind}» их ${program.publicValuesBytes}`,
+        );
+    }
+    if (publicValuesBytes.toString('hex') !== scenarioPublicValues(program.kind, fixtureName)) {
+        throw new Error(
+            `Публичные значения пруфа не те, что сценарий выдаёт для ${fixtureName}: пруф построен для другого ` +
+                'батча, другой заявки или прежнего сценария',
+        );
+    }
+}
 const selector = '0x' + proofBytes.subarray(0, 4).toString('hex');
 if (selector !== verifierHash.slice(0, 10)) {
     throw new Error(`Пруф для другой версии верификатора: selector ${selector}, ожидался ${verifierHash.slice(0, 10)}`);
@@ -110,10 +138,11 @@ const words = [];
 for (let offset = 4; offset < proofBytes.length; offset += 32) {
     words.push(BigInt('0x' + proofBytes.subarray(offset, offset + 32).toString('hex')));
 }
-if (words.length !== 11) throw new Error(`Ожидалось 11 слов в пруфе, получено ${words.length}`);
 const [exitCode, vkRoot, nonce, ax, ay, bx1, bx0, by1, by0, cx, cy] = words;
 if (exitCode !== 0n) throw new Error('exitCode пруфа не равен 0');
 if (vkRoot !== expectedVkRoot) throw new Error('vkRoot пруфа не совпал с VK_ROOT верификатора');
+// У rollup-контракта нонс свёрнут в ключ как ноль: пруф с другим нонсом он не примет.
+if (program && nonce !== 0n) throw new Error(`Нонс пруфа ${nonce}, а rollup-контракт принимает только 0`);
 
 const A = g1(ax, ay);
 const B = g2FromParts([bx1, bx0], [by1, by0], 'B');
@@ -122,14 +151,7 @@ A.assertValidity();
 C.assertValidity();
 
 // --- публичные входы: как в SP1VerifierGroth16.verifyProof ---
-const digest =
-    BigInt(
-        '0x' +
-            createHash('sha256')
-                .update(Buffer.from(fixture.publicValues.slice(2), 'hex'))
-                .digest('hex'),
-    ) &
-    ((1n << 253n) - 1n);
+const digest = BigInt('0x' + createHash('sha256').update(publicValuesBytes).digest('hex')) & ((1n << 253n) - 1n);
 const inputs = [BigInt(fixture.vkey), digest, exitCode, vkRoot, nonce];
 if (inputs.length + 1 !== ic.length) throw new Error('Число публичных входов не совпало с числом IC-точек');
 
@@ -158,23 +180,14 @@ const g2Json = (point) => {
 };
 mkdirSync(OUT, { recursive: true });
 const write = (file, data) => writeFileSync(path.join(OUT, file), JSON.stringify(data, null, 1) + '\n');
-write('verification_key.json', {
-    protocol: 'groth16',
-    curve: 'bn128',
-    nPublic: inputs.length,
-    vk_alpha_1: g1Json(alpha),
-    vk_beta_2: g2Json(beta),
-    vk_gamma_2: g2Json(gamma),
-    vk_delta_2: g2Json(delta),
-    IC: ic.map(g1Json),
-});
+write('verification_key.json', verificationKeyJson(verifier.key));
 write('proof.json', { pi_a: g1Json(A), pi_b: g2Json(B), pi_c: g1Json(C), protocol: 'groth16', curve: 'bn128' });
 write('public.json', inputs.map(s));
 write('source.json', {
     description:
         fixtureName === TEMPLATE_FIXTURE
             ? 'Настоящий пруф SP1 (программа Фибоначчи, n = 20) и ключ его Groth16-верификатора'
-            : `Настоящий пруф SP1 нашей программы перехода состояния и ключ Groth16-верификатора ${circuitVersion}`,
+            : `Настоящий пруф SP1 нашей программы (${program.kind === 'batch' ? 'перехода состояния' : 'аварийного выхода'}) и ключ Groth16-верификатора ${circuitVersion}`,
     verifier: `${contractsUrl}/Groth16Verifier.sol`,
     wrapper: `${contractsUrl}/SP1VerifierGroth16.sol`,
     proof:
@@ -185,8 +198,19 @@ write('source.json', {
     programVKey: fixture.vkey,
     publicValues: fixture.publicValues,
     // Какие из пяти входов меняются от пруфа к пруфу; остальные — константы программы и версии.
+    // У наших программ переменный вход один — дайджест: нонс всегда 0 и свёрнут в ключ
+    // (так его ждёт rollup-контракт). У пруфа шаблона нонс оставлен переменным: на нём
+    // проверяется вторая оконная таблица отдельного верификатора.
     inputNames: ['programVKey', 'publicValuesDigest', 'exitCode', 'vkRoot', 'nonce'],
-    variableInputs: [1, 4],
+    variableInputs: program ? [1] : [1, 4],
+    ...(program
+        ? {
+              kind: program.kind,
+              sourcesSha256: fixture.sourcesSha256,
+              elfSha256: fixture.elfSha256,
+              verifierConstantsSha256: verifier.constantsSha256,
+          }
+        : {}),
 });
 console.log(
     `Пруф SP1 (${circuitVersion}) проверен эталонной библиотекой и записан в fixtures/${fixtureName} (входов: ${inputs.length}).`,

@@ -1,6 +1,12 @@
 {
-  "source": "cargo prove vkey --elf zkvm/target/elf-compilation/riscv64im-succinct-zkvm-elf/release/rollup-program",
-  "note": "Хеш ключа программы — первый публичный вход верификатора SP1. Он зависит от точного ELF, то есть от версии SP1, компилятора и зависимостей; при пересборке может измениться",
+  "source": "Сгенерировано zkvm/script (--vkeys); не редактировать вручную",
+  "note": "Ключ программы — первый публичный вход верификатора SP1; зависит от точного ELF, то есть от исходников (sourcesSha256), версии SP1, компилятора и зависимостей. Сборка не побайтно воспроизводима: на другой машине ELF и ключ могут отличаться — см. PROVING.md",
   "sp1Version": "6.10.0",
-  "programVKey": "0x0083d39d600c4fc58d1d2a6542614bd0241944e66c3ea235dc759b47461eaf58"
+  "guestRustc": "rustc 1.96.0-dev",
+  "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+  "sourcesSha256": "702fea2e601b560c5073b1f94017bfa49699a5d16948ce18a8f83d55f87f1207",
+  "programVKey": "0x00a14e16c1a59d90c4268e765945b8bc0ca25015541f447d62565fbdbe4bb640",
+  "exitProgramVKey": "0x00948e47c49b39cd5589ef920123202f8bd537335e9862a9f47dc4790dbdb50a",
+  "programElfSha256": "a748c3bbd68820e8217e667afa2ca7271b026f299e00749b000fdede08dfa88f",
+  "exitProgramElfSha256": "a93bfc0888a419a063d87ac9de9ffcb982dfaedfcd1bf79c24ccbeb51931bbda"
 }

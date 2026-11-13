@@ -1,9 +1,11 @@
 {
   "source": "Измерено в @ton/sandbox тестом tests/RollupEscapeProof.spec.ts; не редактировать вручную",
-  "note": "Газ аварийного выхода на настоящем rollup-контракте с Groth16-пруфами SP1 программы выхода; nonce = 0",
+  "note": "Газ аварийного выхода на настоящем rollup-контракте с Groth16-пруфами SP1 программы выхода; нонс SP1 равен нулю и свёрнут в ключ",
   "gasLimit": 1000000,
-  "activateEscapeHatch": 4813,
-  "forceExit": 951470,
-  "forceExitHeadroom": 48530,
-  "cancelDeposit": 7046
+  "sourcesSha256": "702fea2e601b560c5073b1f94017bfa49699a5d16948ce18a8f83d55f87f1207",
+  "activateEscapeHatch": 5259,
+  "forceExit": 954941,
+  "forceExitHeadroom": 45059,
+  "rejectedForgery": 947844,
+  "cancelDeposit": 7908
 }

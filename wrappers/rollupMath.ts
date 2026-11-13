@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { beginCell, Cell } from '@ton/core';
 
 // Арифметика протокола rollup'а вне блокчейна. Должна совпадать с
-// contracts/rollup/logic.tolk и zk/rollup-math.mjs.
+// contracts/rollup/logic.tolk и zk/gen-rollup-batches.mjs.
 
 export const WITHDRAWAL_TREE_DEPTH = 32;
 const MASK_253 = (1n << 253n) - 1n;
@@ -22,12 +22,14 @@ export type BatchPublicValues = {
     prevStateRoot: bigint;
     newStateRoot: bigint;
     batchHash: bigint;
+    /** Корень дерева выводов до батча — из хранилища контракта. */
+    prevWithdrawalsRoot: bigint;
     withdrawalsRoot: bigint;
     prevDepositHash: bigint;
     newDepositHash: bigint;
 };
 
-/** Первый публичный вход пруфа батча: sha256 семи значений, обрезанный до 253 бит. */
+/** Первый публичный вход пруфа батча: sha256 восьми значений, обрезанный до 253 бит. */
 export function batchDigest(v: BatchPublicValues): bigint {
     return (
         sha256Int(
@@ -35,6 +37,7 @@ export function batchDigest(v: BatchPublicValues): bigint {
             v.prevStateRoot,
             v.newStateRoot,
             v.batchHash,
+            v.prevWithdrawalsRoot,
             v.withdrawalsRoot,
             v.prevDepositHash,
             v.newDepositHash,
@@ -72,9 +75,16 @@ export function withdrawalTree(leaves: WithdrawalLeaf[]) {
         }
         level = next;
     }
-    const root = level.get(0) ?? emptySubtrees[WITHDRAWAL_TREE_DEPTH];
+    // Корень дерева без листьев контракт и программа zkVM хранят как ноль, а не как хеш
+    // пустого дерева (withdrawals_root в zkvm/lib).
+    const root = leaves.length === 0 ? 0n : level.get(0)!;
     const proofFor = (leafIndex: number): bigint[] =>
-        levels.map((nodes, depth) => nodes.get(Math.floor(leafIndex / 2 ** depth) ^ 1) ?? emptySubtrees[depth]);
+        levels.map((nodes, depth) => {
+            // Сосед — узел с перевёрнутым младшим битом. Без побитовых операций: в JS они
+            // 32-битные со знаком и для листьев с номером от 2³¹ дали бы неверный индекс.
+            const index = Math.floor(leafIndex / 2 ** depth);
+            return nodes.get(index % 2 === 0 ? index + 1 : index - 1) ?? emptySubtrees[depth];
+        });
     return { root, proofFor };
 }
 
@@ -134,3 +144,20 @@ export const dataHashStep = (previous: bigint, chunk: Cell) => sha256Int(previou
 
 /** Хеш данных батча: порции в порядке публикации; 0, если данных нет. */
 export const batchDataHash = (chunks: Cell[]) => chunks.reduce(dataHashStep, 0n);
+
+// --- принудительные транзакции L2 ---
+
+/** Метка принудительной транзакции в хеше очереди — как FORCED_TRANSACTION_MARKER в контракте. */
+export const FORCED_TRANSACTION_MARKER = 1n << 255n;
+
+/** Принудительная транзакция как ячейка: одна ячейка без ссылок, не больше DATA_CELL_BYTES байт. */
+export function forcedTransactionCell(transaction: Buffer): Cell {
+    if (transaction.length > DATA_CELL_BYTES) {
+        throw new Error(`forcedTransactionCell: ${transaction.length} байт не помещаются в одну ячейку`);
+    }
+    return beginCell().storeBuffer(transaction).endCell();
+}
+
+/** Накопительный хеш очереди L1→L2 после принудительной транзакции — как в контракте. */
+export const forcedTransactionHash = (previous: bigint, transaction: Cell) =>
+    sha256Int(previous, FORCED_TRANSACTION_MARKER, cellHashInt(transaction));
