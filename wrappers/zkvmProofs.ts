@@ -2,7 +2,8 @@ import { readFileSync } from 'fs';
 import path from 'path';
 import { Cell } from '@ton/core';
 import { Bn254Proof, KeyUploadJson } from './Bn254Groth16Verifier';
-import { BatchRoots } from './Rollup';
+import { Address } from '@ton/core';
+import { BatchRoots, ExitClaim } from './Rollup';
 import { dataChunkCell } from './rollupMath';
 
 // Загрузка пруфов SP1 программы перехода состояния (zkvm/) из фикстур. Используется и
@@ -65,16 +66,8 @@ export function loadProvenBatch(index: number): ProvenBatch {
     const directory = `sp1_rollup_batch${index}`;
     const output = loadZkvmScenario().batches[index - 1];
     if (!output) throw new Error(`В сценарии нет батча ${index}`);
-    const raw = read(directory, 'proof.json');
     return {
-        proof: {
-            a: [BigInt(raw.pi_a[0]), BigInt(raw.pi_a[1])],
-            b: [
-                [BigInt(raw.pi_b[0][0]), BigInt(raw.pi_b[0][1])],
-                [BigInt(raw.pi_b[1][0]), BigInt(raw.pi_b[1][1])],
-            ],
-            c: [BigInt(raw.pi_c[0]), BigInt(raw.pi_c[1])],
-        },
+        proof: proofFromFixture(directory),
         hinted: (read(directory, 'onchain.json') as { hinted: HintedFixture }).hinted,
         publicInputs: (read(directory, 'public.json') as string[]).map(BigInt),
         output,
@@ -83,5 +76,63 @@ export function loadProvenBatch(index: number): ProvenBatch {
             withdrawalsRoot: BigInt(output.roots.withdrawalsRoot),
         },
         dataChunks: dataChunksOf(output),
+    };
+}
+
+// --- аварийный выход ---
+
+/** Заявка на выход, как её выдал нативный запуск программы выхода. */
+export type ExitClaimOutput = {
+    name: string;
+    l2Account: string;
+    amount: string;
+    recipientHash: string;
+    /** 160 байт публичных значений программы выхода (hex). */
+    publicValuesHex: string;
+    publicInput: string;
+};
+
+export type ExitScenario = { chainId: string; stateRoot: string; claims: ExitClaimOutput[] };
+
+export type ProvenExit = {
+    proof: Bn254Proof;
+    hinted: HintedFixture;
+    publicInputs: bigint[];
+    output: ExitClaimOutput;
+    /** Заявка в том виде, в каком она уходит в контракт. */
+    claim: ExitClaim;
+};
+
+/** Заявки на аварийный выход из состояния после батча 2 (fixtures/zkvm_exit/claims.json). */
+export const loadExitScenario = (): ExitScenario => read('zkvm_exit', 'claims.json');
+
+const proofFromFixture = (directory: string): Bn254Proof => {
+    const raw = read(directory, 'proof.json');
+    return {
+        a: [BigInt(raw.pi_a[0]), BigInt(raw.pi_a[1])],
+        b: [
+            [BigInt(raw.pi_b[0][0]), BigInt(raw.pi_b[0][1])],
+            [BigInt(raw.pi_b[1][0]), BigInt(raw.pi_b[1][1])],
+        ],
+        c: [BigInt(raw.pi_c[0]), BigInt(raw.pi_c[1])],
+    };
+};
+
+/** Пруф SP1 аварийного выхода счёта сценария (alice или bob) с ключом и подсказками. */
+export function loadProvenExit(name: string): ProvenExit {
+    const directory = `sp1_rollup_exit_${name}`;
+    const output = loadExitScenario().claims.find((claim) => claim.name === name);
+    if (!output) throw new Error(`В сценарии нет заявки на выход ${name}`);
+    const recipientHash = BigInt(output.recipientHash).toString(16).padStart(64, '0');
+    return {
+        proof: proofFromFixture(directory),
+        hinted: (read(directory, 'onchain.json') as { hinted: HintedFixture }).hinted,
+        publicInputs: (read(directory, 'public.json') as string[]).map(BigInt),
+        output,
+        claim: {
+            l2Account: BigInt(output.l2Account),
+            amount: BigInt(output.amount),
+            recipient: new Address(0, Buffer.from(recipientHash, 'hex')),
+        },
     };
 }

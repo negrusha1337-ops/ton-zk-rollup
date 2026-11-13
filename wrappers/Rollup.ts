@@ -16,6 +16,11 @@ export const RollupOpcodes = {
     depositTon: 0x52420002,
     publishData: 0x52420003,
     withdraw: 0x52420004,
+    activateEscapeHatch: 0x52420006,
+    forceExit: 0x52420007,
+    cancelDeposit: 0x52420008,
+    setExitKey: 0x52420009,
+    pruneDepositReceipts: 0x5242000a,
     nullifierClaim: 0x52420010,
     nullifierClaimed: 0x52420011,
 };
@@ -33,6 +38,13 @@ export const RollupErrors = {
     notNullifier: 7309,
     wrongRecipient: 7310,
     dataForClosedBatch: 7311,
+    rollupFrozen: 7312,
+    rollupNotFrozen: 7313,
+    escapeNotDue: 7314,
+    nothingToExit: 7315,
+    depositAlreadyProcessed: 7316,
+    noSuchDeposit: 7317,
+    exitKeyNotSet: 7318,
 };
 
 export const NullifierErrors = {
@@ -47,7 +59,12 @@ export type RollupConfig = {
     genesisStateRoot: bigint;
     /** Идентификатор rollup'а: входит в публичный вход пруфа и в подписи транзакций L2. */
     chainId: bigint;
+    /** Сколько секунд депозит может ждать обработки, прежде чем rollup можно заморозить. */
+    escapeTimeout: number;
 };
+
+/** Заявка аварийного выхода: какой счёт L2, сколько и кому в basechain. */
+export type ExitClaim = { l2Account: bigint; amount: bigint; recipient: Address };
 
 export type BatchRoots = { newStateRoot: bigint; withdrawalsRoot: bigint };
 
@@ -73,13 +90,23 @@ export class Rollup implements Contract {
             .storeUint(0, 64)
             .storeRef(queue.endCell())
             .storeBit(false) // pendingData: данных батчей ещё нет
+            .storeBit(false) // depositReceipts: депозитов ещё не было
+            .storeBit(false) // frozen
+            .storeUint(0, 32) // queuedAfterTargetAt
+            .storeUint(0, 32) // queuedAfterProcessedAt
+            .endCell();
+        const keys = beginCell()
+            .storeBit(false) // vkData: ещё нет
+            .storeBit(false) // keyParts: пустой словарь
+            .storeUint(0, 254) // exitIc0x: не задан
+            .storeUint(0, 254) // exitIc0y
             .endCell();
         const data = beginCell()
             .storeAddress(config.owner)
             .storeAddress(config.sequencer)
             .storeUint(config.chainId, 64)
-            .storeBit(false) // vkData: ещё нет
-            .storeBit(false) // keyParts: пустой словарь
+            .storeUint(config.escapeTimeout, 32)
+            .storeRef(keys)
             .storeRef(config.nullifierCode)
             .storeRef(state)
             .endCell();
@@ -94,11 +121,9 @@ export class Rollup implements Contract {
      */
     static uploadedKeySlots(data: Cell): number[] {
         const slice = data.beginParse();
-        slice.loadAddress(); // owner
-        slice.loadAddress(); // sequencer
-        slice.loadUint(64); // chainId
-        slice.loadMaybeRef(); // vkData
-        return slice.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell()).keys();
+        const keys = data.beginParse().loadRef().beginParse(); // первая ссылка корня — RollupKeys
+        keys.loadMaybeRef(); // vkData
+        return keys.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell()).keys();
     }
 
     private async send(provider: ContractProvider, via: Sender, value: bigint, body: Cell) {
@@ -159,6 +184,65 @@ export class Rollup implements Contract {
         opts: { proof: Bn254Proof; hints: Cell; roots: BatchRoots; nonce?: bigint; value: bigint },
     ) {
         await this.send(provider, via, opts.value, Rollup.buildSubmitBatchBody(opts));
+    }
+
+    /** IC0 ключа программы выхода; задаётся владельцем один раз, до фиксации ключа. */
+    async sendSetExitKey(provider: ContractProvider, via: Sender, opts: { ic0: [bigint, bigint]; value: bigint }) {
+        const body = beginCell()
+            .storeUint(RollupOpcodes.setExitKey, 32)
+            .storeUint(0, 64)
+            .storeUint(opts.ic0[0], 254)
+            .storeUint(opts.ic0[1], 254)
+            .endCell();
+        await this.send(provider, via, opts.value, body);
+    }
+
+    /** Заморозить rollup: срабатывает, только если депозит ждёт дольше escapeTimeout. */
+    async sendActivateEscapeHatch(provider: ContractProvider, via: Sender, value: bigint) {
+        const body = beginCell().storeUint(RollupOpcodes.activateEscapeHatch, 32).storeUint(0, 64).endCell();
+        await this.send(provider, via, value, body);
+    }
+
+    /** Аварийный выход с баланса L2 по пруфу программы выхода (только после заморозки). */
+    async sendForceExit(
+        provider: ContractProvider,
+        via: Sender,
+        opts: { proof: Bn254Proof; hints: Cell; claim: ExitClaim; nonce?: bigint; value: bigint },
+    ) {
+        const claim = beginCell()
+            .storeUint(opts.claim.l2Account, 160)
+            .storeUint(opts.claim.amount, 128)
+            .storeAddress(opts.claim.recipient)
+            .endCell();
+        const body = beginCell()
+            .storeUint(RollupOpcodes.forceExit, 32)
+            .storeUint(0, 64)
+            .storeUint(opts.nonce ?? 0n, 256)
+            .storeRef(Rollup.buildProofCell(opts.proof))
+            .storeRef(opts.hints)
+            .storeRef(claim)
+            .endCell();
+        await this.send(provider, via, opts.value, body);
+    }
+
+    /** Вернуть вносителю депозит, не попавший в батч до заморозки. */
+    async sendCancelDeposit(provider: ContractProvider, via: Sender, opts: { depositIndex: number; value: bigint }) {
+        const body = beginCell()
+            .storeUint(RollupOpcodes.cancelDeposit, 32)
+            .storeUint(0, 64)
+            .storeUint(opts.depositIndex, 64)
+            .endCell();
+        await this.send(provider, via, opts.value, body);
+    }
+
+    /** Удалить квитанции уже обработанных депозитов (не больше count за раз). */
+    async sendPruneDepositReceipts(provider: ContractProvider, via: Sender, opts: { count: number; value: bigint }) {
+        const body = beginCell()
+            .storeUint(RollupOpcodes.pruneDepositReceipts, 32)
+            .storeUint(0, 64)
+            .storeUint(opts.count, 16)
+            .endCell();
+        await this.send(provider, via, opts.value, body);
     }
 
     /**
@@ -244,6 +328,40 @@ export class Rollup implements Contract {
     async getKeyHash(provider: ContractProvider): Promise<bigint> {
         const { stack } = await provider.get('keyHash', []);
         return stack.readBigNumber();
+    }
+
+    async getExitKeyHash(provider: ContractProvider): Promise<bigint> {
+        const { stack } = await provider.get('exitKeyHash', []);
+        return stack.readBigNumber();
+    }
+
+    /** Заморожен ли rollup, когда встал самый старый необработанный депозит (0 — нет таких) и срок. */
+    async getEscapeState(provider: ContractProvider) {
+        const { stack } = await provider.get('escapeState', []);
+        return { frozen: stack.readBoolean(), oldestPendingAt: stack.readNumber(), timeout: stack.readNumber() };
+    }
+
+    /** Публичный вход, который контракт потребует от пруфа выхода с такой заявкой. */
+    async getExpectedExitInput(provider: ContractProvider, claim: ExitClaim): Promise<bigint> {
+        const { stack } = await provider.get('expectedExitInput', [
+            { type: 'int', value: claim.l2Account },
+            { type: 'int', value: claim.amount },
+            { type: 'int', value: BigInt('0x' + claim.recipient.hash.toString('hex')) },
+        ]);
+        return stack.readBigNumber();
+    }
+
+    async getExitNullifierAddress(provider: ContractProvider, l2Account: bigint): Promise<Address> {
+        const { stack } = await provider.get('exitNullifierAddress', [{ type: 'int', value: l2Account }]);
+        return stack.readAddress();
+    }
+
+    /** Квитанция депозита: кто и сколько внёс; null, если её нет (обработан и убран либо возвращён). */
+    async getDepositReceipt(provider: ContractProvider, depositIndex: number) {
+        const { stack } = await provider.get('depositReceipt', [{ type: 'int', value: BigInt(depositIndex) }]);
+        const depositor = stack.readAddressOpt();
+        const amount = stack.readBigNumber();
+        return depositor ? { depositor, amount } : null;
     }
 
     async getNullifierAddress(provider: ContractProvider, leafIndex: number): Promise<Address> {

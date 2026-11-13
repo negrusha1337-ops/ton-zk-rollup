@@ -5,7 +5,8 @@
 //!   cargo run -p rollup-native            (из каталога zkvm/)
 use std::{fs, path::PathBuf};
 
-use rollup_native::{Scenario, CHAIN_ID, DEPOSIT_VALUE};
+use rollup_exit::prove_exit;
+use rollup_native::{Scenario, CHAIN_ID, DEPOSIT_VALUE, EXIT_NAMES};
 use rollup_stf::{apply_batch, data_chunk_hash, BatchInput, PublicValues};
 use serde_json::{json, Value};
 
@@ -99,6 +100,35 @@ fn main() {
     let file = dir.join("batches.json");
     fs::write(&file, serde_json::to_string_pretty(&output).expect("JSON") + "\n").expect("не удалось записать фикстуру");
     println!("Записано: fixtures/zkvm_batches/batches.json");
+
+    // Аварийный выход: заявки обоих счетов из состояния после батча 2.
+    let claims: Vec<Value> = EXIT_NAMES
+        .iter()
+        .map(|name| {
+            let values = prove_exit(&scenario.exit_input(name, accounts2.clone()))
+                .unwrap_or_else(|error| panic!("выход {name}: заявка отклонена: {error:?}"));
+            json!({
+                "name": name,
+                "l2Account": decimal(&values.l2_account),
+                "amount": values.amount.to_string(),
+                "recipientHash": decimal(&values.recipient_hash),
+                "publicValuesHex": hex::encode(values.to_bytes()),
+                "publicInput": decimal(&values.digest()),
+            })
+        })
+        .collect();
+    let exit_output = json!({
+        "source": "Сгенерировано нативным запуском zkvm/native (cargo run -p rollup-native); не редактировать вручную",
+        "note": "Заявки на аварийный выход из состояния после батча 2: публичные значения программы выхода (5 слов). Пруфа здесь нет",
+        "chainId": CHAIN_ID.to_string(),
+        "stateRoot": decimal(&values2.new_state_root),
+        "claims": claims,
+    });
+    let exit_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/zkvm_exit");
+    fs::create_dir_all(&exit_dir).expect("не удалось создать каталог фикстур");
+    fs::write(exit_dir.join("claims.json"), serde_json::to_string_pretty(&exit_output).expect("JSON") + "\n")
+        .expect("не удалось записать фикстуру");
+    println!("Записано: fixtures/zkvm_exit/claims.json");
     println!("Дайджест батча 1: {}", decimal(&values1.digest()));
     println!("Дайджест батча 2: {}", decimal(&values2.digest()));
 }

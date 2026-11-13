@@ -24,9 +24,14 @@ Groth16 (BLS12-381) в TVM и сколько она стоит. Ответ: ра
 - Стандартный путь (обёртка в схеме) уже есть прототипом у IOG для Cardano.
 - Rollup-контракт, минимальная версия: `contracts/rollup.tolk` (логика в `contracts/rollup/`,
   нуллификатор `contracts/rollup_nullifier.tolk`). `submit_batch` с настоящей проверкой —
-  949 685 gas. Не реализованы jetton'ы, аварийный выход, управление.
+  950 603 gas. Не реализованы jetton'ы, принудительные транзакции L2, управление.
+- **Аварийный выход** (`contracts/rollup/escape.tolk`): если депозит ждёт обработки дольше
+  `escapeTimeout`, кто угодно замораживает rollup; после этого счета L2 выходят по пруфу
+  отдельной программы SP1 (`zkvm/exit-lib`, `zkvm/exit-program`; 951 470 gas), а необработанные
+  депозиты возвращаются по квитанциям. Настоящие пруфы выхода — `fixtures/sp1_rollup_exit_{alice,bob}/`,
+  тесты — `tests/RollupEscape.spec.ts` и `tests/RollupEscapeProof.spec.ts`. Только Sandbox.
 - **Data availability — данные батчей в сообщениях TON** (`DA.md`): секвенсор публикует порции
-  сообщением `PublishData` (около 4 400 gas при любом размере), контракт копит их хеш по номеру
+  сообщением `PublishData` (около 5 000 gas при любом размере), контракт копит их хеш по номеру
   батча и сам подставляет его в публичный вход. Без опубликованных данных батч не принять.
 - `contracts/rollup_mock.tolk` — двойник с заглушкой проверки пруфа, ТОЛЬКО для тестов логики.
 - Программа перехода состояния для zkVM: `zkvm/` (Rust; `lib` — логика, `program` — гость SP1,
@@ -37,7 +42,7 @@ Groth16 (BLS12-381) в TVM и сколько она стоит. Ответ: ра
   исполняет программу в zkVM и строит Groth16-пруф — см. `PROVING.md`.
 - **Настоящие пруфы SP1 нашей программы** (схема v6.1.0) для двух батчей:
   `fixtures/sp1_rollup_batch{1,2}/`. Rollup-контракт принимает их в Sandbox
-  (`tests/RollupZkvmProof.spec.ts`): 947 345 и 947 583 gas, запас 5,2–5,3%.
+  (`tests/RollupZkvmProof.spec.ts`): 948 263 и 948 501 gas, запас 5,1–5,2%.
 - **Привязка к rollup'у — `chainId`** в хранилище контракта: первое из семи слов публичных
   значений и часть подписи каждой транзакции L2. К адресу контракта привязки нет намеренно
   (иначе любой пересбор контракта требует новых пруфов); уникальность `chainId` — на
@@ -58,7 +63,7 @@ npm run zk:build            # пересобрать схемы, setup и док
 npm run zk:verifiers        # перегенерировать Tolk-верификаторы из fixtures/
 npm run zk:network-config   # обновить снимок цен газа mainnet
 npm run zk:cost-report      # таблица «газ → TON» из измерений
-cd zkvm && cargo test -p rollup-stf && cargo run -p rollup-native   # программа zkVM нативно
+cd zkvm && cargo test -p rollup-stf -p rollup-exit && cargo run -p rollup-native   # программы zkVM нативно
 cd zkvm/program && cargo prove build   # сборка под zkVM (нужен SP1: ~/.sp1/bin в PATH)
 cd zkvm/script && PROTOC="$PWD/../../.tools/protoc/bin/protoc" cargo run --release -- --batch 1 --execute
 ```
@@ -133,5 +138,11 @@ cd zkvm/script && PROTOC="$PWD/../../.tools/protoc/bin/protoc" cargo run --relea
   (`--target-dir target/profiling`); прувер собирать без этой опции.
 - Groth16 на этом ноутбуке при параллельной нагрузке идёт 14 минут и доходит до порога сторожа
   (4 ГБ свободного места): перед запуском закрывать всё тяжёлое.
+- Ключ программы выхода = ключ программы батчей с другим IC0; контракт собирает его сам
+  (`exitVkData`). Порядок развёртывания: части ключа → `SetExitKey` → `FinalizeKey`.
+- Не менять `zkvm/lib` без нужды: от него зависит ELF программы батчей, а с ним её ключ и все
+  пруфы батчей. Программа выхода живёт в отдельных крейтах именно поэтому. После сборки
+  сверять `cargo prove vkey` с `fixtures/zkvm_batches/program.json`.
+- Изменение кода контракта пруфы НЕ ломает: они привязаны к `chainId`, а не к адресу.
 - Circom ставится локально: `cargo install --git https://github.com/iden3/circom.git --tag v2.2.3 --root .tools circom`
   (или переменная `CIRCOM_BIN`).

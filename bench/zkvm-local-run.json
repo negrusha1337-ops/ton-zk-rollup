@@ -102,5 +102,26 @@
         "freeDiskAtStartGb": 7
       }
     }
+  },
+  "exitProofs": {
+    "date": "2026-11-13",
+    "program": "zkvm/exit-program: аварийный выход счёта L2",
+    "programVKey": "0x006fe42321df6ff109a962c247e863b027416ac34b2eee3b3c72e54d1397d27b",
+    "executeCycles": {
+      "alice": 48675,
+      "bob": 47296
+    },
+    "groth16": {
+      "alice": {
+        "wallClockSeconds": 855.47,
+        "minFreeDiskGb": 6,
+        "freeDiskAtStartGb": 21
+      },
+      "bob": {
+        "wallClockSeconds": 765.76,
+        "minFreeDiskGb": 6,
+        "freeDiskAtStartGb": 9
+      }
+    }
   }
 }

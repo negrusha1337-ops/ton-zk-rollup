@@ -14,8 +14,15 @@ import {
     PUBLISH_DATA_VALUE,
     SUBMIT_BATCH_VALUE,
     WITHDRAW_VALUE,
+    ESCAPE_TIMEOUT_SECONDS,
 } from '../wrappers/rollupValues';
-import { loadProgramVKey, loadProvenBatch, loadZkvmScenario, ProvenBatch } from '../wrappers/zkvmProofs';
+import {
+    loadProgramVKey,
+    loadProvenBatch,
+    loadProvenExit,
+    loadZkvmScenario,
+    ProvenBatch,
+} from '../wrappers/zkvmProofs';
 import { computePhaseOf } from './helpers/gas';
 
 // Лимит газа на транзакцию: конфиг сети, параметр 21 (gas_limit).
@@ -34,6 +41,9 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
     const batch1 = loadProvenBatch(1);
     const batch2 = loadProvenBatch(2);
     const key = keyUploadFromJson(batch1.hinted.keyUpload);
+    // Ключ программы выхода отличается от ключа программы батчей только константой IC0
+    // (сам аварийный выход проверяется в tests/RollupEscapeProof.spec.ts).
+    const exitKeyIc0 = keyUploadFromJson(loadProvenExit('alice').hinted.keyUpload).ic0;
     const gas: Record<string, number> = {};
 
     let blockchain: Blockchain;
@@ -84,6 +94,7 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
                     nullifierCode,
                     genesisStateRoot: genesis,
                     chainId: BigInt(program.chainId),
+                    escapeTimeout: ESCAPE_TIMEOUT_SECONDS,
                 },
                 code,
             ),
@@ -103,6 +114,7 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
         }
         // Скрипт testnet определяет, что уже загружено, по данным контракта.
         expect((await uploadedSlots()).sort((a, b) => a - b)).toEqual(parts.map((p) => p.slot).sort((a, b) => a - b));
+        await rollup.sendSetExitKey(owner.getSender(), { ic0: exitKeyIc0, value: KEY_FINALIZE_VALUE });
         const finalize = await rollup.sendFinalizeKey(owner.getSender(), { key, value: KEY_FINALIZE_VALUE });
         expect(finalize.transactions).toHaveTransaction({ to: rollup.address, success: true });
         ready = blockchain.snapshot();
@@ -192,6 +204,7 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
                     nullifierCode: await compile('RollupNullifier'),
                     genesisStateRoot: genesis,
                     chainId: BigInt(program.chainId) + 1n,
+                    escapeTimeout: ESCAPE_TIMEOUT_SECONDS,
                 },
                 await compile('Rollup'),
             ),
@@ -200,6 +213,7 @@ describe('Rollup: пруфы SP1 нашей программы перехода 
         for (const { slot, part } of Bn254Groth16Verifier.keyParts(key)) {
             await twin.sendUploadKeyPart(owner.getSender(), { slot, part, value: KEY_PART_VALUE });
         }
+        await twin.sendSetExitKey(owner.getSender(), { ic0: exitKeyIc0, value: KEY_FINALIZE_VALUE });
         await twin.sendFinalizeKey(owner.getSender(), { key, value: KEY_FINALIZE_VALUE });
         expect(await twin.getKeyHash()).toBe(await rollup.getKeyHash());
 

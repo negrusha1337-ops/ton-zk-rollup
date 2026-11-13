@@ -8,6 +8,7 @@ import '@ton/test-utils';
 import { computePhaseOf } from './helpers/gas';
 import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
 import { NullifierErrors, Rollup, RollupErrors, RollupOpcodes } from '../wrappers/Rollup';
+import { ESCAPE_TIMEOUT_SECONDS } from '../wrappers/rollupValues';
 import {
     batchDataHash,
     batchDigest,
@@ -78,6 +79,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
                     nullifierCode,
                     genesisStateRoot: GENESIS_ROOT,
                     chainId: CHAIN_ID,
+                    escapeTimeout: ESCAPE_TIMEOUT_SECONDS,
                 },
                 code,
             ),
@@ -455,7 +457,7 @@ describe('Rollup: логика на тестовом двойнике', () => {
             const forged = beginCell()
                 .storeUint(RollupOpcodes.nullifierClaimed, 32)
                 .storeUint(0, 64)
-                .storeUint(1, 32)
+                .storeUint(1, 256)
                 .storeAddress(user.address)
                 .storeCoins(toNano('1'))
                 .endCell();

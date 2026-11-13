@@ -1,0 +1,9 @@
+{
+  "source": "Измерено в @ton/sandbox тестом tests/RollupEscapeProof.spec.ts; не редактировать вручную",
+  "note": "Газ аварийного выхода на настоящем rollup-контракте с Groth16-пруфами SP1 программы выхода; nonce = 0",
+  "gasLimit": 1000000,
+  "activateEscapeHatch": 4813,
+  "forceExit": 951470,
+  "forceExitHeadroom": 48530,
+  "cancelDeposit": 7046
+}

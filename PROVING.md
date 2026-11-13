@@ -20,9 +20,13 @@
   ([DA.md](DA.md)); ключ программы — в `fixtures/zkvm_batches/program.json`.
 - Импортированные пруфы с ключом верификатора v6.1.0 и подсказками:
   `fixtures/sp1_rollup_batch{1,2}/`.
+- Пруфы аварийного выхода двух счетов сценария (отдельная программа `zkvm/exit-program`,
+  около 48 тыс. циклов): `fixtures/zkvm_exit/proof-{alice,bob}.json`, импортированные —
+  `fixtures/sp1_rollup_exit_{alice,bob}/`. Контракт принимает их после заморозки:
+  951 470 gas (`tests/RollupEscapeProof.spec.ts`, `bench/rollup-escape.json`).
 - Rollup-контракт (`contracts/rollup.tolk`, настоящая проверка) принимает оба пруфа:
-  `submit_batch` — 947 345 gas (батч 1) и 947 583 gas (батч 2, с депозитом и данными), запас
-  до лимита транзакции 5,2–5,3%. Полный путь «депозит → батч 1 → данные → батч 2 → вывод»
+  `submit_batch` — 948 263 gas (батч 1) и 948 501 gas (батч 2, с депозитом и данными), запас
+  до лимита транзакции 5,1–5,2%. Полный путь «депозит → батч 1 → данные → батч 2 → вывод»
   проходит (`tests/RollupZkvmProof.spec.ts`); чужой корень, чужой nonce, пруф не своего батча,
   пруф для rollup'а с другим идентификатором и батч без опубликованных данных отклоняются.
 - В testnet 12.11.2026 пройден тот же путь на версии до подписей и идентификатора rollup'а:
@@ -71,6 +75,7 @@ cargo build --release --features native-gnark
 ./target/release/rollup-script --batch 1 --execute      # исполнить в zkVM
 ./target/release/rollup-script --batch 1 --compressed   # STARK-пруф, только диагностика
 ./prove-guarded.sh --batch 1 --prove                    # Groth16 под сторожем диска
+./prove-guarded.sh --exit alice --prove                 # пруф аварийного выхода счёта сценария
 ```
 
 Артефакты схемы SDK скачивает сам при первом `--prove` (архив и распаковка рядом, ~14 ГБ

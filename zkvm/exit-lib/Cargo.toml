@@ -1,0 +1,9 @@
+[package]
+name = "rollup-exit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rollup-stf = { path = "../lib" }
+serde.workspace = true
+k256.workspace = true

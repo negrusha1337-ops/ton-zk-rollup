@@ -10,8 +10,9 @@ import {
     PUBLISH_DATA_VALUE,
     SUBMIT_BATCH_VALUE,
     WITHDRAW_VALUE,
+    ESCAPE_TIMEOUT_SECONDS,
 } from '../wrappers/rollupValues';
-import { loadProvenBatch, loadZkvmScenario, ProvenBatch } from '../wrappers/zkvmProofs';
+import { loadProvenBatch, loadProvenExit, loadZkvmScenario, ProvenBatch } from '../wrappers/zkvmProofs';
 
 // Полный путь rollup-контракта в testnet на настоящих пруфах SP1:
 // развёртывание → ключ частями → депозит → батч 1 → данные батча 2 → батч 2 → вывод.
@@ -56,6 +57,7 @@ export async function run(provider: NetworkProvider) {
     const scenario = loadZkvmScenario();
     const batches = [loadProvenBatch(1), loadProvenBatch(2)];
     const key = keyUploadFromJson(batches[0].hinted.keyUpload);
+    const exitKeyIc0 = keyUploadFromJson(loadProvenExit('alice').hinted.keyUpload).ic0;
     const expectedKeyHash = BigInt('0x' + Cell.fromBase64(batches[0].hinted.vkDataBoc).hash().toString('hex'));
     const parts = Bn254Groth16Verifier.keyParts(key);
     const depositValue = BigInt(scenario.deposit.value);
@@ -69,6 +71,7 @@ export async function run(provider: NetworkProvider) {
                 nullifierCode: await compile('RollupNullifier'),
                 genesisStateRoot: BigInt(scenario.genesisStateRoot),
                 chainId: BigInt(scenario.chainId),
+                escapeTimeout: ESCAPE_TIMEOUT_SECONDS,
             },
             await compile('Rollup'),
         ),
@@ -98,7 +101,7 @@ export async function run(provider: NetworkProvider) {
     const needed =
         (deployed ? 0n : DEPLOY_VALUE + WALLET_FEE_SMALL) +
         BigInt(missingParts.length) * (KEY_PART_VALUE + WALLET_FEE_LARGE) +
-        (keyReady ? 0n : KEY_FINALIZE_VALUE + WALLET_FEE_SMALL) +
+        (keyReady ? 0n : 2n * (KEY_FINALIZE_VALUE + WALLET_FEE_SMALL)) +
         (depositQueued || batchIndex > 0 ? 0n : depositValue + WALLET_FEE_SMALL) +
         chunksLeft * (PUBLISH_DATA_VALUE + WALLET_FEE_SMALL) +
         batchesLeft * (SUBMIT_BATCH_VALUE + WALLET_FEE_BATCH) +
@@ -124,6 +127,13 @@ export async function run(provider: NetworkProvider) {
             ui.write(`Часть ключа ${index + 1} из ${parts.length} (номер ${slot})`);
             await rollup.sendUploadKeyPart(sender, { slot, part, value: KEY_PART_VALUE });
             await waitFor(`часть ${slot} в контракте`, async () => (await uploadedSlots()).includes(slot));
+        }
+        if ((await rollup.getExitKeyHash()) === 0n) {
+            // Ключ программы выхода: без него контракт не даст зафиксировать основной ключ.
+            // Повторная отправка после сбоя отклоняется контрактом и ничего не портит.
+            ui.write('Ключ программы аварийного выхода');
+            await rollup.sendSetExitKey(sender, { ic0: exitKeyIc0, value: KEY_FINALIZE_VALUE }).catch(() => undefined);
+            await sleep(POLL_DELAY_MS * 4);
         }
         ui.write('Фиксация ключа');
         await rollup.sendFinalizeKey(sender, { key, value: KEY_FINALIZE_VALUE });

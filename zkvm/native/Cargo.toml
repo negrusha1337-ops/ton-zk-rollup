@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 rollup-stf = { path = "../lib" }
+rollup-exit = { path = "../exit-lib" }
 hex = "0.4"
 serde_json = "1.0"
 k256.workspace = true

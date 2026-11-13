@@ -3100,11 +3100,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rollup-exit"
+version = "0.1.0"
+dependencies = [
+ "k256",
+ "rollup-stf",
+ "serde",
+]
+
+[[package]]
 name = "rollup-native"
 version = "0.1.0"
 dependencies = [
  "hex",
  "k256",
+ "rollup-exit",
  "rollup-stf",
  "serde_json",
 ]
@@ -3115,6 +3125,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "hex",
+ "rollup-exit",
  "rollup-native",
  "rollup-stf",
  "serde",

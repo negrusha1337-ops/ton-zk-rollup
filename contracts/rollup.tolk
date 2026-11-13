@@ -1,14 +1,16 @@
 // Rollup-контракт на TON, минимальная версия: корень состояния L2 меняется только
 // батчем с верным Groth16-пруфом на BN254 (проверка — contracts/bn254/hinted.tolk),
 // депозиты TON встают в очередь с принудительным включением, выводы идут по
-// Merkle-доказательству через контракт-нуллификатор.
+// Merkle-доказательству через контракт-нуллификатор. Данные батчей публикуются
+// сообщениями PublishData (DA.md). Если секвенсор перестал обрабатывать депозиты,
+// rollup замораживается и средства забираются без него (rollup/escape.tolk).
 //
-// НЕ ДЛЯ ПРОДАКШЕНА. Код не проходил аудит, нет jetton'ов, аварийного выхода,
-// управления обновлениями. Данные батчей публикуются сообщениями PublishData (DA.md).
-// Только Sandbox и testnet.
+// НЕ ДЛЯ ПРОДАКШЕНА. Код не проходил аудит, нет jetton'ов, принудительных транзакций
+// L2 и управления обновлениями. Только Sandbox и testnet.
 import "rollup/storage"
 import "rollup/messages"
 import "rollup/logic"
+import "rollup/escape"
 import "bn254/verifier_api"
 
 contract Rollup {
@@ -24,8 +26,10 @@ fun onInternalMessage(inMsg: InMessage) {
     SubmitBatch => {
       var storage = RollupStorage.load();
       assert (inMsg.senderAddress == storage.sequencer) throw RollupErrors.NotSequencer;
-      assert (storage.vkData != null) throw RollupErrors.KeyNotFinalized;
+      val keys = storage.keys.load();
+      assert (keys.vkData != null) throw RollupErrors.KeyNotFinalized;
       var state = storage.state.load();
+      assert (!state.frozen) throw RollupErrors.RollupFrozen;
       val queue = state.queue.load();
       val roots = msg.roots.load();
       // Хеш данных батча контракт берёт из своего хранилища: пруф для данных, которые не
@@ -35,7 +39,7 @@ fun onInternalMessage(inMsg: InMessage) {
         msg.proof,
         batchDigest(storage.chainId, state, queue, roots, batchHash),
         msg.nonce,
-        storage.vkData!,
+        keys.vkData!,
         msg.hints
       );
       assert (ok) throw RollupErrors.WrongProof;
@@ -45,7 +49,7 @@ fun onInternalMessage(inMsg: InMessage) {
       handlePublishData(inMsg.senderAddress, msg);
     }
     DepositTon => {
-      handleDeposit(inMsg.valueCoins, msg);
+      handleDeposit(inMsg.senderAddress, inMsg.valueCoins, msg);
     }
     Withdraw => {
       handleWithdraw(inMsg.valueCoins, msg);
@@ -59,6 +63,28 @@ fun onInternalMessage(inMsg: InMessage) {
     FinalizeKey => {
       handleFinalizeKey(inMsg.senderAddress, msg);
     }
+    SetExitKey => {
+      handleSetExitKey(inMsg.senderAddress, msg);
+    }
+    ActivateEscapeHatch => {
+      handleActivateEscapeHatch();
+    }
+    ForceExit => {
+      val storage = RollupStorage.load();
+      val keys = storage.keys.load();
+      assert (keys.vkData != null) throw RollupErrors.KeyNotFinalized;
+      val claim = msg.claim.load();
+      val digest = prepareForceExit(inMsg.valueCoins, storage, claim);
+      val ok = verifyBn254Proof(msg.proof, digest, msg.nonce, exitVkData(keys), msg.hints);
+      assert (ok) throw RollupErrors.WrongProof;
+      completeForceExit(storage, msg.queryId, claim);
+    }
+    CancelDeposit => {
+      handleCancelDeposit(msg);
+    }
+    PruneDepositReceipts => {
+      handlePruneDepositReceipts(msg);
+    }
     else => {
       // Пустое тело — пополнение баланса.
       assert (inMsg.body.isEmpty()) throw RollupErrors.UnknownMessage;
@@ -67,9 +93,9 @@ fun onInternalMessage(inMsg: InMessage) {
 }
 
 fun onBouncedMessage(inMsg: InMessageBounced) {
-  // Единственное сообщение с bounce — заявка в нуллификатор. Она возвращается, если
-  // вывод уже был использован. К этому моменту rollup ничего не выплатил и ничего
-  // не записал, поэтому откатывать нечего: остаток монет просто остаётся на балансе.
+  // С bounce уходят только заявки в нуллификатор. Они возвращаются, если вывод или
+  // аварийный выход уже был использован. К этому моменту rollup ничего не выплатил и
+  // ничего не записал, поэтому откатывать нечего: остаток монет остаётся на балансе.
 }
 
 /// (корень состояния, корень выводов, номер батча)
@@ -85,15 +111,7 @@ get fun depositQueue(): DepositQueue {
 /// Первый публичный вход, который контракт потребует от следующего батча с такими корнями
 /// (при уже опубликованных для него данных).
 get fun expectedPublicInput(newStateRoot: int, withdrawalsRoot: int): int {
-  val storage = RollupStorage.load();
-  val state = storage.state.load();
-  return batchDigest(
-    storage.chainId,
-    state,
-    state.queue.load(),
-    BatchRoots { newStateRoot: newStateRoot, withdrawalsRoot: withdrawalsRoot },
-    batchDataHashOf(state.pendingData, state.batchIndex + 1)
-  );
+  return expectedPublicInputView(newStateRoot, withdrawalsRoot);
 }
 
 /// Накопительный хеш данных, опубликованных для батча с этим номером; 0, если их нет.
@@ -106,15 +124,40 @@ get fun chainId(): int {
   return RollupStorage.load().chainId;
 }
 
-/// Хеш зафиксированного ключа верификации; 0, пока ключ не зафиксирован.
+/// Хеш зафиксированного ключа верификации программы батчей; 0, пока ключ не зафиксирован.
 get fun keyHash(): int {
-  val storage = RollupStorage.load();
-  if (storage.vkData == null) {
+  val keys = RollupStorage.load().keys.load();
+  if (keys.vkData == null) {
     return 0;
   }
-  return storage.vkData!.hash();
+  return keys.vkData!.hash();
+}
+
+/// Хеш ключа верификации программы выхода; 0, пока ключ не зафиксирован.
+get fun exitKeyHash(): int {
+  return exitKeyHashView();
 }
 
 get fun nullifierAddress(leafIndex: int): address {
   return nullifierDeployment(RollupStorage.load().nullifierCode, leafIndex).calculateAddress();
+}
+
+/// Адрес нуллификатора аварийного выхода для счёта L2.
+get fun exitNullifierAddress(l2Account: int): address {
+  return nullifierDeployment(RollupStorage.load().nullifierCode, exitNullifierKey(l2Account)).calculateAddress();
+}
+
+/// (заморожен ли, когда встал самый старый необработанный депозит или 0, срок в секундах)
+get fun escapeState(): (bool, int, int) {
+  return escapeStateView();
+}
+
+/// Публичный вход, который контракт потребует от пруфа выхода с такой заявкой.
+get fun expectedExitInput(l2Account: int, amount: int, recipientHash: int): int {
+  return expectedExitInputView(l2Account, amount, recipientHash);
+}
+
+/// (вноситель, сумма) по номеру депозита; сумма 0, если квитанции нет.
+get fun depositReceipt(depositIndex: int): (address?, int) {
+  return depositReceiptView(depositIndex);
 }

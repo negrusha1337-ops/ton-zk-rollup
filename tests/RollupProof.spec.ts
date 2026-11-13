@@ -6,6 +6,7 @@ import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
 import { Bn254Groth16Verifier, Bn254Proof, KeyUploadJson, keyUploadFromJson } from '../wrappers/Bn254Groth16Verifier';
 import { NullifierErrors, Rollup, RollupErrors } from '../wrappers/Rollup';
+import { ESCAPE_TIMEOUT_SECONDS } from '../wrappers/rollupValues';
 import {
     batchDataHash,
     batchDigest,
@@ -112,6 +113,7 @@ describe('Rollup: настоящая проверка пруфа', () => {
                     nullifierCode,
                     genesisStateRoot: genesis,
                     chainId,
+                    escapeTimeout: ESCAPE_TIMEOUT_SECONDS,
                 },
                 code,
             ),
@@ -121,6 +123,7 @@ describe('Rollup: настоящая проверка пруфа', () => {
             const upload = await rollup.sendUploadKeyPart(owner.getSender(), { slot, part, value: toNano('0.1') });
             expect(upload.transactions).toHaveTransaction({ to: rollup.address, success: true });
         }
+        await rollup.sendSetExitKey(owner.getSender(), { ic0: key.ic0, value: toNano('0.05') });
         const finalize = await rollup.sendFinalizeKey(owner.getSender(), { key, value: toNano('0.1') });
         expect(finalize.transactions).toHaveTransaction({ to: rollup.address, success: true });
         ready = blockchain.snapshot();
@@ -296,6 +299,7 @@ describe('Rollup: настоящая проверка пруфа', () => {
                     nullifierCode: await compile('RollupNullifier'),
                     genesisStateRoot: genesis,
                     chainId: chainId + 1n,
+                    escapeTimeout: ESCAPE_TIMEOUT_SECONDS,
                 },
                 await compile('Rollup'),
             ),
@@ -304,6 +308,7 @@ describe('Rollup: настоящая проверка пруфа', () => {
         for (const { slot, part } of Bn254Groth16Verifier.keyParts(key)) {
             await twin.sendUploadKeyPart(owner.getSender(), { slot, part, value: toNano('0.1') });
         }
+        await twin.sendSetExitKey(owner.getSender(), { ic0: key.ic0, value: toNano('0.05') });
         await twin.sendFinalizeKey(owner.getSender(), { key, value: toNano('0.1') });
         expect(await twin.getKeyHash()).toBe(await rollup.getKeyHash());
         expect(await twin.getChainId()).toBe(chainId + 1n);
@@ -329,6 +334,7 @@ describe('Rollup: настоящая проверка пруфа', () => {
                     nullifierCode: await compile('RollupNullifier'),
                     genesisStateRoot: genesis + 1n,
                     chainId,
+                    escapeTimeout: ESCAPE_TIMEOUT_SECONDS,
                 },
                 await compile('Rollup'),
             ),

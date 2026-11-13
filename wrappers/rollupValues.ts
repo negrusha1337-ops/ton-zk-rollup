@@ -20,3 +20,8 @@ export const PUBLISH_DATA_VALUE = toNano('0.005');
 export const SUBMIT_BATCH_VALUE = toNano('0.1');
 /** Вывод: контракт требует не меньше 0,1 TON на цепочку «rollup → нуллификатор → rollup → получатель». */
 export const WITHDRAW_VALUE = toNano('0.12');
+
+/** Срок аварийного выхода: сколько депозит может ждать обработки до заморозки rollup'а. */
+export const ESCAPE_TIMEOUT_SECONDS = 7 * 24 * 3600;
+/** Аварийный выход: газ проверки пруфа плюс цепочка через нуллификатор; контракт требует не меньше 0,2 TON. */
+export const FORCE_EXIT_VALUE = toNano('0.2');

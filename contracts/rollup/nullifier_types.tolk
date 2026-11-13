@@ -3,6 +3,8 @@
 
 struct NullifierStorage {
   rollup: address
-  leafIndex: uint32
+  /// Что именно погашается: номер листа дерева выводов либо счёт L2 при аварийном
+  /// выходе (см. exitNullifierKey в rollup/escape.tolk) — пространства не пересекаются.
+  key: uint256
   claimed: bool
 }

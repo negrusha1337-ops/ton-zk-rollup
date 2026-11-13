@@ -62,9 +62,56 @@ struct (0x52420010) NullifierClaim {
 /// Nullifier → Rollup: вывод помечен впервые, можно платить.
 struct (0x52420011) NullifierClaimed {
   queryId: uint64
-  leafIndex: uint32
+  key: uint256
   recipient: address
   amount: coins
+}
+
+/// Владелец → Rollup: IC0 ключа программы выхода. Задаётся один раз, до фиксации ключа.
+struct (0x52420009) SetExitKey {
+  queryId: uint64
+  ic0x: uint254
+  ic0y: uint254
+}
+
+/// Кто угодно → Rollup: заморозить rollup, если самый старый необработанный депозит
+/// провисел в очереди дольше escapeTimeout.
+struct (0x52420006) ActivateEscapeHatch {
+  queryId: uint64
+}
+
+/// Что выводит владелец счёта L2 при аварийном выходе.
+struct ExitClaim {
+  l2Account: uint160
+  amount: uint128
+  /// Получатель в basechain.
+  recipient: address
+}
+
+/// Кто угодно → Rollup (только после заморозки): выплатить баланс счёта L2 из последнего
+/// принятого состояния. Пруф — программы выхода (zkvm/exit-program): счёт с таким балансом
+/// есть в состоянии, и его владелец подписал этого получателя.
+struct (0x52420007) ForceExit {
+  queryId: uint64
+  /// Второй публичный вход верификатора (nonce у SP1).
+  nonce: uint256
+  proof: Cell<ProofPoints>
+  hints: cell
+  claim: Cell<ExitClaim>
+}
+
+/// Кто угодно → Rollup (только после заморозки): вернуть вносителю депозит, который не
+/// успел попасть в батч.
+struct (0x52420008) CancelDeposit {
+  queryId: uint64
+  /// Номер депозита в очереди, с единицы.
+  depositIndex: uint64
+}
+
+/// Кто угодно → Rollup: удалить квитанции уже обработанных депозитов (не больше count).
+struct (0x5242000a) PruneDepositReceipts {
+  queryId: uint64
+  count: uint16
 }
 
 type RollupMessage =
@@ -75,3 +122,8 @@ type RollupMessage =
   | NullifierClaimed
   | UploadKeyPart
   | FinalizeKey
+  | SetExitKey
+  | ActivateEscapeHatch
+  | ForceExit
+  | CancelDeposit
+  | PruneDepositReceipts

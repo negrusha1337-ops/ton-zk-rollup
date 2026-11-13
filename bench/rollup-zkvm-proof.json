@@ -2,9 +2,9 @@
   "source": "Измерено в @ton/sandbox тестом tests/RollupZkvmProof.spec.ts; не редактировать вручную",
   "note": "Газ rollup-контракта с Groth16-пруфами SP1 (схема v6.1.0) нашей программы перехода состояния; nonce = 0; данные батча 2 опубликованы сообщением PublishData",
   "gasLimit": 1000000,
-  "submitBatch": 947345,
-  "submitBatchHeadroom": 52655,
-  "publishData": 4346,
-  "submitBatchWithDeposit": 947583,
-  "submitBatchWithDepositHeadroom": 52417
+  "submitBatch": 948263,
+  "submitBatchHeadroom": 51737,
+  "publishData": 4838,
+  "submitBatchWithDeposit": 948501,
+  "submitBatchWithDepositHeadroom": 51499
 }

@@ -5,6 +5,7 @@
 //! Ключи счетов выводятся из меток и лежат в открытом коде: это тестовые счета
 //! игрушечного L2, настоящих денег на них быть не может.
 use k256::ecdsa::SigningKey;
+use rollup_exit::{sign_exit, ExitInput};
 use rollup_stf::{
     address_of, encode_transactions, sha256, sign_transaction, Account, BatchInput, Deposit, Hash, L2Address,
     SignedTransaction, Transaction, WithdrawalLeaf, MAX_DATA_CHUNK_BYTES,
@@ -119,6 +120,31 @@ impl Scenario {
             deposits: Vec::new(),
             data_chunks: data.chunks(MAX_DATA_CHUNK_BYTES).map(<[u8]>::to_vec).collect(),
             prior_withdrawals,
+        }
+    }
+}
+
+/// Кто выходит аварийно в сценарии.
+pub const EXIT_NAMES: [&str; 2] = ["alice", "bob"];
+
+impl Scenario {
+    /// Заявка на аварийный выход из состояния `accounts` (после заморозки rollup'а):
+    /// владелец счёта подписывает получателя в basechain TON.
+    pub fn exit_input(&self, name: &str, accounts: Vec<Account>) -> ExitInput {
+        let (key, address) = match name {
+            "alice" => (&self.alice_key, self.alice),
+            "bob" => (&self.bob_key, self.bob),
+            other => panic!("в сценарии нет счёта {other}: допустимы alice и bob"),
+        };
+        let recipient_hash = sha256(&[format!("zkvm:exit-recipient:{name}").as_bytes()]);
+        let account_index =
+            accounts.iter().position(|account| account.address == address).expect("счёт есть в состоянии") as u32;
+        ExitInput {
+            chain_id: CHAIN_ID,
+            accounts,
+            account_index,
+            recipient_hash,
+            signature: sign_exit(key, CHAIN_ID, &recipient_hash),
         }
     }
 }

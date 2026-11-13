@@ -1,0 +1,8 @@
+[package]
+name = "rollup-exit-program"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rollup-exit = { path = "../exit-lib" }
+sp1-zkvm = "6.10.0"

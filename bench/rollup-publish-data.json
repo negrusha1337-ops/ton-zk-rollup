@@ -3,19 +3,19 @@
   "note": "Сообщение PublishData: газ контракта и поле forward fee входящего сообщения (часть платы за пересылку, оставшаяся после доли отправляющего шарда) при ценах встроенного конфига Sandbox",
   "measured": {
     "100 байт": {
-      "gasUsed": 4346,
+      "gasUsed": 4838,
       "forwardFeeNano": 84446,
       "cells": 1,
       "messageBocBytes": 120
     },
     "4000 байт": {
-      "gasUsed": 4479,
+      "gasUsed": 4971,
       "forwardFeeNano": 1608902,
       "cells": 32,
       "messageBocBytes": 4114
     },
     "60000 байт": {
-      "gasUsed": 4479,
+      "gasUsed": 4971,
       "forwardFeeNano": 23480182,
       "cells": 473,
       "messageBocBytes": 61914

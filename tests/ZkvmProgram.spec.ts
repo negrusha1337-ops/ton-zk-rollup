@@ -5,6 +5,7 @@ import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
 import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
 import { Rollup } from '../wrappers/Rollup';
+import { ESCAPE_TIMEOUT_SECONDS } from '../wrappers/rollupValues';
 import {
     batchDataHash,
     batchDigest,
@@ -64,6 +65,7 @@ describe('Программа zkVM и rollup-контракт согласова�
                     nullifierCode: await compile('RollupNullifier'),
                     genesisStateRoot: BigInt(program.genesisStateRoot),
                     chainId: BigInt(program.chainId),
+                    escapeTimeout: ESCAPE_TIMEOUT_SECONDS,
                 },
                 await compile('RollupMock'),
             ),

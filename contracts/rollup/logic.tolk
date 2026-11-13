@@ -19,6 +19,13 @@ enum RollupErrors {
   NotNullifier = 7309,
   WrongRecipient = 7310,
   DataForClosedBatch = 7311,
+  RollupFrozen = 7312,
+  RollupNotFrozen = 7313,
+  EscapeNotDue = 7314,
+  NothingToExit = 7315,
+  DepositAlreadyProcessed = 7316,
+  NoSuchDeposit = 7317,
+  ExitKeyNotSet = 7318,
 }
 
 /// Удерживается с каждого депозита: покрывает газ транзакции и плату за хранение.
@@ -33,6 +40,7 @@ const WITHDRAWAL_TREE_DEPTH: int = 32
 const DIGEST_MASK_253: int = (1 << 253) - 1
 
 @pure fun sha256OfBuilder(b: builder, count: int): uint256 asm "HASHEXT_SHA256"
+@pure fun sha256OfTwo(first: builder, second: builder, count: int): uint256 asm "HASHEXT_SHA256"
 @pure fun sha256OfThree(first: builder, second: builder, third: builder, count: int): uint256 asm "HASHEXT_SHA256"
 
 /// Первый публичный вход пруфа: sha256 от семи 32-байтовых значений, обрезанный до
@@ -82,6 +90,7 @@ fun handlePublishData(sender: address, msg: PublishData) {
   var storage = RollupStorage.load();
   assert (sender == storage.sequencer) throw RollupErrors.NotSequencer;
   var state = storage.state.load();
+  assert (!state.frozen) throw RollupErrors.RollupFrozen;
   // Данные можно публиковать и для батчей вперёд, пока строится пруф текущего,
   // но не для уже принятых.
   assert (msg.batchIndex > state.batchIndex) throw RollupErrors.DataForClosedBatch;
@@ -102,45 +111,52 @@ fun applyBatch(mutate storage: RollupStorage, state: RollupState, queue: Deposit
     processedCount: queue.targetCount,
     processedHash: queue.targetHash,
   };
-  storage.state = RollupState {
-    stateRoot: roots.newStateRoot,
-    withdrawalsRoot: roots.withdrawalsRoot,
-    batchIndex: state.batchIndex + 1,
-    queue: nextQueue.toCell(),
-    pendingData: state.pendingData,
-  }.toCell();
+  var next = state;
+  next.stateRoot = roots.newStateRoot;
+  next.withdrawalsRoot = roots.withdrawalsRoot;
+  next.batchIndex = state.batchIndex + 1;
+  next.queue = nextQueue.toCell();
+  // Депозиты за прежней целью стали обязательными для следующего батча; за новой целью
+  // пока никого нет.
+  next.queuedAfterProcessedAt = state.queuedAfterTargetAt;
+  next.queuedAfterTargetAt = 0;
+  storage.state = next.toCell();
   storage.save();
 }
 
-fun handleDeposit(valueCoins: coins, msg: DepositTon) {
+fun handleDeposit(sender: address, valueCoins: coins, msg: DepositTon) {
   var storage = RollupStorage.load();
   val amount = valueCoins - DEPOSIT_FEE;
   assert (amount >= MIN_DEPOSIT) throw RollupErrors.DepositTooSmall;
 
-  val state = storage.state.load();
+  var state = storage.state.load();
+  // В замороженный rollup вносить нельзя: исключение вернёт монеты отправителю.
+  assert (!state.frozen) throw RollupErrors.RollupFrozen;
   var queue = state.queue.load();
+  if (queue.headCount == queue.targetCount) {
+    // Первый депозит за отметкой target: с него считается возраст для аварийного выхода.
+    state.queuedAfterTargetAt = blockchain.now();
+  }
   queue.headHash = sha256OfBuilder(
     beginCell().storeUint(queue.headHash, 256).storeUint(msg.l2Recipient, 256).storeUint(amount, 256),
     1
   );
   queue.headCount += 1;
-  storage.state = RollupState {
-    stateRoot: state.stateRoot,
-    withdrawalsRoot: state.withdrawalsRoot,
-    batchIndex: state.batchIndex,
-    queue: queue.toCell(),
-    pendingData: state.pendingData,
-  }.toCell();
+  // Квитанция: если rollup заморозят раньше, чем депозит попадёт в батч, его вернут вносителю.
+  state.depositReceipts.set(queue.headCount, DepositReceipt { depositor: sender, amount: amount });
+  state.queue = queue.toCell();
+  storage.state = state.toCell();
   storage.save();
 }
 
-/// Адрес нуллификатора для листа: определяется кодом, адресом rollup'а и номером.
+/// Адрес нуллификатора: определяется кодом, адресом rollup'а и ключом — номером листа
+/// дерева выводов либо ключом аварийного выхода (exitNullifierKey в escape.tolk).
 @inline
-fun nullifierDeployment(nullifierCode: cell, leafIndex: int): AutoDeployAddress {
+fun nullifierDeployment(nullifierCode: cell, key: int): AutoDeployAddress {
   return AutoDeployAddress {
     stateInit: ContractState {
       code: nullifierCode,
-      data: NullifierStorage { rollup: contract.getAddress(), leafIndex: leafIndex, claimed: false }.toCell(),
+      data: NullifierStorage { rollup: contract.getAddress(), key: key, claimed: false }.toCell(),
     },
   };
 }
@@ -189,12 +205,12 @@ fun handleWithdraw(valueCoins: coins, msg: Withdraw) {
   claim.send(SEND_MODE_CARRY_ALL_REMAINING_MESSAGE_VALUE);
 }
 
-/// Подтверждение от нуллификатора: вывод помечен впервые. Здесь только выплата —
+/// Подтверждение от нуллификатора: вывод или аварийный выход помечен впервые. Здесь только выплата —
 /// все проверки сделаны на шаге Withdraw, отказ на этом шаге оставил бы вывод
 /// помеченным, но не выплаченным.
 fun handleNullifierClaimed(sender: address, msg: NullifierClaimed) {
   val storage = RollupStorage.load();
-  assert (nullifierDeployment(storage.nullifierCode, msg.leafIndex).addressMatches(sender)) throw RollupErrors.NotNullifier;
+  assert (nullifierDeployment(storage.nullifierCode, msg.key).addressMatches(sender)) throw RollupErrors.NotNullifier;
 
   // Без bounce: если получатель не развёрнут, монеты всё равно остаются у него.
   val payout = createMessage({
@@ -208,18 +224,25 @@ fun handleNullifierClaimed(sender: address, msg: NullifierClaimed) {
 fun handleUploadKeyPart(sender: address, msg: UploadKeyPart) {
   var storage = RollupStorage.load();
   assert (sender == storage.owner) throw RollupErrors.NotOwner;
-  assert (storage.vkData == null) throw RollupErrors.KeyAlreadyFinalized;
+  var keys = storage.keys.load();
+  assert (keys.vkData == null) throw RollupErrors.KeyAlreadyFinalized;
   assert (isKeySlotValid(msg.slot)) throw KEY_ERROR_BAD_PART;
-  storage.keyParts.set(msg.slot, msg.part);
+  keys.keyParts.set(msg.slot, msg.part);
+  storage.keys = keys.toCell();
   storage.save();
 }
 
 fun handleFinalizeKey(sender: address, msg: FinalizeKey) {
   var storage = RollupStorage.load();
   assert (sender == storage.owner) throw RollupErrors.NotOwner;
-  assert (storage.vkData == null) throw RollupErrors.KeyAlreadyFinalized;
-  storage.vkData = assembleKey(storage.keyParts, msg);
-  storage.keyParts = createEmptyMap();
+  var keys = storage.keys.load();
+  assert (keys.vkData == null) throw RollupErrors.KeyAlreadyFinalized;
+  // Rollup без ключа выхода зафиксировать нельзя: иначе аварийный режим оставил бы
+  // балансы L2 запертыми.
+  assert ((keys.exitIc0x != 0) || (keys.exitIc0y != 0)) throw RollupErrors.ExitKeyNotSet;
+  keys.vkData = assembleKey(keys.keyParts, msg);
+  keys.keyParts = createEmptyMap();
+  storage.keys = keys.toCell();
   storage.save();
 }
 
@@ -232,4 +255,18 @@ fun rollupStateView(): (int, int, int) {
 /// Очередь депозитов: (поставлено, хеш), (цель, хеш), (обработано, хеш)
 fun depositQueueView(): DepositQueue {
   return RollupStorage.load().state.load().queue.load();
+}
+
+/// Первый публичный вход, который контракт потребует от следующего батча с такими корнями
+/// (при уже опубликованных для него данных).
+fun expectedPublicInputView(newStateRoot: int, withdrawalsRoot: int): int {
+  val storage = RollupStorage.load();
+  val state = storage.state.load();
+  return batchDigest(
+    storage.chainId,
+    state,
+    state.queue.load(),
+    BatchRoots { newStateRoot: newStateRoot, withdrawalsRoot: withdrawalsRoot },
+    batchDataHashOf(state.pendingData, state.batchIndex + 1)
+  );
 }
