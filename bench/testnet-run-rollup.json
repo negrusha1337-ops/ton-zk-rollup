@@ -1,154 +1,237 @@
 {
   "source": "Сгенерировано zk/testnet-rollup-report.mjs из https://testnet.toncenter.com/api/v3; не редактировать вручную",
   "network": "testnet",
-  "contract": "EQDgPWxwVKe-v6HM3sb53MaZxmHmNgHFUyTZ0Kcn0MqQTf2v",
+  "contract": "EQDqaiKtAYGcQr5a47vm71-YxxAj_sC0U0utOl3RNo5tRaB1",
   "gasLimitPerTransaction": 1000000,
-  "transactions": 40,
-  "failedTransactions": [
-    {
-      "transactionHash": "bdfd9fa2941169621374e03157fbf563e305ff0666dc889b272d144e464664c2",
-      "time": "2026-11-13T00:41:11.000Z",
-      "success": false,
-      "exitCode": 7318,
-      "gasUsed": 2390,
-      "gasFeeNano": 159334
-    }
-  ],
+  "programSourcesSha256": "702fea2e601b560c5073b1f94017bfa49699a5d16948ce18a8f83d55f87f1207",
+  "sandboxComparison": "bench/rollup-zkvm-proof.json, bench/rollup-escape.json",
+  "transactions": 37,
+  "failedTransactions": [],
   "keyUpload": {
-    "parts": 23,
-    "partsGasUsed": 148772,
-    "finalizeGasUsed": 31235
+    "parts": 12,
+    "partsGasUsed": 76388,
+    "finalizeGasUsed": 21346
   },
   "deposit": [
     {
-      "transactionHash": "85bcf6e6dcaef22455d1ec7919dbc77cfd9b0cb2482d3643d4a77047d52ed69e",
-      "time": "2026-11-13T00:44:57.000Z",
+      "transactionHash": "40ad9b21459fe47eb96116a13af688c324f5afdf5d973a0368121654065d3d29",
+      "time": "2026-11-13T12:37:36.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 6008,
-      "gasFeeNano": 400534
+      "gasUsed": 8566,
+      "gasFeeNano": 571068
     },
     {
-      "transactionHash": "42daab27e771e780393b2606cfa4a79aa87b30855ad371ea5a8db25e2dca769d",
-      "time": "2026-11-13T00:45:56.000Z",
+      "transactionHash": "cdda3b2fefe29abcc82c6dbc4929d01c2b2180b5e7100962ca964b2f9a4721be",
+      "time": "2026-11-13T12:38:29.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 7108,
-      "gasFeeNano": 473868
+      "gasUsed": 9766,
+      "gasFeeNano": 651068
+    },
+    {
+      "transactionHash": "11782be7b0de771ba0bd21721956e19a6bd98d42bc554e5689ac7696a64f2c4e",
+      "time": "2026-11-13T12:44:08.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 11086,
+      "gasFeeNano": 739068
     }
   ],
   "publishData": [
     {
-      "transactionHash": "a2b8ac12b7ea1590360fd1d471ab8e9b7b346202eae88cfc8aeef159c37b7f88",
-      "time": "2026-11-13T00:45:19.000Z",
+      "transactionHash": "e9e48c15c538b627087c86eabdc825b6c552564c8f5e024b0d994a796efc9a9e",
+      "time": "2026-11-13T12:38:41.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 4838,
-      "gasFeeNano": 322534
+      "gasUsed": 5056,
+      "gasFeeNano": 337068
+    },
+    {
+      "transactionHash": "ab267af5aa60eb9e5b7f5a8967aedcc6e13f000dd67c05542cac2d32fe16967c",
+      "time": "2026-11-13T12:39:05.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 5056,
+      "gasFeeNano": 337068
     }
   ],
   "submitBatch": [
     {
       "batch": 1,
-      "transactionHash": "78157608d8a50c2901f7661fc37912b9d7962bce35d663adf8f9ac53363d8e63",
-      "time": "2026-11-13T00:45:11.000Z",
+      "transactionHash": "85ec95820558978fc99b827bb3134f017774f19dbdca5d9bbbefa10cb6e31c1e",
+      "time": "2026-11-13T12:38:13.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 948263,
-      "gasFeeNano": 63217539,
-      "sandboxGasUsed": 948263,
+      "gasUsed": 948036,
+      "gasFeeNano": 63202406,
+      "sandboxGasUsed": 948036,
       "matchesSandbox": true
     },
     {
       "batch": 2,
-      "transactionHash": "9397d0772895684702b7bb61e4453b69bbae3e1ad728e4af7ece51eb4a654e1c",
-      "time": "2026-11-13T00:45:29.000Z",
+      "transactionHash": "1264fdcf291be1302497966da1d39c198d213346fcda3c317efbc54657ee12c0",
+      "time": "2026-11-13T12:38:53.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 948501,
-      "gasFeeNano": 63233406,
-      "sandboxGasUsed": 948501,
+      "gasUsed": 951339,
+      "gasFeeNano": 63422606,
+      "sandboxGasUsed": 951339,
+      "matchesSandbox": true
+    },
+    {
+      "batch": 3,
+      "transactionHash": "7cd5a7a1a4d7a3daa35cfb8c154ac949f4d6ed881199e40d95db7411853afb79",
+      "time": "2026-11-13T12:39:17.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 948339,
+      "gasFeeNano": 63222606,
+      "sandboxGasUsed": 948339,
       "matchesSandbox": true
     }
   ],
   "withdraw": [
     {
-      "transactionHash": "8641331052ea5e18abdae8d37e1ea6c6eecd30a4151f6710355f017aea17e952",
-      "time": "2026-11-13T00:45:45.000Z",
+      "transactionHash": "cc9cbfdbc20d21ad7a4d49e883f0ba39f4c63164ce0e32bf013f6b51af6f463d",
+      "time": "2026-11-13T12:39:31.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 21620,
-      "gasFeeNano": 1441334
+      "gasUsed": 22944,
+      "gasFeeNano": 1529601
+    },
+    {
+      "transactionHash": "7b088e2cf6c4fd1bb561537f42b13c56b1abc265776ee93f1e39bd678e64ce68",
+      "time": "2026-11-13T12:39:48.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 22962,
+      "gasFeeNano": 1530801
+    },
+    {
+      "transactionHash": "3478305ede8b453164a3974740f97693b5de78b474a823071e3e3c0ecdce5d26",
+      "time": "2026-11-13T12:43:49.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 22962,
+      "gasFeeNano": 1530801
     }
   ],
   "withdrawPayout": [
     {
-      "transactionHash": "dd93bd6b593e233c0747d08d75400f999e96c78052bfc3d858d71706add6166b",
-      "time": "2026-11-13T00:45:45.000Z",
+      "transactionHash": "2aee87be84484243e682b96f63550846e13c30dd3e81f6acebfe74a09b48bea1",
+      "time": "2026-11-13T12:39:31.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 3720,
-      "gasFeeNano": 248001
+      "gasUsed": 4417,
+      "gasFeeNano": 294468
     },
     {
-      "transactionHash": "8d825ded558350c35091cc715fb1506f54ded7ffe60afe1a9804c1dba536cf60",
-      "time": "2026-11-13T00:49:43.000Z",
+      "transactionHash": "9a9f054cd207cd3d9e06a42d8ecd56ff0630fdab1b53ab36ecb29ea904beac7b",
+      "time": "2026-11-13T12:39:48.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 3720,
-      "gasFeeNano": 248001
+      "gasUsed": 4417,
+      "gasFeeNano": 294468
     },
     {
-      "transactionHash": "943df27da989be36a97bfbe862614a450fb3d6ec3a18143b0c767d0fdaac90b2",
-      "time": "2026-11-13T00:49:54.000Z",
+      "transactionHash": "53a90ddfc7ac8a4097b2ad02ca633b0079e3802f41416f479a91b00f4044dc94",
+      "time": "2026-11-13T12:43:49.000Z",
       "success": true,
       "exitCode": 0,
-      "gasUsed": 3720,
-      "gasFeeNano": 248001
+      "gasUsed": 4417,
+      "gasFeeNano": 294468
+    },
+    {
+      "transactionHash": "0170dd566478d4e4ae8c44f1af5bfc0579b81359b7d4bde24d4fb5b585157da2",
+      "time": "2026-11-13T13:55:35.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 4417,
+      "gasFeeNano": 294468
+    },
+    {
+      "transactionHash": "11f0026ee6c7d5644a6f0e2fea788dcb4249d3ffa68a5cef6a7c4946dc1fbb61",
+      "time": "2026-11-13T13:55:56.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 4417,
+      "gasFeeNano": 294468
     }
   ],
+  "payoutRecordedAsDebt": [],
+  "payOwed": [],
+  "forceTransaction": [
+    {
+      "transactionHash": "d6d0ac94b4a719bc1f0c20d8b5ca8987cf09a51e727e1df86db04f6fd74ee9f4",
+      "time": "2026-11-13T12:37:47.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 7156,
+      "gasFeeNano": 477068
+    },
+    {
+      "transactionHash": "a60e3fb8362fbbe1648783f270842a8cab3948593bfaf96a6fc3724c6cd0a9b7",
+      "time": "2026-11-13T12:37:59.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 7156,
+      "gasFeeNano": 477068
+    }
+  ],
+  "setExitKey": [
+    {
+      "transactionHash": "c4edabb0f07670a6705f53aca0db16525a41c9ca88849e83fcc7a1065db5417b",
+      "time": "2026-11-13T12:37:06.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 5816,
+      "gasFeeNano": 387734
+    }
+  ],
+  "discardBatchData": [],
   "escape": {
     "activateEscapeHatch": [
       {
-        "transactionHash": "c08e1e7131b55f3b6094bff61ac24002ce4045fef0fb49da12131c8a560aff74",
-        "time": "2026-11-13T00:49:32.000Z",
+        "transactionHash": "74a1962051fd229eeb528bea84fcbbb731dc15d098ac207248400bbb02b6d601",
+        "time": "2026-11-13T13:55:21.000Z",
         "success": true,
         "exitCode": 0,
-        "gasUsed": 4813,
-        "gasFeeNano": 320868
+        "gasUsed": 5259,
+        "gasFeeNano": 350601
       }
     ],
     "forceExit": [
       {
-        "transactionHash": "66561422679151e917bf725be5686956aecc95789b8519b19b938256167f0b93",
-        "time": "2026-11-13T00:49:43.000Z",
+        "transactionHash": "8a40eb2661ac5662c47c365f7419e040ccbc324039a5d9ca451604db969dc497",
+        "time": "2026-11-13T13:55:35.000Z",
         "success": true,
         "exitCode": 0,
-        "gasUsed": 951470,
-        "gasFeeNano": 63431339,
-        "sandboxGasUsed": 951470
+        "gasUsed": 954941,
+        "gasFeeNano": 63662739,
+        "sandboxGasUsed": 954941
       },
       {
-        "transactionHash": "c6334dac9a1895f49009f7d7cc8782ceee8fab440bc6e2257e1a638922441033",
-        "time": "2026-11-13T00:49:54.000Z",
+        "transactionHash": "ac7eb7e89900e2bad23ce3f01463b92e10f08581749dee43521669db431abca4",
+        "time": "2026-11-13T13:55:56.000Z",
         "success": true,
         "exitCode": 0,
-        "gasUsed": 946666,
-        "gasFeeNano": 63111072,
-        "sandboxGasUsed": 951470
+        "gasUsed": 948406,
+        "gasFeeNano": 63227072,
+        "sandboxGasUsed": 954941
       }
     ],
     "cancelDeposit": [
       {
-        "transactionHash": "e6bffd2d569da17e6ae62e8a368bfb6a7c337fbad161f4ee0ca2e66d142feea5",
-        "time": "2026-11-13T00:50:07.000Z",
+        "transactionHash": "9aeaafce83a4037a9971141d0bf8613c7b6aa92e9e87d41fe739abbe7d2eac01",
+        "time": "2026-11-13T13:56:23.000Z",
         "success": true,
         "exitCode": 0,
-        "gasUsed": 7046,
-        "gasFeeNano": 469734
+        "gasUsed": 7908,
+        "gasFeeNano": 527201
       }
     ]
   },
-  "totalFeesNano": 270073670,
-  "valueReceivedNano": 2470185445
+  "totalFeesNano": 334962263,
+  "valueReceivedNano": 2175616050
 }

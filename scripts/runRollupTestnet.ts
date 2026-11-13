@@ -66,6 +66,13 @@ import {
 const WALLET_FEE_LARGE = toNano('0.022');
 const WALLET_FEE_BATCH = toNano('0.035');
 const WALLET_FEE_SMALL = toNano('0.01');
+/**
+ * Выплату скрипт узнаёт по балансу получателя. Сеть при зачислении удерживает с получателя его
+ * собственную накопившуюся плату за хранение, поэтому баланс вырастает чуть меньше, чем на
+ * сумму выплаты: в прогоне 13.11.2026 — на 89 нанотон меньше (получатель — неразвёрнутый счёт
+ * с остатком от прежних прогонов), и точное сравнение ждало выплату, которая уже пришла.
+ */
+const RECIPIENT_STORAGE_ALLOWANCE = toNano('0.001');
 const POLL_ATTEMPTS = 40;
 const POLL_DELAY_MS = 3000;
 /** Запас над минимумом монет, который сообщает контракт (цены сети могут слегка отличаться). */
@@ -183,7 +190,7 @@ export async function run(provider: NetworkProvider, args: string[]) {
             await waitFor(
                 `${what}: выплата получателю или запись долга`,
                 async () =>
-                    (await balanceOf(claim.recipient)) >= before + claim.amount ||
+                    (await balanceOf(claim.recipient)) >= before + claim.amount - RECIPIENT_STORAGE_ALLOWANCE ||
                     (await rollup.getOwedPayout(claim.key)) !== null,
             );
         }

@@ -93,7 +93,7 @@ const currentBench = (name) => {
     return sourcesSha256 !== null && bench.sourcesSha256 === sourcesSha256 ? bench : {};
 };
 const sandbox = currentBench('rollup-zkvm-proof.json');
-const sandboxBatchGas = [sandbox.submitBatch, sandbox.submitBatchWithDeposit];
+const sandboxBatchGas = [sandbox.submitBatch, sandbox.submitBatchWithDeposit, sandbox.submitBatchThird];
 const escapeSandbox = currentBench('rollup-escape.json');
 
 const pick = ({ hash, time, success, exitCode, gasUsed, gasFeeNano }) => ({
