@@ -31,18 +31,35 @@ if [ -e "$ELF_DIR.keep" ]; then
     exit 1
 fi
 
-recorded() { sed -n "s/.*\"$1\": \"\\([0-9a-f]*\\)\".*/\\1/p" "$PROGRAM_JSON"; }
-restore() { rm -rf "$ELF_DIR"; [ -e "$ELF_DIR.keep" ] && mv "$ELF_DIR.keep" "$ELF_DIR"; }
+# Всё, без чего сверка не имеет смысла, проверяется ДО того, как прежние ELF убраны в сторону.
+command -v strings >/dev/null || { echo "Нет утилиты strings (Xcode Command Line Tools): пути в ELF проверить нечем." >&2; exit 1; }
+command -v shasum >/dev/null || { echo "Нет утилиты shasum." >&2; exit 1; }
+[ -f "$PROGRAM_JSON" ] || { echo "Нет $PROGRAM_JSON: сначала rollup-script --vkeys." >&2; exit 1; }
 
+recorded() { sed -n "s/.*\"$1\": \"\\([0-9a-f]*\\)\".*/\\1/p" "$PROGRAM_JSON"; }
+
+# Пока сверка не дошла до конца, при ЛЮБОМ выходе (сбой сборки, отсутствующий файл, Ctrl-C,
+# закрытый терминал, сигнал) прежние ELF возвращаются на место: проект не остаётся без них,
+# и следующий запуск не упирается в оставленный каталог .keep.
+DONE=0
+restore() {
+    [ "$DONE" -eq 1 ] && return 0
+    echo "Сверка не завершена: возвращаю прежние ELF." >&2
+    rm -rf "$ELF_DIR"
+    [ -e "$ELF_DIR.keep" ] && mv "$ELF_DIR.keep" "$ELF_DIR"
+    return 0
+}
+trap restore EXIT
+trap 'exit 130' INT TERM HUP
 [ -e "$ELF_DIR" ] && mv "$ELF_DIR" "$ELF_DIR.keep"
-# Сбой сборки или прерывание (Ctrl-C): вернуть прежние ELF, чтобы не оставить проект без них.
-trap 'echo "Сборка не удалась или прервана: возвращаю прежние ELF." >&2; restore; exit 1' ERR INT TERM
 
 # Те же аргументы, что в build.rs: --locked и подмена пути cargo-home.
 for program in program exit-program; do
     (cd "$program" && nice -n 15 cargo prove build --locked --rustflags="--remap-path-prefix=$CARGO_HOME_DIR=/cargo-home")
 done
-trap - ERR INT TERM
+for elf in rollup-program rollup-exit-program; do
+    [ -f "$RELEASE/$elf" ] || { echo "После сборки нет $RELEASE/$elf." >&2; exit 1; }
+done
 
 STATUS=0
 for pair in "rollup-program:programElfSha256" "rollup-exit-program:exitProgramElfSha256"; do
@@ -59,13 +76,16 @@ done
 # Домашний каталог не должен попадать в ELF: иначе ключ программы зависит от имени пользователя.
 # Счётчик, а не `grep -q`: под `pipefail` ранний выход grep обрывал бы strings сигналом, и
 # конвейер считался бы неуспешным — проверка не сработала бы никогда.
-HOME_PATHS="$(strings "$RELEASE/rollup-program" "$RELEASE/rollup-exit-program" | grep -c "$HOME" || true)"
+ELF_STRINGS="$(strings "$RELEASE/rollup-program" "$RELEASE/rollup-exit-program")"
+[ -n "$ELF_STRINGS" ] || { echo "strings не выдала ни одной строки: проверка путей не состоялась." >&2; exit 1; }
+HOME_PATHS="$(printf '%s\n' "$ELF_STRINGS" | grep -c "$HOME" || true)"
 if [ "$HOME_PATHS" -ne 0 ]; then
     echo "В ELF остались пути из домашнего каталога ($HOME), строк: $HOME_PATHS — ключ программы не воспроизвести на другой машине." >&2
     STATUS=1
 else
     echo "путей из домашнего каталога в ELF нет"
 fi
+DONE=1
 if [ "$STATUS" -ne 0 ]; then
     # Прежние ELF оставляем рядом: их можно сравнить с новыми.
     rm -rf "$ELF_DIR.previous"

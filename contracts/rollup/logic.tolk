@@ -38,6 +38,8 @@ enum RollupErrors {
   BadKeyPoint = 7324,
   /// Фиксированная комиссия перестала покрывать газ шага при нынешних ценах сети.
   FeeBelowGasCost = 7325,
+  /// Комиссия за место в очереди выше той, на которую согласился вноситель (maxFee).
+  QueueFeeAboveLimit = 7326,
 }
 
 /// Удерживается с каждого депозита: покрывает газ транзакции и плату за хранение.
@@ -55,6 +57,18 @@ const MIN_DEPOSIT: coins = ton("0.05")
 const DEPOSIT_STEP_GAS: int = 25000
 /// Газ постановки принудительной транзакции в очередь, с запасом.
 const FORCE_TRANSACTION_STEP_GAS: int = 15000
+/// Плата за место в очереди L1 удваивается на каждые столько элементов, ждущих в текущем
+/// окне — между отметками target и head (после принятия батча окно начинается заново).
+///
+/// Зачем. Всё, что стоит в окне, следующий-за-следующим батч ОБЯЗАН обработать. Без роста
+/// платы окно можно было бы раздуть дешёвыми депозитами так, что батч не успеть доказать за
+/// срок заморозки, — то есть остановить rollup за копейки. Жёсткий предел окна был бы хуже:
+/// заполнив его, можно вытеснять чужие принудительные транзакции, а это цензура. Растущая
+/// плата никого не вытесняет — место в очереди есть всегда, — но делает раздувание
+/// экспоненциально дорогим: n элементов стоят порядка базовой платы × ШАГ × 2^(n / ШАГ).
+const QUEUE_FEE_STEP: int = 64
+/// Предел числа удвоений: дальше плата не растёт (и не переполняет coins).
+const QUEUE_FEE_MAX_DOUBLINGS: int = 40
 /// Плата за принудительную транзакцию: её исполнение и доказательство оплачивает
 /// секвенсор, а в очередь её может поставить кто угодно. Не возвращается.
 const FORCE_TRANSACTION_FEE: coins = ton("0.05")
@@ -242,7 +256,25 @@ fun assertFeeCoversGas(fee: coins, stepGas: int) {
   assert (fee >= calculateGasFee(BASECHAIN, stepGas)) throw RollupErrors.FeeBelowGasCost;
 }
 
-/// Плата за принудительную транзакцию: FORCE_TRANSACTION_FEE, но не меньше стоимости газа
+/// Сколько раз удвоена плата за место в очереди при нынешней длине окна.
+@inline
+fun queueFeeDoublings(queue: DepositQueue): int {
+  return min((queue.headCount - queue.targetCount) / QUEUE_FEE_STEP, QUEUE_FEE_MAX_DOUBLINGS);
+}
+
+/// Комиссия депозита при нынешней длине окна очереди.
+@inline
+fun depositFeeFor(queue: DepositQueue): coins {
+  return DEPOSIT_FEE << queueFeeDoublings(queue);
+}
+
+/// Плата за принудительную транзакцию при нынешней длине окна очереди.
+@inline
+fun forceTransactionFeeFor(queue: DepositQueue): coins {
+  return forceTransactionFee() << queueFeeDoublings(queue);
+}
+
+/// Базовая плата за принудительную транзакцию: FORCE_TRANSACTION_FEE, но не меньше стоимости газа
 /// шага при текущих ценах сети. В отличие от депозита, здесь нельзя отказывать при дорогом
 /// газе: принудительная транзакция — единственный способ запустить срок заморозки, когда
 /// очередь пуста, и её запрет запер бы балансы L2 до снижения цен. На суммы L2 плата не
@@ -254,16 +286,20 @@ fun forceTransactionFee(): coins {
 
 fun handleDeposit(sender: address, valueCoins: coins, msg: DepositTon) {
   var storage = RollupStorage.load();
-  val amount = valueCoins - DEPOSIT_FEE;
-  assert (amount >= MIN_DEPOSIT) throw RollupErrors.DepositTooSmall;
-  assertFeeCoversGas(DEPOSIT_FEE, DEPOSIT_STEP_GAS);
-
   // Пока ключи не зафиксированы, вносить нельзя: иначе владелец мог бы дождаться депозитов
   // и зафиксировать ключ другой программы. Исключение вернёт монеты отправителю.
   assert (storage.keys.load().vkData != null) throw RollupErrors.KeyNotFinalized;
   var state = storage.state.load();
   // В замороженный rollup вносить тоже нельзя.
   assert (!state.frozen) throw RollupErrors.RollupFrozen;
+  assertFeeCoversGas(DEPOSIT_FEE, DEPOSIT_STEP_GAS);
+
+  // Комиссия растёт с длиной окна очереди и вычитается из суммы на L2: вноситель сам задаёт,
+  // на какую он согласен. Иначе — отказ, и депозит возвращается целиком.
+  val fee = depositFeeFor(state.queue.load());
+  assert (fee <= msg.maxFee) throw RollupErrors.QueueFeeAboveLimit;
+  val amount = valueCoins - fee;
+  assert (amount >= MIN_DEPOSIT) throw RollupErrors.DepositTooSmall;
   val index = pushQueueItem(mutate state, msg.l2Recipient, amount);
   // Квитанция: если rollup заморозят раньше, чем депозит попадёт в батч, его вернут вносителю.
   state.depositReceipts.set(index, DepositReceipt { depositor: sender, amount: amount });
@@ -278,11 +314,13 @@ fun handleDeposit(sender: address, valueCoins: coins, msg: DepositTon) {
 }
 
 fun handleForceTransaction(valueCoins: coins, msg: ForceTransaction) {
-  assert (valueCoins >= forceTransactionFee()) throw RollupErrors.NotEnoughValue;
   var storage = RollupStorage.load();
   assert (storage.keys.load().vkData != null) throw RollupErrors.KeyNotFinalized;
   var state = storage.state.load();
   assert (!state.frozen) throw RollupErrors.RollupFrozen;
+  // Плата растёт с длиной окна очереди, но места в очереди хватает всегда: принудительную
+  // транзакцию нельзя вытеснить, можно только заставить заплатить больше.
+  assert (valueCoins >= forceTransactionFeeFor(state.queue.load())) throw RollupErrors.NotEnoughValue;
   // Содержимое не разбирается, но форма проверяется: иначе в очередь можно было бы
   // поставить дерево ячеек, хеш которого программа zkVM не сможет воспроизвести, и
   // остановить rollup.
@@ -489,10 +527,18 @@ fun deploymentView(): (address, address, int, int, int) {
   return (storage.owner, storage.sequencer, storage.chainId, storage.escapeTimeout, storage.nullifierCode.hash());
 }
 
-/// Запасы газа шагов очереди L1 и плата за принудительную транзакцию при текущих ценах:
-/// (газ шага депозита, газ постановки принудительной транзакции, плата за неё).
+/// Запасы газа шагов очереди L1 и БАЗОВАЯ плата за принудительную транзакцию при текущих
+/// ценах: (газ шага депозита, газ постановки принудительной транзакции, базовая плата).
 fun queueBudgetsView(): (int, int, int) {
   return (DEPOSIT_STEP_GAS, FORCE_TRANSACTION_STEP_GAS, forceTransactionFee());
+}
+
+/// Плата за место в очереди прямо сейчас: (комиссия депозита, плата за принудительную
+/// транзакцию, элементов в текущем окне, шаг удвоения). Комиссию депозита вноситель
+/// указывает в поле maxFee; плату за принудительную транзакцию прикладывает к сообщению.
+fun queueFeesView(): (int, int, int, int) {
+  val queue = RollupStorage.load().state.load().queue.load();
+  return (depositFeeFor(queue), forceTransactionFeeFor(queue), queue.headCount - queue.targetCount, QUEUE_FEE_STEP);
 }
 
 /// Запасы газа цепочки вывода и производные от них суммы (get-метод payoutBudgets).

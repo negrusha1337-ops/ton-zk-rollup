@@ -183,3 +183,9 @@ get fun payoutBudgets(): (int, int, int, int, int) {
 get fun queueBudgets(): (int, int, int) {
   return queueBudgetsView();
 }
+
+/// Плата за место в очереди сейчас: (комиссия депозита, плата за принудительную транзакцию,
+/// элементов в текущем окне, шаг удвоения).
+get fun queueFees(): (int, int, int, int) {
+  return queueFeesView();
+}

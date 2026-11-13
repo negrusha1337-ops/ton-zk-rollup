@@ -1,5 +1,5 @@
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
-import { Address, beginCell, Cell, Dictionary, toNano } from '@ton/core';
+import { Address, beginCell, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
 import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
@@ -7,6 +7,7 @@ import { Rollup, RollupErrors } from '../wrappers/Rollup';
 import { forcedTransactionCell, merkleProofCell, sha256Int, withdrawalTree } from '../wrappers/rollupMath';
 import { FORCE_TRANSACTION_VALUE } from '../wrappers/rollupValues';
 import { computePhaseOf } from './helpers/gas';
+import { withGasPrice } from './helpers/gasPrice';
 import { finalizeDummyKeys } from './helpers/rollupSetup';
 
 // Пороги монет и цена газа сети (находки К-2 второго круга и 3-К2 третьего, REVIEW.md).
@@ -28,33 +29,6 @@ const mockProof: Bn254Proof = {
     ],
     c: [0n, 0n],
 };
-const BASECHAIN_GAS_PRICES = 21;
-
-/** Конфиг сети с ценой газа basechain, умноженной на `factor` (параметр 21). */
-function withGasPrice(config: Cell, factor: bigint): Cell {
-    const params = Dictionary.loadDirect(Dictionary.Keys.Int(32), Dictionary.Values.Cell(), config);
-    const prices = params.get(BASECHAIN_GAS_PRICES)!.beginParse();
-    // gas_flat_pfx#d1 flat_gas_limit:uint64 flat_gas_price:uint64, затем
-    // gas_prices_ext#de gas_price:uint64 … (остальное — лимиты, их не трогаем).
-    if (prices.loadUint(8) !== 0xd1) throw new Error('неожиданный формат параметра 21');
-    const flatLimit = prices.loadUintBig(64);
-    const flatPrice = prices.loadUintBig(64);
-    if (prices.loadUint(8) !== 0xde) throw new Error('неожиданный формат цен газа');
-    const gasPrice = prices.loadUintBig(64);
-    params.set(
-        BASECHAIN_GAS_PRICES,
-        beginCell()
-            .storeUint(0xd1, 8)
-            .storeUint(flatLimit, 64)
-            .storeUint(flatPrice * factor, 64)
-            .storeUint(0xde, 8)
-            .storeUint(gasPrice * factor, 64)
-            .storeSlice(prices)
-            .endCell(),
-    );
-    return beginCell().storeDictDirect(params).endCell();
-}
-
 describe('Rollup: пороги монет следуют за ценой газа сети', () => {
     let blockchain: Blockchain;
     let owner: SandboxContract<TreasuryContract>;
@@ -214,13 +188,22 @@ describe('Rollup: пороги монет следуют за ценой газ�
         const budgets = await rollup.getQueueBudgets();
         let worst = 0;
         for (let index = 0; index < 300; index++) {
-            const result = await deposit();
+            // Комиссия растёт с длиной окна очереди: вноситель соглашается на любую до 0,5 TON.
+            const result = await rollup.sendDeposit(user.getSender(), {
+                l2Recipient: L2_RECIPIENT,
+                value: toNano('1'),
+                maxFee: toNano('0.5'),
+            });
             const used = Number(computePhaseOf(result.transactions, rollup.address).gasUsed);
             worst = Math.max(worst, used);
         }
         expect(await queued()).toBe(300n);
         expect(worst).toBeLessThan(budgets.depositStepGas);
-        const forced = await force();
+        const forced = await rollup.sendForceTransaction(user.getSender(), {
+            l2Transaction: forcedTransactionCell(Buffer.alloc(110, 7)),
+            value: (await rollup.getQueueFees()).forceTransactionFee,
+        });
+        expect(forced.transactions).toHaveTransaction({ to: rollup.address, success: true });
         const forcedGas = Number(computePhaseOf(forced.transactions, rollup.address).gasUsed);
         expect(forcedGas).toBeLessThan(budgets.forceTransactionStepGas);
     });

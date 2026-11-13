@@ -1,7 +1,7 @@
 import { Address, Cell, fromNano, toNano } from '@ton/core';
 import { compile, NetworkProvider, sleep } from '@ton/blueprint';
 import { Bn254Groth16Verifier } from '../wrappers/Bn254Groth16Verifier';
-import { exitNullifierKey, Rollup, RollupConfig } from '../wrappers/Rollup';
+import { BASE_DEPOSIT_FEE, exitNullifierKey, Rollup, RollupConfig } from '../wrappers/Rollup';
 import { deploymentMismatches, loadRollupKey, readOnchainRollup } from '../wrappers/rollupDeployment';
 import { RollupNullifier } from '../wrappers/RollupNullifier';
 import { sp1ProofsStatus } from '../wrappers/sp1Proofs';
@@ -195,6 +195,25 @@ export async function run(provider: NetworkProvider, args: string[]) {
         }
     };
 
+    // Плата за место в очереди L1 растёт с её длиной. Суммы депозитов сценария зашиты в пруфы
+    // (на L2 зачитывается «значение − базовая комиссия»), поэтому депозит сценария возможен
+    // только по базовой комиссии: если очередь перегружена (в неё встал кто-то посторонний),
+    // скрипт останавливается с объяснением, а не шлёт депозит, который вернётся.
+    const assertBaseDepositFee = async (what: string) => {
+        const { depositFee, pending } = await rollup.getQueueFees();
+        if (depositFee !== BASE_DEPOSIT_FEE) {
+            throw new Error(
+                `${what}: комиссия депозита сейчас ${fromNano(depositFee)} TON вместо базовой — в окне очереди уже ` +
+                    `${pending} элементов. Сумма депозита зашита в пруф, с другой комиссией он не сойдётся. ${ESCAPE_HINT}`,
+            );
+        }
+    };
+    /** Сколько приложить к принудительной транзакции: текущая плата плюс запас на газ шага. */
+    const forceTransactionValue = async () => {
+        const { forceTransactionFee } = await rollup.getQueueFees();
+        return forceTransactionFee + (FORCE_TRANSACTION_VALUE - toNano('0.05'));
+    };
+
     // --- что осталось сделать и сколько это стоит ---
     const deployed = await provider.isContractDeployed(rollup.address);
     const keyReady = deployed && (await rollup.getKeyHash()) !== 0n;
@@ -328,6 +347,7 @@ export async function run(provider: NetworkProvider, args: string[]) {
         // --- очередь L1 сценария: до батча 1 ---
         if ((await rollup.getRollupState()).batchIndex === 0) {
             if ((await rollup.getDepositQueue()).head.count === 0n) {
+                await assertBaseDepositFee('Депозит');
                 ui.write(`Депозит ${fromNano(depositValue)} TON`);
                 await rollup.sendDeposit(sender, {
                     l2Recipient: BigInt(scenario.deposit.l2Recipient),
@@ -341,7 +361,7 @@ export async function run(provider: NetworkProvider, args: string[]) {
                 const position = BigInt(index + 2); // депозит — первый элемент очереди
                 if ((await rollup.getDepositQueue()).head.count >= position) continue;
                 ui.write(`Принудительная транзакция L2, ${index + 1} из ${forced.length}`);
-                await rollup.sendForceTransaction(sender, { l2Transaction, value: FORCE_TRANSACTION_VALUE });
+                await rollup.sendForceTransaction(sender, { l2Transaction, value: await forceTransactionValue() });
                 await waitFor(
                     `принудительная транзакция ${index + 1} в очереди`,
                     async () => (await rollup.getDepositQueue()).head.count >= position,
@@ -418,6 +438,7 @@ export async function run(provider: NetworkProvider, args: string[]) {
         const queueSecondDeposit = async () => {
             const before = BigInt(queueHashes.length);
             if ((await rollup.getDepositQueue()).head.count === before) {
+                await assertBaseDepositFee('Второй депозит');
                 ui.write(`Второй депозит ${fromNano(secondDepositValue)} TON`);
                 await rollup.sendDeposit(sender, {
                     l2Recipient: BigInt(scenario.secondDeposit.l2Recipient),
@@ -474,8 +495,11 @@ export async function run(provider: NetworkProvider, args: string[]) {
         const queue = await rollup.getDepositQueue();
         if (queue.head.count === queue.processed.count) {
             // Депозит, который никто не обработает: с него начинается срок заморозки.
-            ui.write(`Поздний депозит ${fromNano(LATE_DEPOSIT_VALUE)} TON — его никто не обработает`);
-            await rollup.sendDeposit(sender, { l2Recipient: 0xdeadn, value: LATE_DEPOSIT_VALUE });
+            // Этот депозит в пруфы не входит: соглашаемся на текущую комиссию, какой бы она ни была.
+            const { depositFee } = await rollup.getQueueFees();
+            const lateValue = LATE_DEPOSIT_VALUE + (depositFee - BASE_DEPOSIT_FEE);
+            ui.write(`Поздний депозит ${fromNano(lateValue)} TON — его никто не обработает`);
+            await rollup.sendDeposit(sender, { l2Recipient: 0xdeadn, value: lateValue, maxFee: depositFee });
             await waitFor('поздний депозит в очереди', async () => {
                 const now = await rollup.getDepositQueue();
                 return now.head.count > now.processed.count;

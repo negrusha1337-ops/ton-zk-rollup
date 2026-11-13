@@ -63,6 +63,12 @@ struct Args {
     /// Число переводов в нагрузочном батче.
     #[arg(long, default_value_t = 1000)]
     transfers: usize,
+    /// Нагрузочный батч с раздутой очередью L1: столько депозитов на новые счета…
+    #[arg(long)]
+    queue_deposits: Option<usize>,
+    /// …и столько принудительных транзакций с верной подписью от несуществующих счетов.
+    #[arg(long)]
+    queue_forced: Option<usize>,
     #[arg(long)]
     execute: bool,
     /// Сжатый STARK-пруф без Groth16-обёртки: в TON не отправляется, только диагностика.
@@ -274,8 +280,14 @@ fn state_after_batch2(scenario: &Scenario) -> (BatchInput, Vec<Account>, Vec<Wit
     (second, accounts, withdrawals)
 }
 
-/// Батч сценария по номеру; `None` — нагрузочный батч из `transfers` переводов.
-fn batch_job(batch: Option<u8>, transfers: usize) -> Job {
+/// Что положить в нагрузочный батч: переводы в данных либо элементы очереди L1.
+enum Load {
+    Transfers(usize),
+    Queue { deposits: usize, forced: usize },
+}
+
+/// Батч сценария по номеру; `None` — нагрузочный батч.
+fn batch_job(batch: Option<u8>, load: Load) -> Job {
     let scenario = Scenario::new();
     let after_batch2 = || {
         let (_, accounts, withdrawals) = state_after_batch2(&scenario);
@@ -291,7 +303,10 @@ fn batch_job(batch: Option<u8>, transfers: usize) -> Job {
         Some(other) => panic!("в сценарии нет батча {other}: допустимы 1, 2 и 3"),
         None => {
             let (accounts, withdrawals) = after_batch2();
-            scenario.load_batch(accounts, withdrawals, transfers)
+            match load {
+                Load::Transfers(transfers) => scenario.load_batch(accounts, withdrawals, transfers),
+                Load::Queue { deposits, forced } => scenario.queue_load_batch(accounts, withdrawals, deposits, forced),
+            }
         }
     };
     let name = batch.map_or("load".to_string(), |number| number.to_string());
@@ -365,12 +380,20 @@ fn main() {
         return;
     }
     let job = match (args.batch, args.exit.as_deref(), args.load) {
-        (None, None, true) if !args.execute => {
-            eprintln!("Нагрузочный батч — только для замеров: допустим один режим --execute");
+        (None, None, true) if args.prove => {
+            eprintln!("Нагрузочный батч — только для замеров: допустимы режимы --execute и --compressed");
             std::process::exit(1);
         }
-        (None, None, true) => batch_job(None, args.transfers),
-        (Some(batch), None, false) => batch_job(Some(batch), args.transfers),
+        (None, None, true) => batch_job(
+            None,
+            match (args.queue_deposits, args.queue_forced) {
+                (None, None) => Load::Transfers(args.transfers),
+                (deposits, forced) => {
+                    Load::Queue { deposits: deposits.unwrap_or(0), forced: forced.unwrap_or(0) }
+                }
+            },
+        ),
+        (Some(batch), None, false) => batch_job(Some(batch), Load::Transfers(args.transfers)),
         (None, Some(name), false) => exit_job(name),
         _ => {
             eprintln!("Укажите ровно одно: --batch <номер>, --exit <имя счёта> или --load");

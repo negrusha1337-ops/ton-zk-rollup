@@ -55,7 +55,11 @@ export const RollupErrors = {
     nothingOwed: 7323,
     badKeyPoint: 7324,
     feeBelowGasCost: 7325,
+    queueFeeAboveLimit: 7326,
 };
+
+/** Базовая комиссия депозита (DEPOSIT_FEE в contracts/rollup/logic.tolk). */
+export const BASE_DEPOSIT_FEE = 10_000_000n;
 
 export const NullifierErrors = {
     notRollup: 7200,
@@ -338,12 +342,22 @@ export class Rollup implements Contract {
         await this.send(provider, via, opts.value, body);
     }
 
-    /** Депозит TON: на L2 зачтётся приложенная сумма минус комиссия 0,01 TON. */
-    async sendDeposit(provider: ContractProvider, via: Sender, opts: { l2Recipient: bigint; value: bigint }) {
+    /**
+     * Депозит TON: на L2 зачтётся приложенная сумма минус комиссия за место в очереди.
+     * Комиссия — 0,01 TON при короткой очереди и растёт с её длиной (getQueueFees). `maxFee` —
+     * наибольшая комиссия, на которую согласен вноситель; по умолчанию базовая: при
+     * перегруженной очереди депозит вернётся, а не уменьшится молча.
+     */
+    async sendDeposit(
+        provider: ContractProvider,
+        via: Sender,
+        opts: { l2Recipient: bigint; value: bigint; maxFee?: bigint },
+    ) {
         const body = beginCell()
             .storeUint(RollupOpcodes.depositTon, 32)
             .storeUint(0, 64)
             .storeUint(opts.l2Recipient, 160)
+            .storeCoins(opts.maxFee ?? BASE_DEPOSIT_FEE)
             .endCell();
         await this.send(provider, via, opts.value, body);
     }
@@ -477,7 +491,18 @@ export class Rollup implements Contract {
         return recipient ? { recipient, amount } : null;
     }
 
-    /** Запасы газа шагов очереди L1 и плата за принудительную транзакцию при текущих ценах. */
+    /** Плата за место в очереди L1 прямо сейчас и длина текущего окна. */
+    async getQueueFees(provider: ContractProvider) {
+        const { stack } = await provider.get('queueFees', []);
+        return {
+            depositFee: stack.readBigNumber(),
+            forceTransactionFee: stack.readBigNumber(),
+            pending: stack.readNumber(),
+            step: stack.readNumber(),
+        };
+    }
+
+    /** Запасы газа шагов очереди L1 и БАЗОВАЯ плата за принудительную транзакцию при текущих ценах. */
     async getQueueBudgets(provider: ContractProvider) {
         const { stack } = await provider.get('queueBudgets', []);
         return {

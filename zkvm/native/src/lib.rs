@@ -285,6 +285,46 @@ impl Scenario {
     }
 }
 
+impl Scenario {
+    /// Нагрузочный батч с раздутой очередью L1: `deposits` депозитов на новые счета и `forced`
+    /// принудительных транзакций. Нужен только для замеров — сколько циклов zkVM стоит один
+    /// элемент очереди, то есть во что обходится секвенсору обязательная часть батча
+    /// (bench/zkvm-queue-cost.json). В контракт не отправляется.
+    ///
+    /// Принудительные транзакции — худший для прувера случай: переводы с ВЕРНОЙ подписью от
+    /// счетов, которых нет в состоянии. Программа обязана восстановить ключ из подписи (это и
+    /// стоит дорого) и только потом пропускает транзакцию. Поставить такую в очередь может
+    /// кто угодно.
+    pub fn queue_load_batch(
+        &self,
+        accounts: Vec<Account>,
+        prior_withdrawals: Vec<WithdrawalLeaf>,
+        deposits: usize,
+        forced: usize,
+    ) -> BatchInput {
+        let deposit_items = (0..deposits).map(|index| {
+            let seed = sha256(&[format!("zkvm:queue-load:deposit:{index}").as_bytes()]);
+            let mut l2_recipient = [0u8; 20];
+            l2_recipient.copy_from_slice(&seed[..20]);
+            QueueItem::Deposit(Deposit { l2_recipient, amount: NANO / 20 })
+        });
+        let forced_items = (0..forced).map(|index| {
+            let stranger = test_key(&format!("zkvm:queue-load:stranger:{index}"));
+            let transfer = Transaction::Transfer { to: self.bob, amount: 1 };
+            QueueItem::ForcedTransaction(encode_transactions(&[self.sign(&stranger, 0, transfer)]))
+        });
+        BatchInput {
+            chain_id: CHAIN_ID,
+            accounts,
+            // Хеш очереди на логику батча не влияет: замер идёт без контракта.
+            prev_deposit_hash: [0u8; 32],
+            queue_items: deposit_items.chain(forced_items).collect(),
+            data_chunks: Vec::new(),
+            prior_withdrawals,
+        }
+    }
+}
+
 /// Кто выходит аварийно в сценарии.
 pub const EXIT_NAMES: [&str; 2] = ["alice", "bob"];
 
