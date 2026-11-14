@@ -1,0 +1,20 @@
+# Хост батча EVM: собирает вход (блок в формате кэша RSP + свидетель rollup'а), считает
+# публичные значения нативно и исполняет гостевую программу в zkVM БЕЗ пруфа.
+[package]
+name = "rollup-evm-host"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rollup-evm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+alloy-primitives = { workspace = true, features = ["serde"] }
+rsp-client-executor.workspace = true
+sp1-sdk.workspace = true
+clap = { version = "4.5.7", features = ["derive"] }
+sha2 = "0.10"
+
+[build-dependencies]
+sp1-build.workspace = true

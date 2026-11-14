@@ -1,0 +1,73 @@
+# Спайк EVM: батч rollup'а — это блок EVM, исполненный Reth внутри zkVM SP1.
+#   lib      — логика батча: исполнение блока (на библиотеках RSP и Reth) и наши восемь слов
+#   program  — гостевая программа SP1 (отдельное рабочее пространство и свой Cargo.lock)
+#   host     — хост: вход блока из кэша RSP + свидетель rollup'а, нативный запуск и zkVM без пруфа
+#   vendor/rsp-mpt — копия дерева состояния RSP с правками (VENDORED.md)
+#
+# Намеренно НЕ входит в рабочее пространство zkvm/: у того свой Cargo.lock, от которого
+# зависят ELF нынешних программ, их ключи и построенные пруфы. Зависимость от zkvm/lib —
+# только чтение (типы и хеши протокола), сам zkvm/lib не меняется.
+#
+# Версии зависимостей повторяют succinctlabs/rsp на закреплённом коммите: исполнение блока
+# обязано совпадать с тем, что проверяет RSP.
+[workspace]
+members = ["lib", "host", "vendor/rsp-mpt"]
+exclude = ["program"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+rollup-evm = { path = "lib" }
+rollup-stf = { path = "../zkvm/lib" }
+
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde_json = "1.0.94"
+bincode = "1.3.3"
+itertools = "0.13.0"
+
+# RSP (Reth Succinct Processor), коммит 5afe72eb от 23.10.2026: SP1 6.10.0, reth v2.2.0
+rsp-client-executor = { git = "https://github.com/succinctlabs/rsp", rev = "5afe72eb12a2d6accd9d7fdff66785d91cbc8e72" }
+rsp-primitives = { git = "https://github.com/succinctlabs/rsp", rev = "5afe72eb12a2d6accd9d7fdff66785d91cbc8e72" }
+rsp-mpt = { git = "https://github.com/succinctlabs/rsp", rev = "5afe72eb12a2d6accd9d7fdff66785d91cbc8e72" }
+
+# sp1
+sp1-build = "=6.10.0"
+sp1-sdk = { version = "=6.10.0", features = ["bigint-rug", "blocking"] }
+
+# reth
+reth-primitives-traits = { version = "0.3.2", default-features = false }
+reth-evm = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0", default-features = false }
+reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0", default-features = false }
+reth-trie = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0", default-features = false }
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0", default-features = false }
+reth-execution-types = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0", default-features = false }
+reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0", default-features = false, features = [
+    "serde",
+] }
+
+# revm
+revm = { version = "38.0.0", features = ["serde", "bn"], default-features = false }
+
+# alloy
+alloy-primitives = { version = "1.5.6", default-features = false, features = ["map-foldhash"] }
+alloy-genesis = { version = "2.0.4", default-features = false, features = ["serde-bincode-compat"] }
+alloy-consensus = { version = "2.0.4", default-features = false, features = ["serde", "serde-bincode-compat"] }
+alloy-eips = { version = "2.0.4", default-features = false }
+alloy-rlp = "0.3.12"
+
+# Криптография через прекомпиляции SP1 — те же теги, что в RSP. Вне zkVM крейты ведут себя
+# как обычные.
+[patch.crates-io]
+sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", tag = "patch-sha2-0.10.9-sp1-6.10.0", package = "sha2" }
+bn = { git = "https://github.com/sp1-patches/bn", tag = "patch-0.6.1-sp1-6.10.0", package = "substrate-bn-succinct-rs" }
+substrate-bn = { git = "https://github.com/sp1-patches/bn", tag = "patch-0.6.0-sp1-6.10.0-substrate-bn" }
+sha3 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", tag = "patch-sha3-0.11.0-sp1-6.0.0" }
+k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-6.10.0" }
+p256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-p256-13.2-sp1-6.10.0" }
+
+# Дерево состояния — копия rsp-mpt с правками (vendor/rsp-mpt/VENDORED.md).
+[patch."https://github.com/succinctlabs/rsp"]
+rsp-mpt = { path = "vendor/rsp-mpt" }

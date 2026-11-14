@@ -223,3 +223,35 @@ cargo run --release -- --batch 1 --prove
 Без `native-gnark` обёртку считает Docker-образ `ghcr.io/succinctlabs/sp1-gnark:v6.1.0`.
 На другой машине ключи программ могут получиться другими (сборка не воспроизводима побайтно):
 тогда `--vkeys` перезапишет `program.json`, и ключ контракта придётся выводить заново.
+
+## Спайк EVM (14.11.2026, без пруфов)
+
+`zkvm-evm/` — батч rollup'а как блок EVM: Reth исполняет блок внутри SP1 (на библиотеках
+[RSP](https://github.com/succinctlabs/rsp), коммит `5afe72eb`), программа коммитит те же
+восемь слов. Отдельное рабочее пространство: `zkvm/`, его `Cargo.lock`, ключи и пруфы
+нынешних программ не затронуты. **Пруфов этой программы нет, и к контракту её подключать
+нельзя**: шестой круг проверки (`REVIEW.md`) нашёл две критичные дыры в использовании RSP
+(исправлены; седьмой круг признал исправления полными) и два критичных пробела на стыке с
+контрактом (не исправлены). Кроме того, со штатным хостом RSP часть честных блоков
+недоказуема (7-1): нужен хост на Reth. Что значат слова для EVM и чего в спайке нет — в шапке
+`zkvm-evm/lib/src/lib.rs`; замеры циклов — `bench/evm-rsp-cycles.json`.
+
+Инструменты вне репозитория (в `.tools/`): `anvil` и `cast` из Foundry v1.9.0 (архив релиза
+`foundry_v1.9.0_darwin_arm64.tar.gz` с GitHub, sha256 — в файле `.sha256` того же релиза) и
+`rsp`, собранный из исходников на том же коммите (`cargo build --release --locked --bin rsp`,
+нужен `PROTOC`). Дерево состояния — копия `rsp-mpt` в `zkvm-evm/vendor/` с тремя правками:
+`diff -r .tools/rsp/crates/mpt/src zkvm-evm/vendor/rsp-mpt/src`.
+
+```bash
+cd zkvm-evm && cargo build --release --locked -p rollup-evm-host   # хост и гостевая программа
+zkvm-evm/scenario/anvil-scenario.sh honest             # блоки anvil → фикстуры, zkVM без пруфа
+zkvm-evm/scenario/anvil-scenario.sh reverting-bridge   # цепочка, где переводы на мост не проходят
+cd zkvm-evm && cargo test --release --locked -p rollup-evm         # тесты (фикстуры в fixtures/evm_batches/)
+python3 zkvm-evm/scenario/mutation-check.py            # проверка тестов мутациями → scenario/mutation-report.txt
+python3 zkvm-evm/scenario/check-locks.py               # версии крейтов в тестах и в ELF совпадают
+```
+
+Сценарий каждый раз создаёт новую цепочку, поэтому фикстуры и хеши блоков в них меняются от
+запуска к запуску (время блоков); тесты сверяются с `expected.json` того же запуска. Сценарий
+отказывает, если исходники новее бинарника хоста. После `mutation-check.py` хост нужно
+пересобрать: скрипт возвращает исходники с новым временем изменения.

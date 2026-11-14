@@ -1,0 +1,33 @@
+[package]
+name = "rollup-evm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rollup-stf.workspace = true
+serde.workspace = true
+itertools.workspace = true
+
+rsp-client-executor.workspace = true
+rsp-primitives.workspace = true
+rsp-mpt.workspace = true
+
+reth-primitives-traits.workspace = true
+reth-evm.workspace = true
+reth-evm-ethereum.workspace = true
+reth-trie.workspace = true
+reth-chainspec.workspace = true
+reth-execution-types.workspace = true
+reth-ethereum-primitives.workspace = true
+
+revm.workspace = true
+
+alloy-primitives.workspace = true
+alloy-genesis.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-rlp.workspace = true
+
+[dev-dependencies]
+bincode.workspace = true
+serde_json.workspace = true

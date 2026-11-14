@@ -1,0 +1,40 @@
+{
+  "chainId": "362107787851",
+  "bridge": "0x746f6e2d7a6b2d726f6c6c75702d627269646765",
+  "blocks": {
+    "1": {
+      "hash": "0x6789ab279e6721da54514d02254005591590d9fcc719db9a473a739d8c3d374a",
+      "transactions": 1,
+      "bridgeTransferStatuses": []
+    },
+    "2": {
+      "hash": "0xc651af30ec9592c39de3c8cdd9e1366d4d7099a75a3041652eb437980cc6a590",
+      "transactions": 9,
+      "bridgeTransferStatuses": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "3": {
+      "hash": "0x9d1fe8a40cc57d765c579229a992eaed5bc8416ea1ae5cd3425457ba6b38ba06",
+      "transactions": 3,
+      "bridgeTransferStatuses": [
+        0
+      ]
+    },
+    "4": {
+      "hash": "0x1c500b0245f1042f2d0b6324c7949b58cef486d127071efaaea2165d70fcb027",
+      "transactions": 0,
+      "bridgeTransferStatuses": []
+    },
+    "5": {
+      "hash": "0xca7f6f3eba2b220f4bd2c7c1f299f5c81cdfdd560d8a2682bf6d2a4b1a775f34",
+      "transactions": 1,
+      "bridgeTransferStatuses": []
+    }
+  }
+}
