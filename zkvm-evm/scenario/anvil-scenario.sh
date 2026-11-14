@@ -204,4 +204,15 @@ for number in 2 3 4 5; do
     --witness "$WORK/witness-$number.json" --execute \
     --write-input "$OUT/block-$number.bin" --report "$OUT/block-$number.json"
 done
+# Батч для контракта на TON: тот же блок 2, но с нулевым хешем очереди L1 — как у только что
+# развёрнутого контракта без депозитов. Под этот вход строится пруф Groth16 (PROVING.md).
+if [ "$VARIANT" = honest ]; then
+  mkdir -p "$ROOT/fixtures/evm_batches/contract"
+  echo '{}' > "$WORK/witness-contract.json"
+  SP1_PROVER=mock RAYON_NUM_THREADS=4 nice -n 15 "$HOST" \
+    --block-input "$WORK/cache/input/$CHAIN_ID/2.bin" --chain-id $CHAIN_ID \
+    --witness "$WORK/witness-contract.json" --execute \
+    --write-input "$ROOT/fixtures/evm_batches/contract/block-2.bin" \
+    --report "$ROOT/fixtures/evm_batches/contract/block-2.json"
+fi
 echo "Готово: $OUT"

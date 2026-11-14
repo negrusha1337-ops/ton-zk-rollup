@@ -1,5 +1,6 @@
 # Хост батча EVM: собирает вход (блок в формате кэша RSP + свидетель rollup'а), считает
-# публичные значения нативно и исполняет гостевую программу в zkVM БЕЗ пруфа.
+# публичные значения нативно, исполняет гостевую программу в zkVM и — по отдельной команде —
+# строит пруф (сжатый или Groth16).
 [package]
 name = "rollup-evm-host"
 version.workspace = true
@@ -16,5 +17,10 @@ sp1-sdk.workspace = true
 clap = { version = "4.5.7", features = ["derive"] }
 sha2 = "0.10"
 
+[features]
+# Обёртка Groth16 нативным gnark вместо Docker-образа. Нужен установленный Go (PROVING.md).
+native-gnark = ["sp1-sdk/native-gnark"]
+
 [build-dependencies]
 sp1-build.workspace = true
+sha2 = "0.10"

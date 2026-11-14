@@ -1,0 +1,10 @@
+{
+  "source": "Сгенерировано zkvm-evm/host (--vkeys); не редактировать вручную",
+  "note": "Ключ программы батча EVM — первый публичный вход верификатора SP1; зависит от точного ELF, то есть от исходников (sourcesSha256) и сборочного окружения. Его константа входит в ключ контракта: fixtures/evm_batches/key.json.",
+  "sp1Version": "6.10.0",
+  "guestRustc": "rustc 1.96.0-dev",
+  "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+  "sourcesSha256": "2a50732b7a89e7a3d64b727bb26fee4990946bcf3db44955243a5b85ec2dd9f5",
+  "programVKey": "0x00ac255fc6bd843bcdfeefc4e2017061bf2a0ec05d5e930b203f75c21ee1c4af",
+  "programElfSha256": "f201bd1c1c2442e206b5dc1dd471a051e805a7ec50d1f12c111f293be3ff9b01"
+}

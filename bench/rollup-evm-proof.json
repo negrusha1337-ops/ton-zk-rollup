@@ -1,0 +1,13 @@
+{
+  "source": "Измерено в @ton/sandbox тестом tests/RollupEvmProof.spec.ts; не редактировать вручную",
+  "note": "Газ rollup-контракта с Groth16-пруфом SP1 (схема v6.1.0) блока EVM: программа zkvm-evm (Reth внутри SP1). Ключ выхода в контракте — заглушка; депозитов и принудительных транзакций в батче нет.",
+  "gasLimit": 1000000,
+  "sourcesSha256": "2a50732b7a89e7a3d64b727bb26fee4990946bcf3db44955243a5b85ec2dd9f5",
+  "blockNumber": 2,
+  "transactions": 9,
+  "zkvmCycles": 8921298,
+  "publishData": 5056,
+  "submitBatch": 948627,
+  "submitBatchHeadroom": 51373,
+  "rejectedForgery": 948356
+}

@@ -1,5 +1,5 @@
 # Копия крейта `rsp-mpt` из succinctlabs/rsp (crates/mpt, коммит 5afe72eb, MIT OR Apache-2.0)
-# с двумя правками — см. VENDORED.md. Подключается вместо оригинала через [patch] в
+# с тремя правками — см. VENDORED.md. Подключается вместо оригинала через [patch] в
 # zkvm-evm/Cargo.toml и zkvm-evm/program/Cargo.toml.
 [package]
 name = "rsp-mpt"

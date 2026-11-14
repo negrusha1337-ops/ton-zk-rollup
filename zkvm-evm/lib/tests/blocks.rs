@@ -7,7 +7,8 @@
 use std::{fs, path::PathBuf};
 
 use alloy_consensus::{
-    proofs::calculate_withdrawals_root, Header, Signed, Transaction, TxEip4844, TxEip7702, TxLegacy,
+    proofs::calculate_withdrawals_root, Header, Signed, Transaction, TxEip1559, TxEip2930, TxEip4844, TxEip7702,
+    TxLegacy,
 };
 use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use alloy_primitives::{address, keccak256, Address, Bytes, Signature, TxKind, B256, U256};
@@ -417,7 +418,7 @@ fn transaction_with_an_unrecoverable_signature_is_rejected() {
 
 #[test]
 fn blobs_are_rejected() {
-    // Расход blob-газа в заголовке правила Reth с транзакциями не сверяют.
+    // Расход blob-газа в заголовке с транзакциями не сверяется: RSP не вызывает эту проверку Reth.
     let header = with_block_header(|header| header.blob_gas_used = Some(131_072));
     assert_eq!(apply_evm_batch(header), Err(EvmBatchError::BlobsNotSupported));
 
@@ -455,6 +456,33 @@ fn transaction_with_delegation_is_rejected() {
     input.block.current_block.body.transactions.push(Signed::new_unhashed(delegation, signature()).into());
     republish(&mut input);
     assert_eq!(apply_evm_batch(input), Err(EvmBatchError::UnsupportedTransactionType(index)));
+}
+
+#[test]
+fn ordinary_transaction_types_pass_the_type_check() {
+    // Обычная, EIP-2930 и EIP-1559 — допустимые типы: транзакция с негодной подписью обязана
+    // дойти до восстановления отправителя, а не быть отвергнутой по типу.
+    let zero = Signature::new(U256::ZERO, U256::ZERO, false);
+    let to = TxKind::Call(Address::from([1u8; 20]));
+    let candidates: Vec<rollup_evm_transaction::Tx> = vec![
+        Signed::new_unhashed(TxLegacy { chain_id: Some(CHAIN_ID), gas_limit: 21_000, to, ..Default::default() }, zero)
+            .into(),
+        Signed::new_unhashed(TxEip2930 { chain_id: CHAIN_ID, gas_limit: 21_000, to, ..Default::default() }, zero)
+            .into(),
+        Signed::new_unhashed(TxEip1559 { chain_id: CHAIN_ID, gas_limit: 21_000, to, ..Default::default() }, zero)
+            .into(),
+    ];
+    for transaction in candidates {
+        let mut input = batch("honest", 2);
+        input.block.current_block.body.transactions.push(transaction);
+        republish(&mut input);
+        assert_eq!(apply_evm_batch(input), Err(EvmBatchError::SignatureRecovery));
+    }
+}
+
+/// Тип транзакции блока — чтобы собрать в тесте список транзакций разных видов.
+mod rollup_evm_transaction {
+    pub type Tx = reth_ethereum_primitives::TransactionSigned;
 }
 
 #[test]

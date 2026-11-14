@@ -1,0 +1,24 @@
+{
+ "description": "Настоящий пруф SP1 нашей программы (перехода состояния) и ключ Groth16-верификатора v6.1.0",
+ "verifier": "https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/v6.1.0/Groth16Verifier.sol",
+ "wrapper": "https://github.com/succinctlabs/sp1-contracts/blob/main/contracts/src/v6.1.0/SP1VerifierGroth16.sol",
+ "proof": "fixtures/evm_batches/proof-block2.json",
+ "verifierHash": "0x4388a21c687fdd5f218d7e3d13190cac4c5355818d3605fd5fb811df468ee696",
+ "programVKey": "0x00ac255fc6bd843bcdfeefc4e2017061bf2a0ec05d5e930b203f75c21ee1c4af",
+ "publicValues": "0x000000000000000000000000000000000000000000000000000000544f4e5a4bc58bbdb71e66645fd02f5d9f1b04582ec08117f50f6324af92ba2d47ffb235cfd71bc3ef02d6c8ca8606798bad9d5c74eee9895fac9a22687a360898ef0758a2b0654f15bd030bb8d54773634a5c60824303baf5bcf2b3e894c20cf91dc2affd0000000000000000000000000000000000000000000000000000000000000000b886705083b0dba3762a37347a0a8b4dc039309820a47c2e66f2f106b635699600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+ "inputNames": [
+  "programVKey",
+  "publicValuesDigest",
+  "exitCode",
+  "vkRoot",
+  "nonce"
+ ],
+ "variableInputs": [
+  1
+ ],
+ "kind": "batch",
+ "program": "evm",
+ "sourcesSha256": "2a50732b7a89e7a3d64b727bb26fee4990946bcf3db44955243a5b85ec2dd9f5",
+ "elfSha256": "f201bd1c1c2442e206b5dc1dd471a051e805a7ec50d1f12c111f293be3ff9b01",
+ "verifierConstantsSha256": "391e915f0ec0dfe137dc5ccbf1f8d4c3934320c649d17994e1aeff95881690eb"
+}

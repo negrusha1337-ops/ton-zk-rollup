@@ -251,6 +251,43 @@ python3 zkvm-evm/scenario/mutation-check.py            # проверка тес
 python3 zkvm-evm/scenario/check-locks.py               # версии крейтов в тестах и в ELF совпадают
 ```
 
+### Пруф блока EVM для контракта
+
+Цепочка привязки — та же, что у программ `zkvm/`, в отдельных файлах: хеш исходников
+(`zkvm-evm/host/src/sources.rs`, повтор — `zk/evm-binding.mjs`) → `fixtures/evm_batches/program.json`
+(`rollup-evm-host --vkeys`) → `fixtures/evm_batches/key.json` (`node zk/gen-evm-rollup-key.mjs`) →
+`fixtures/sp1_evm_batch2` (импорт пруфа). **Ключ выхода в `key.json` — заглушка**: программы
+аварийного выхода для состояния EVM нет, контракт с этим ключом годится только для демонстрации
+приёма батча. Батч для контракта — `fixtures/evm_batches/contract/block-2.*`: блок 2 сценария с
+нулевым хешем очереди L1, как у только что развёрнутого контракта.
+
+```bash
+# Хост с прувером (нужны protoc и Go из .tools/, переменные — как в «Порядке действий» выше).
+(cd zkvm-evm && cargo build --release --locked -p rollup-evm-host --features native-gnark)
+zkvm-evm/target/release/rollup-evm-host --vkeys
+zkvm-evm/host/verify-elf.sh                      # чистая пересборка ELF и сверка с program.json
+node zk/gen-evm-rollup-key.mjs && node zk/gen-evm-rollup-key.mjs --check
+
+# Только по команде пользователя. С настройками SP1 по умолчанию прувер не помещается в 16 ГБ:
+# шарды уменьшены в шесть раз, по одному рабочему на этап (bench/evm-rsp-cycles.json).
+export ELEMENT_THRESHOLD=67108864 HEIGHT_THRESHOLD=1048576 SP1_WORKER_NUM_CORE_WORKERS=1 \
+  SP1_WORKER_CORE_BUFFER_SIZE=1 SP1_WORKER_NUM_SPLICING_WORKERS=1 SP1_WORKER_SPLICING_BUFFER_SIZE=1 \
+  SP1_WORKER_NUM_SETUP_WORKERS=1 SP1_WORKER_NUM_RECURSION_PROVER_WORKERS=1 \
+  SP1_WORKER_NUM_RECURSION_EXECUTOR_WORKERS=1 SP1_WORKER_NUM_PREPARE_REDUCE_WORKERS=1 \
+  SP1_WORKER_NUM_DEFERRED_WORKERS=1
+zkvm-evm/host/prove-guarded.sh --batch-input fixtures/evm_batches/contract/block-2.bin \
+  --prove --proof-out fixtures/evm_batches/proof-block2.json
+
+# Импорт (проверка пруфа спариванием под закреплённым ключом схемы), подсказки, тест.
+D="$HOME/.sp1/circuits/groth16/v6.1.0"
+node zk/import-sp1-fixture.mjs "$D/Groth16Verifier.sol" "$D/SP1VerifierGroth16.sol" fixtures/evm_batches/proof-block2.json sp1_evm_batch2
+node zk/gen-bn254-groth16-fixture.mjs sp1_evm_batch2
+npx jest tests/RollupEvmProof.spec.ts
+```
+
+После повторного запуска сценария цепочка anvil другая: батч для контракта и пруф под него
+становятся негодными (тест пометит себя ожидающим пруфа).
+
 Сценарий каждый раз создаёт новую цепочку, поэтому фикстуры и хеши блоков в них меняются от
 запуска к запуску (время блоков); тесты сверяются с `expected.json` того же запуска. Сценарий
 отказывает, если исходники новее бинарника хоста. После `mutation-check.py` хост нужно

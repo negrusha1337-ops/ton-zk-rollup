@@ -15,6 +15,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bn254 } from '@noble/curves/bn254.js';
+import { loadEvmProgramKeys } from './evm-binding.mjs';
 import { loadProgramKeys } from './program-binding.mjs';
 import { g2FromParts, loadSp1Verifier, verificationKeyJson } from './sp1-verifier.mjs';
 
@@ -49,14 +50,31 @@ const KINDS = [
         elfField: 'exitProgramElfSha256',
         publicValuesBytes: 160,
     },
+    // Программа батча EVM (zkvm-evm/): свой program.json (fixtures/evm_batches/), те же восемь
+    // слов. Имя — sp1_evm_batch<номер блока>; пруф строит zkvm-evm/host --prove.
+    {
+        prefix: 'sp1_evm_batch',
+        kind: 'batch',
+        evm: true,
+        vkeyField: 'programVKey',
+        elfField: 'programElfSha256',
+        publicValuesBytes: 256,
+    },
 ];
 /**
  * Публичные значения, которые сценарий (zkvm/native) выдаёт для этой фикстуры: пруф батча 1,
  * импортированный под именем батча 2, или пруф прежнего сценария иначе всплыли бы только в
  * сквозном тесте.
  */
-function scenarioPublicValues(kind, name) {
+function scenarioPublicValues(kind, name, evm = false) {
     const read = (...parts) => JSON.parse(readFileSync(path.join(ROOT, 'fixtures', ...parts), 'utf8'));
+    if (evm) {
+        // Батч для контракта: fixtures/evm_batches/contract/block-<N>.json пишет хост после
+        // сверки публичных значений zkVM с нативным расчётом (zkvm-evm/scenario/anvil-scenario.sh).
+        const block = name.slice('sp1_evm_batch'.length);
+        if (!/^[0-9]+$/.test(block)) throw new Error(`В имени ${name} нет номера блока`);
+        return read('evm_batches', 'contract', `block-${block}.json`).publicValuesBytes.slice(2);
+    }
     if (kind === 'batch') {
         const index = Number(name.slice('sp1_rollup_batch'.length));
         const batch = read('zkvm_batches', 'batches.json').batches[index - 1];
@@ -102,7 +120,7 @@ if (proofBytes.length !== 4 + 11 * 32) {
 }
 const publicValuesBytes = Buffer.from(fixture.publicValues.slice(2), 'hex');
 if (program) {
-    const programs = loadProgramKeys();
+    const programs = program.evm ? loadEvmProgramKeys() : loadProgramKeys();
     if (BigInt(fixture.vkey) !== BigInt(programs[program.vkeyField])) {
         throw new Error(
             `Пруф построен для другой программы: его ключ ${fixture.vkey}, а в program.json ` +
@@ -123,7 +141,7 @@ if (program) {
             `Публичные значения: ${publicValuesBytes.length} байт, у программы «${program.kind}» их ${program.publicValuesBytes}`,
         );
     }
-    if (publicValuesBytes.toString('hex') !== scenarioPublicValues(program.kind, fixtureName)) {
+    if (publicValuesBytes.toString('hex') !== scenarioPublicValues(program.kind, fixtureName, program.evm)) {
         throw new Error(
             `Публичные значения пруфа не те, что сценарий выдаёт для ${fixtureName}: пруф построен для другого ` +
                 'батча, другой заявки или прежнего сценария',
@@ -206,6 +224,7 @@ write('source.json', {
     ...(program
         ? {
               kind: program.kind,
+              ...(program.evm ? { program: 'evm' } : {}),
               sourcesSha256: fixture.sourcesSha256,
               elfSha256: fixture.elfSha256,
               verifierConstantsSha256: verifier.constantsSha256,

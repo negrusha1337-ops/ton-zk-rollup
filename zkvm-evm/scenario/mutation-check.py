@@ -2,6 +2,7 @@
 """Проверка тестов мутациями: убираем по одной защите из кода и смотрим, что тесты упали.
 
     python3 zkvm-evm/scenario/mutation-check.py
+    python3 zkvm-evm/scenario/mutation-check.py <часть названия>   # только эти мутации, без записи отчёта
 
 Для каждой мутации: правит исходник, запускает `cargo test --release --locked -p rollup-evm
 --no-fail-fast`, возвращает исходник. У каждой мутации записан тест, который ОБЯЗАН её убить.
@@ -167,6 +168,21 @@ MUTATIONS = [
                             }
                         }
 """, "insertions_go_before_deletions"),
+    ("счета удаляются вперемешку со вставками (правка 3 копии rsp-mpt)", MPT_LIB,
+     """                None => {}
+            }
+        }
+        for (hashed_address, account) in post_state.accounts.iter() {
+            if account.is_none() {
+                self.state_trie.delete(hashed_address.as_slice()).unwrap();
+            }
+        }
+""", """                None => {
+                    self.state_trie.delete(hashed_address.as_slice()).unwrap();
+                }
+            }
+        }
+""", "account_insertions_go_before_deletions"),
     # --- правила цепочки
     ("правила цепочки без Cancun", LIB, "    config.cancun_time = Some(0);\n", "",
      "honest_block_gives_the_words_the_node_reports"),
@@ -179,6 +195,10 @@ MUTATIONS = [
      "transaction_without_chain_id_is_rejected"),
     ("типы транзакций не ограничены", LIB, "    reject_unsupported_types(&body.transactions)?;\n", "",
      "transaction_with_delegation_is_rejected"),
+    ("транзакции EIP-2930 недопустимы", LIB, "TxType::Legacy | TxType::Eip2930 | TxType::Eip1559",
+     "TxType::Legacy | TxType::Eip1559", "ordinary_transaction_types_pass_the_type_check"),
+    ("транзакции EIP-1559 недопустимы", LIB, "TxType::Legacy | TxType::Eip2930 | TxType::Eip1559",
+     "TxType::Legacy | TxType::Eip2930", "ordinary_transaction_types_pass_the_type_check"),
     ("blob-транзакции допустимы", LIB, BLOB_CHECK,
      "if block.header.blob_gas_used != Some(0) || block.header.excess_blob_gas != Some(0) {",
      "blobs_are_rejected"),
@@ -295,8 +315,10 @@ def main() -> int:
     if outcome != "ok":
         print("Тесты падают и без мутаций — проверять нечего:", *details, sep="\n  ")
         return 2
+    only = sys.argv[1] if len(sys.argv) > 1 else None
+    selected = [mutation for mutation in MUTATIONS if only is None or only in mutation[0]]
     lines, bad = [], 0
-    for name, path, old, new, expected in MUTATIONS:
+    for name, path, old, new, expected in selected:
         source = path.read_text()
         if source.count(old) != 1:
             verdict, details = "НЕ ПРИМЕНЕНА", [f"образец найден {source.count(old)} раз"]
@@ -324,8 +346,11 @@ def main() -> int:
     if outcome != "ok":
         print("После возврата исходников тесты падают — результатам верить нельзя:", *details, sep="\n  ")
         return 2
-    summary = f"Мутаций: {len(MUTATIONS)}, не убито ожидаемым тестом: {bad}"
+    summary = f"Мутаций: {len(selected)}, не убито ожидаемым тестом: {bad}"
     print("\n" + summary)
+    if only is not None:
+        print("Прогон частичный: отчёт не перезаписан.")
+        return 1 if bad else 0
     REPORT.write_text(
         f"Проверка тестов мутациями, {datetime.date.today().isoformat()}\n"
         "Команда: python3 zkvm-evm/scenario/mutation-check.py\n"

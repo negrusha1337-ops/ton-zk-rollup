@@ -280,6 +280,42 @@ mod tests {
     }
 
     #[test]
+    fn account_insertions_go_before_deletions() {
+        // То же для дерева состояния: блок удаляет счёт-лист и создаёт новый счёт под той же
+        // веткой, рядом — нераскрытый сосед. Пара подобрана так, чтобы обход начинался с удаляемого.
+        let mut found = None;
+        'search: for tail in 0u8..=255 {
+            let deleted = leaf_key_with(tail);
+            for candidate in 0u8..=255 {
+                let mut key = [candidate; 32];
+                key[0] = 0xf0;
+                let key = B256::from(key);
+                let mut accounts = B256Map::default();
+                accounts.insert(deleted, None);
+                accounts.insert(key, Some(Account { nonce: 1, balance: U256::from(5u8), bytecode_hash: None }));
+                if accounts.iter().next().unwrap().0 == &deleted {
+                    found = Some((tail, deleted, key, accounts));
+                    break 'search;
+                }
+            }
+        }
+        let (tail, deleted, created, accounts) =
+            found.expect("нашлась пара ключей, при которой обход начинается с удаляемого");
+
+        let mut state = EthereumState {
+            state_trie: leaf_and_unrevealed_sibling_with(tail),
+            storage_tries: Default::default(),
+        };
+        let mut post_state = HashedPostState::default();
+        post_state.accounts = accounts;
+
+        state.update(&post_state);
+        assert_eq!(state.state_trie.get(deleted.as_slice()).unwrap(), None);
+        assert!(state.state_trie.get(created.as_slice()).unwrap().is_some());
+        assert_eq!(check_state_tries(&state), Ok(()));
+    }
+
+    #[test]
     fn storage_tries_are_checked_too() {
         // Дерево состояния честное (пустое), подмена — в дереве хранилища.
         let mut state = EthereumState { state_trie: node(MptNodeData::Null), storage_tries: Default::default() };
