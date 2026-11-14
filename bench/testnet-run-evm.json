@@ -1,0 +1,214 @@
+{
+  "source": "Сгенерировано zk/testnet-evm-report.mjs из транзакций testnet; не редактировать вручную",
+  "note": "Прогон в testnet одного батча EVM: блок, исполненный Reth внутри SP1, и его Groth16-пруф приняты rollup-контрактом. Демонстрация приёма батча: ключ выхода — заглушка, депозитов нет. Прогон — честный сценарий, не проверка безопасности.",
+  "network": "testnet",
+  "contract": "EQBzUp761GHW3jvEJcaPal6pLn4WpLAZoMqqZLD2JTsQ1ge2",
+  "programVKey": "0x00ac255fc6bd843bcdfeefc4e2017061bf2a0ec05d5e930b203f75c21ee1c4af",
+  "sourcesSha256": "2a50732b7a89e7a3d64b727bb26fee4990946bcf3db44955243a5b85ec2dd9f5",
+  "transactions": 17,
+  "failed": 0,
+  "totalFeesNano": 70624675,
+  "valueReceivedNano": 141000000,
+  "gas": {
+    "submitBatch": {
+      "testnet": [
+        948627
+      ],
+      "sandbox": 948627,
+      "equal": true
+    },
+    "publishData": {
+      "testnet": [
+        5056
+      ],
+      "sandbox": 5056,
+      "equal": true
+    },
+    "keyParts": {
+      "testnet": 76388,
+      "count": 12
+    },
+    "setExitKey": {
+      "testnet": [
+        5816
+      ]
+    },
+    "keyFinalize": {
+      "testnet": [
+        21346
+      ]
+    }
+  },
+  "steps": [
+    {
+      "step": "deploy",
+      "hash": "bcd2253d0508c1706b06e0cf6154b085b5921a45ec1abf0d97c267d67d6ce2ba",
+      "time": "2026-11-14T21:37:47.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 2129,
+      "totalFeesNano": 141934,
+      "valueNano": 50000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "0982e3d35041f225876c9538318d392bfd993ae7673d5b25fa6c71bf62db7bf2",
+      "time": "2026-11-14T21:37:57.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 4555,
+      "totalFeesNano": 303673,
+      "valueNano": 1000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "725f56f8df2018689fb6436d1c42dadb83c1b6096b30770351d8c5020402b7ba",
+      "time": "2026-11-14T21:38:06.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 5603,
+      "totalFeesNano": 373542,
+      "valueNano": 1000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "8dee97d15e315be980d547bb265a09a96230b4a1b2a5672aa7fa7abbdf3abd0c",
+      "time": "2026-11-14T21:38:15.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6203,
+      "totalFeesNano": 413545,
+      "valueNano": 1000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "c05b7c754621e24edd645f4ecbb5a88c7eb1c5e1f5c6d233fb3a70a6a227cee0",
+      "time": "2026-11-14T21:38:25.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6203,
+      "totalFeesNano": 413550,
+      "valueNano": 1000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "f69ffa36b70bc36914d725d37931bfdc33b5d586f115e1b517d1ed2d1f05201a",
+      "time": "2026-11-14T21:38:34.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6803,
+      "totalFeesNano": 453552,
+      "valueNano": 1000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "86c1d3017818d9a1d000d72866c000f913ba77e645b85dc8b92f42520946d266",
+      "time": "2026-11-14T21:38:44.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6203,
+      "totalFeesNano": 413557,
+      "valueNano": 1000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "f14053118658c0e7f4fb9a0732a9063b1dd9342f7eafab2ce1a821c63470a214",
+      "time": "2026-11-14T21:38:53.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6803,
+      "totalFeesNano": 453558,
+      "valueNano": 1000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "bbc06602bfc4fe9e6f8c71d99fc3c7539aa525d72e0dfb0ce5df48a3f3850946",
+      "time": "2026-11-14T21:39:01.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6803,
+      "totalFeesNano": 453559,
+      "valueNano": 1000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "40c5fee0dd1b6665ebb3aac712003aa1a0153edd93769f11ff0f9fb75ce2bcaa",
+      "time": "2026-11-14T21:39:11.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 7403,
+      "totalFeesNano": 493568,
+      "valueNano": 1000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "1ee5985084e72fbfbf83a8e50468e593d7147f7d23e8105b8ab1ee2035fdc9bf",
+      "time": "2026-11-14T21:39:20.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6203,
+      "totalFeesNano": 413568,
+      "valueNano": 1000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "ac87e5ce97357a4a82ba036bb074e9a3e832de415cf9bde95fc9fcf5010521dd",
+      "time": "2026-11-14T21:39:30.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6803,
+      "totalFeesNano": 453576,
+      "valueNano": 1000000
+    },
+    {
+      "step": "keyPart",
+      "hash": "a7f0f6e95c5fa9e94e3867276b61e14bed12e6ca547a7eccfc17472f42f140f6",
+      "time": "2026-11-14T21:39:40.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6803,
+      "totalFeesNano": 453579,
+      "valueNano": 1000000
+    },
+    {
+      "step": "setExitKey",
+      "hash": "6a475bcb00352421e0f0b216d2373b4eb0d1f7b7b1b47cab93ca5f3ca2e06861",
+      "time": "2026-11-14T21:39:49.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 5816,
+      "totalFeesNano": 387777,
+      "valueNano": 3000000
+    },
+    {
+      "step": "keyFinalize",
+      "hash": "054bfc83131f7c91aed1c0744af19caec068461912d7aaf0aca5d94f53bfd412",
+      "time": "2026-11-14T21:40:02.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 21346,
+      "totalFeesNano": 1423130,
+      "valueNano": 3000000
+    },
+    {
+      "step": "publishData",
+      "hash": "a42ff55af0567811f3a98ed1a6383c673c84c8afc338b245242bb8a163852b55",
+      "time": "2026-11-14T21:40:18.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 5056,
+      "totalFeesNano": 337144,
+      "valueNano": 1000000
+    },
+    {
+      "step": "submitBatch",
+      "hash": "54a5f0e7116dc284759250d92be7b8904b607210fe58fb4bec47bafa8a1d5758",
+      "time": "2026-11-14T21:40:30.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 948627,
+      "totalFeesNano": 63241863,
+      "valueNano": 72000000
+    }
+  ]
+}
