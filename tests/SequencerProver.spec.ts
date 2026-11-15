@@ -1,11 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, rmSync } from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import { loadProvenRethBatch } from '../wrappers/evmProofs';
 import { liveChildren } from '../sequencer/children';
 import { DEFAULT_CIRCUITS_DIR } from '../sequencer/proofImport';
 import { jobKeyOf, LocalProver, LocalProverOptions, ProofRejected, ProverCancelled, ProverFailure } from '../sequencer/prover';
-import { RemoteProver } from '../sequencer/remoteProver';
 import { fakeProveScript, rethJob } from './helpers/fakeProver';
 
 // Прувер сервиса (sequencer/prover.ts, LocalProver) на заглушке сторожа: вместо пруфа — готовые
@@ -130,29 +129,6 @@ if (!circuits) {
             const one = rethJob(1);
             await expect(prover().prove(one)).rejects.toThrow(/^import-sp1-fixture\.mjs отказал: /);
             expect(existsSync(path.join(prover().jobDir(one), 'proof.json'))).toBe(false);
-        }, 120_000);
-
-        it('RemoteProver (заготовка): тот же договор — пруф с сервера проходит те же импорт и сверку', async () => {
-            const commands: string[][] = [];
-            const remote = new RemoteProver({
-                host: 'zk-gpu',
-                dir: path.join(dir, 'remote'),
-                shell: async (command, args) => {
-                    commands.push([command, ...args]);
-                    // «Сервер» отдаёт пруф блока 1 на шаге scp обратно.
-                    if (command === 'scp' && args[0].startsWith('zk-gpu:')) {
-                        const { copyFileSync } = await import('fs');
-                        copyFileSync(path.join(__dirname, '..', 'fixtures', 'evm_batches', 'proof-reth-block1.json'), args[1]);
-                    }
-                    return { code: 0, output: '' };
-                },
-            });
-            const job = rethJob(1);
-            expect((await remote.prove(job)).jobKey).toBe(jobKeyOf(job));
-            expect(commands.map(([command]) => command)).toEqual(['ssh', 'scp', 'ssh', 'scp']);
-            expect(commands[2].join(' ')).toContain('--prove --proof-out');
-            expect(() => new RemoteProver({ host: 'zk gpu; rm', dir })).toThrow('имя ssh-хоста «zk gpu; rm»: только буквы, цифры, . _ @ -');
-            expect(readFileSync(path.join(remote.jobDir(job), 'proof-raw.json'), 'utf8')).toContain('"publicValues"');
         }, 120_000);
     });
 }

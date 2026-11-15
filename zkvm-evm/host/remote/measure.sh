@@ -27,8 +27,8 @@ MODE="${1:-auto}"
 BLOCK="${2:-3}"
 MIN_FREE_GB="${MIN_FREE_GB:-15}"
 MAX_STAGE_MINUTES="${MAX_STAGE_MINUTES:-120}"
-HOST="$ROOT/zkvm-evm/target/release/rollup-evm-host"
-ELF="$ROOT/remote-input/rollup-evm-program.elf"
+# shellcheck source=lib.sh
+. "$ROOT/zkvm-evm/host/remote/lib.sh"   # HOST, ELF, sha256_of, expected_elf_sha256, load_cpu_env
 INPUT="$ROOT/fixtures/evm_batches/reth/block-$BLOCK.bin"
 REPORT="$ROOT/fixtures/evm_batches/reth/block-$BLOCK.json"
 cd "$ROOT" || exit 1
@@ -48,8 +48,8 @@ if pgrep -f 'release/rollup-evm-host|sp1-gpu-server' >/dev/null; then
 fi
 
 # ELF: sha256 с program.json — здесь, ключ — в самом хосте (--elf) на каждом этапе.
-EXPECTED_ELF="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["programElfSha256"])' fixtures/evm_batches/program.json)"
-[ "$(sha256sum "$ELF" | awk '{ print $1 }')" = "$EXPECTED_ELF" ] || die "ELF $ELF не совпал с program.json"
+EXPECTED_ELF="$(expected_elf_sha256)"
+[ "$(sha256_of "$ELF")" = "$EXPECTED_ELF" ] || die "ELF $ELF не совпал с program.json"
 say "ELF совпал с program.json: $EXPECTED_ELF"
 
 RUN="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -78,15 +78,9 @@ sample() {
     done
 }
 
-# Настройки прувера на процессоре — из общего файла (zkvm-evm/host/prover-shards.env: его же
-# берут PROVING.md и сервис-секвенсор). Только для этапов с прувером cpu: GPU-этапы идут с
-# настройками SP1 по умолчанию, как в прежних замерах.
-CPU_ENV=()
-SHARDS_ENV="$ROOT/zkvm-evm/host/prover-shards.env"
-[ -f "$SHARDS_ENV" ] || die "нет $SHARDS_ENV (push.sh везёт его вместе с zkvm-evm/host)"
-while IFS= read -r line; do
-    case "$line" in ''|'#'*) ;; [A-Z_]*=*) CPU_ENV+=("$line") ;; *) die "непонятная строка в $SHARDS_ENV: $line" ;; esac
-done < "$SHARDS_ENV"
+# Настройки прувера на процессоре — из общего файла (lib.sh, load_cpu_env). Только для этапов с
+# прувером cpu: GPU-этапы идут с настройками SP1 по умолчанию, как в прежних замерах.
+load_cpu_env || die "переменные шардов не прочитаны"
 
 # stage <имя> <прувер> <аргументы хоста…>: запуск, замер, сводка в stages/<имя>/stage.json.
 stage() {

@@ -12,6 +12,7 @@ import { DEFAULT_CIRCUITS_DIR, ProofRejected } from './proofImport';
 import { hostIdentity, identityMismatches, loadProgramKeys, ProgramTools } from './program';
 import { GENESIS_HASH } from './protocol';
 import { DEFAULT_PROVE_SCRIPT, DEFAULT_PROVER_ENV, LocalProver, ProverCancelled, ProverFailure, readEnvFile } from './prover';
+import { DEFAULT_REMOTE_HOST, RemoteProver } from './remoteProver';
 import { rateLimiter, TestnetQueueSource } from './queue/toncenter';
 import { QueueLagError } from './queue/types';
 import { DEFAULT_EXPECTED_PROOF_TIME, DEFAULT_PROGRAM_KEYS, DEFAULT_SUBMIT_MARGIN, Sequencer, SequencerConfig, SequencerStop } from './service';
@@ -112,7 +113,25 @@ export type TestnetOptions = {
     pollSeconds: number;
     /** Окружение сервиса (serviceEnv.ts): кошелёк — только SEQUENCER_MNEMONIC. */
     env: ServiceEnv;
+    /** Прувер: на этой машине или на сервере с GPU по ssh (`--prover=remote:<хост>`). */
+    prover: ProverChoice;
 };
+
+export type ProverChoice = { kind: 'local' } | { kind: 'remote'; host: string };
+
+/** `--prover=local` (по умолчанию), `--prover=remote` (ssh-хост zk-gpu) или `--prover=remote:<ssh-хост>`. */
+export function proverChoice(value: string | undefined): ProverChoice {
+    if (value === undefined || value === 'local') return { kind: 'local' };
+    const match = /^remote(?::([A-Za-z0-9._@-]+))?$/.exec(value);
+    if (!match) throw new Error(`--prover=${value}: ожидается local, remote или remote:<ssh-хост из ~/.ssh/config>`);
+    return { kind: 'remote', host: match[1] ?? DEFAULT_REMOTE_HOST };
+}
+
+/** Прувер сервиса: очередь — `<state-dir>/proofs`, у локального и удалённого одна и та же. */
+export function makeProver(options: Pick<TestnetOptions, 'prover' | 'stateDir'>, print: (line: string) => void): LocalProver | RemoteProver {
+    const dir = path.join(options.stateDir, 'proofs');
+    return options.prover.kind === 'remote' ? new RemoteProver({ host: options.prover.host, dir, log: print }) : new LocalProver({ dir, log: print });
+}
 
 export const defaultTools = (): ProgramTools => ({
     host: path.join(ROOT, 'zkvm-evm', 'target', 'release', 'rollup-evm-host'),
@@ -133,20 +152,30 @@ export async function checkLocal(options: TestnetOptions): Promise<CheckReport> 
         problems.push(`key.json не сходится с исходниками: ${String((error as { stderr?: Buffer }).stderr ?? error).trim().split('\n').pop()}`);
     }
     if (!/^0x[0-9a-fA-F]{40}$/.test(options.feeRecipient)) problems.push(`адрес получателя чаевых «${options.feeRecipient}» — не адрес L2 (0x и 40 hex)`);
-    for (const [what, file] of [['reth', options.reth], ['rsp', options.tools.rsp], ['хост', options.tools.host], ['сторож прувера', DEFAULT_PROVE_SCRIPT]])
+    const local = options.prover.kind === 'local';
+    for (const [what, file] of [['reth', options.reth], ['rsp', options.tools.rsp], ['хост', options.tools.host], ...(local ? [['сторож прувера', DEFAULT_PROVE_SCRIPT]] : [])])
         if (!existsSync(file)) problems.push(`нет ${what}: ${file} (PROVING.md)`);
     if (existsSync(options.tools.host)) {
         const mismatches = identityMismatches(await hostIdentity(options.tools), loadProgramKeys(DEFAULT_PROGRAM_KEYS));
         if (mismatches.length > 0) problems.push(`хост не тот, под который выведен ключ: ${mismatches.join('; ')}`);
         else lines.push('хост собран из тех исходников и ELF, что в program.json');
     }
-    readEnvFile(DEFAULT_PROVER_ENV);
+    if (local) readEnvFile(DEFAULT_PROVER_ENV);
+    // Артефакты схемы нужны и с удалённым прувером: пруф с сервера проверяется здесь (импорт).
     for (const file of ['Groth16Verifier.sol', 'SP1VerifierGroth16.sol'])
         if (!existsSync(path.join(DEFAULT_CIRCUITS_DIR, file))) problems.push(`нет ${path.join(DEFAULT_CIRCUITS_DIR, file)}`);
     const free = statfsSync(ROOT);
     const freeGb = Math.floor((free.bavail * free.bsize) / 2 ** 30);
-    lines.push(`свободно на диске ${freeGb} ГБ (пруфу нужно 20+, сторож не стартует меньше чем при 16)`);
-    if (freeGb < 20) problems.push(`свободно ${freeGb} ГБ, для пруфа нужно 20+`);
+    if (local) {
+        lines.push(`свободно на диске ${freeGb} ГБ (пруфу нужно 20+, сторож не стартует меньше чем при 16)`);
+        if (freeGb < 20) problems.push(`свободно ${freeGb} ГБ, для пруфа нужно 20+`);
+    } else if (options.prover.kind === 'remote') {
+        // Удалённый прувер: сервер готов (ssh, prove-job.sh, хост, ELF = program.json, nvidia-smi).
+        const { host } = options.prover;
+        const serverProblems = await new RemoteProver({ host, dir: path.join(options.stateDir, 'proofs') }).serverProblems();
+        problems.push(...serverProblems);
+        if (serverProblems.length === 0) lines.push(`сервер ${host}: ssh, prove-job.sh, хост, ELF (= program.json) и nvidia-smi на месте`);
+    }
     return { lines, problems };
 }
 
@@ -237,7 +266,7 @@ export async function run(options: TestnetOptions, print: (line: string) => void
     service = new Sequencer(config, {
         node: node.rpc,
         queue: new TestnetQueueSource(options.rollup, limits, { apiKey: options.apiKey, limit }),
-        prover: new LocalProver({ dir: path.join(options.stateDir, 'proofs'), log: print }),
+        prover: makeProver(options, print),
         submitter,
         l1Now: () => submitter.l1Now(),
         log: print,

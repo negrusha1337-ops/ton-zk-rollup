@@ -3,7 +3,7 @@ import { Address, fromNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import { loadEvmRollupKey, loadRethExpected } from '../wrappers/evmProofs';
 import { RollupNullifier } from '../wrappers/RollupNullifier';
-import { BATCH_COST_ESTIMATE, check, defaultTools, DEFAULT_RETH, DEFAULT_STATE_DIR, MIN_WALLET_BALANCE, run, TestnetOptions } from './testnet';
+import { BATCH_COST_ESTIMATE, check, defaultTools, DEFAULT_RETH, DEFAULT_STATE_DIR, MIN_WALLET_BALANCE, proverChoice, run, TestnetOptions } from './testnet';
 import { resolveDeployChainId, usedChainIds } from './chainId';
 import { DEFAULT_ESCAPE_TIMEOUT, DEFAULT_MAX_BLOCK_AGE, deploy, networkForwardPrices, serviceCommands } from './deploy';
 import { rateLimiter, TestnetQueueSource } from './queue/toncenter';
@@ -24,9 +24,11 @@ import { claimProofCell, recipientHashOf, withdrawalClaims } from './withdrawals
 //   npx ts-node sequencer/main.ts check <адрес контракта> --fee-recipient=0x… [параметры]
 //       проверить всё (сеть, контракт, ключ, хост, прувер, кошелёк, время, узел) и ничего не слать;
 //   npx ts-node sequencer/main.ts run <адрес контракта> --fee-recipient=0x… [параметры]
-//       сервис: узел reth, очередь, LocalProver, TestnetSubmitter. Остановка, где нужен человек, — код 2.
+//       сервис: узел reth, очередь, прувер, TestnetSubmitter. Остановка, где нужен человек, — код 2.
 // Параметры check и run: --state-dir=<каталог> (.tools/sequencer), --proof-time=<с> (1800),
-// --poll=<с> (30), --http-port, --auth-port, --p2p-port (8645, 8651, 30403), --include-pool.
+// --poll=<с> (30), --http-port, --auth-port, --p2p-port (8645, 8651, 30403), --include-pool,
+// --prover=local|remote[:<ssh-хост>] (local; remote — сервер с GPU, по умолчанию zk-gpu из
+// ~/.ssh/config, RemoteProver; check сверяет и сервер).
 //
 //   npx ts-node sequencer/main.ts address
 //       testnet-адрес кошелька сервиса (для пополнения); сети не касается;
@@ -138,7 +140,7 @@ function serviceOptions(args: string[], env: ServiceEnv): TestnetOptions {
         const [name, value] = arg.slice(2).split('=', 2);
         return [name, value ?? ''] as const;
     }));
-    const known = ['fee-recipient', 'state-dir', 'proof-time', 'poll', 'http-port', 'auth-port', 'p2p-port', 'include-pool'];
+    const known = ['fee-recipient', 'state-dir', 'proof-time', 'poll', 'http-port', 'auth-port', 'p2p-port', 'include-pool', 'prover'];
     for (const name of flags.keys()) if (!known.includes(name)) throw new Error(`непонятный параметр --${name}: ${usage}`);
     const number = (name: string, fallback: number) => {
         const value = flags.get(name);
@@ -160,6 +162,7 @@ function serviceOptions(args: string[], env: ServiceEnv): TestnetOptions {
         includePool: flags.has('include-pool'),
         pollSeconds: number('poll', 30),
         env,
+        prover: proverChoice(flags.get('prover')),
     };
 }
 

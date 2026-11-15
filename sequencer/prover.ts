@@ -12,8 +12,9 @@ import { deserialize, serialize, writeAtomically } from './state';
 // до отправки. Реализации:
 //   MockProver   — заглушка для двойника контракта (contracts/rollup_mock.tolk), пруф не строит;
 //   LocalProver  — SP1 Groth16 на этой машине: zkvm-evm/host/prove-guarded.sh, очередь на диске;
-//   RemoteProver — сервер с GPU по ssh (sequencer/remoteProver.ts), заготовка с тем же договором.
-// И локальный, и удалённый отдают пруф только после импорта и проверки (sequencer/proofImport.ts).
+//   RemoteProver — сервер с GPU по ssh (sequencer/remoteProver.ts) с тем же договором.
+// И локальный, и удалённый отдают пруф только после импорта и проверки (sequencer/proofImport.ts):
+// очередь на диске и импорт — общие (ProofQueue).
 
 export { jobKeyOf } from './jobKey';
 export { ProofRejected } from './proofImport';
@@ -87,11 +88,76 @@ export const GUARD = { busy: 95, lowDiskAtStart: 98, diskRanOut: 99, timedOut: 9
 
 export type JobStatus = {
     state: 'queued' | 'running' | 'verified' | 'cancelled' | 'failed';
-    /** Попыток после сбоев 99/94. */
+    /** Попыток после сбоев (LocalProver: 99/94; RemoteProver: сбой на сервере). */
     attempts: number;
     reason?: string;
+    /** RemoteProver: ssh-хост, на котором идёт задание. */
+    host?: string;
     updatedAt: string;
 };
+
+/**
+ * Очередь заданий на диске — общая у LocalProver и RemoteProver: каталог на задание (имя — ключ
+ * задания), `job.json`, `status.json`, `proof-raw.json`, `fixture/`, `proof.json`. Пруф отдаётся
+ * только после импорта и проверки (`importVerified`), проверенный переживает перезапуск.
+ */
+export class ProofQueue {
+    constructor(readonly dir: string) {}
+
+    jobDir(job: ProverJob): string {
+        return path.join(this.dir, jobKeyOf(job));
+    }
+
+    status(job: ProverJob): JobStatus | null {
+        const file = path.join(this.jobDir(job), 'status.json');
+        return existsSync(file) ? deserialize<JobStatus>(readFileSync(file, 'utf8')) : null;
+    }
+
+    setStatus(job: ProverJob, status: Omit<JobStatus, 'updatedAt'>): JobStatus {
+        const full = { ...status, updatedAt: new Date().toISOString() };
+        writeAtomically(path.join(this.jobDir(job), 'status.json'), serialize(full));
+        return full;
+    }
+
+    /**
+     * Начало prove: отменённое — ProverCancelled, проверенное — пруф с диска; иначе задание
+     * записывается (новое и упавшее — queued с нуля попыток) и ответ null — строить.
+     */
+    begin(job: ProverJob): BatchProof | null {
+        const status = this.status(job);
+        if (status?.state === 'cancelled') throw new ProverCancelled(`задание блока ${job.number} (${jobKeyOf(job)}) отменено`);
+        if (status?.state === 'verified') return this.verified(job);
+        mkdirSync(this.jobDir(job), { recursive: true });
+        writeAtomically(path.join(this.jobDir(job), 'job.json'), JSON.stringify(job, null, 1) + '\n');
+        // Сбой прежней попытки (failed) — новое задание с нуля: решает сервис, запросивший пруф снова.
+        if (!status || status.state === 'failed') this.setStatus(job, { state: 'queued', attempts: 0, host: status?.host });
+        return null;
+    }
+
+    /** Пруф проверенного задания с диска (импорт уже был): ключ — тот же, что у задания. */
+    verified(job: ProverJob): BatchProof {
+        const proof = deserialize<BatchProof>(readFileSync(path.join(this.jobDir(job), 'proof.json'), 'utf8'));
+        if (proof.jobKey !== jobKeyOf(job)) throw new ProofRejected(`на диске пруф с ключом ${proof.jobKey}, а задание — ${jobKeyOf(job)}`);
+        return proof;
+    }
+
+    /** Импорт и проверка `proof-raw.json` задания (proofImport.ts); не прошёл — failed и ProofRejected. */
+    async importVerified(job: ProverJob, attempts: number, options: Partial<ImportOptions> | undefined, extra: Partial<JobStatus> = {}): Promise<BatchProof> {
+        const dir = this.jobDir(job);
+        try {
+            const proof = await importBatchProof(job, path.join(dir, 'proof-raw.json'), path.join(dir, 'fixture'), {
+                circuitsDir: DEFAULT_CIRCUITS_DIR,
+                ...options,
+            });
+            writeAtomically(path.join(dir, 'proof.json'), serialize(proof));
+            this.setStatus(job, { ...extra, state: 'verified', attempts });
+            return proof;
+        } catch (error) {
+            this.setStatus(job, { ...extra, state: 'failed', attempts, reason: (error as Error).message });
+            throw error;
+        }
+    }
+}
 
 export type LocalProverOptions = {
     /** Очередь заданий: .tools/sequencer/proofs/ (каталог на задание, имя — ключ задания). */
@@ -141,9 +207,11 @@ export class LocalProver implements Prover {
     private readonly running = new Map<string, ChildProcess>();
     private readonly cancelled = new Set<string>();
     private readonly sleep: (ms: number) => Promise<void>;
+    private readonly queue: ProofQueue;
 
     constructor(private readonly options: LocalProverOptions) {
         this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+        this.queue = new ProofQueue(options.dir);
     }
 
     private log(line: string) {
@@ -151,40 +219,24 @@ export class LocalProver implements Prover {
     }
 
     jobDir(job: ProverJob): string {
-        return path.join(this.options.dir, jobKeyOf(job));
+        return this.queue.jobDir(job);
     }
 
     status(job: ProverJob): JobStatus | null {
-        const file = path.join(this.jobDir(job), 'status.json');
-        return existsSync(file) ? deserialize<JobStatus>(readFileSync(file, 'utf8')) : null;
+        return this.queue.status(job);
     }
 
     private setStatus(job: ProverJob, status: Omit<JobStatus, 'updatedAt'>): JobStatus {
-        const full = { ...status, updatedAt: new Date().toISOString() };
-        writeAtomically(path.join(this.jobDir(job), 'status.json'), serialize(full));
-        return full;
+        return this.queue.setStatus(job, status);
     }
 
     async prove(job: ProverJob): Promise<BatchProof> {
-        const dir = this.jobDir(job);
-        const status = this.status(job);
-        if (status?.state === 'cancelled') throw new ProverCancelled(`задание блока ${job.number} (${jobKeyOf(job)}) отменено`);
-        if (status?.state === 'verified') return this.verified(job);
-        mkdirSync(dir, { recursive: true });
-        writeAtomically(path.join(dir, 'job.json'), JSON.stringify(job, null, 1) + '\n');
-        // Сбой прежней попытки (failed) — новое задание с нуля: решает сервис, запросивший пруф снова.
-        if (!status || status.state === 'failed') this.setStatus(job, { state: 'queued', attempts: 0 });
+        const ready = this.queue.begin(job);
+        if (ready) return ready;
         // Строго по одному: следующее задание ждёт конца предыдущего, каким бы он ни был.
         const turn = this.chain.then(() => this.run(job));
         this.chain = turn.catch(() => undefined);
         return turn;
-    }
-
-    /** Пруф проверенного задания с диска (импорт уже был): ключ — тот же, что у задания. */
-    private verified(job: ProverJob): BatchProof {
-        const proof = deserialize<BatchProof>(readFileSync(path.join(this.jobDir(job), 'proof.json'), 'utf8'));
-        if (proof.jobKey !== jobKeyOf(job)) throw new ProofRejected(`на диске пруф с ключом ${proof.jobKey}, а задание — ${jobKeyOf(job)}`);
-        return proof;
     }
 
     private async run(job: ProverJob): Promise<BatchProof> {
@@ -237,19 +289,9 @@ export class LocalProver implements Prover {
             attempts++;
             this.log(`блок ${job.number}: ${reason} — повтор ${attempts} из ${retries}`);
         }
-        try {
-            const proof = await importBatchProof(job, path.join(dir, 'proof-raw.json'), path.join(dir, 'fixture'), {
-                circuitsDir: DEFAULT_CIRCUITS_DIR,
-                ...this.options.import,
-            });
-            writeAtomically(path.join(dir, 'proof.json'), serialize(proof));
-            this.setStatus(job, { state: 'verified', attempts });
-            this.log(`блок ${job.number}: пруф построен, импортирован и сверен (${key})`);
-            return proof;
-        } catch (error) {
-            this.setStatus(job, { state: 'failed', attempts, reason: (error as Error).message });
-            throw error;
-        }
+        const proof = await this.queue.importVerified(job, attempts, this.options.import);
+        this.log(`блок ${job.number}: пруф построен, импортирован и сверен (${key})`);
+        return proof;
     }
 
     private spawnGuard(job: ProverJob, rawProof: string): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {

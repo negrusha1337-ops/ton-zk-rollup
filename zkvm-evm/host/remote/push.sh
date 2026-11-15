@@ -76,11 +76,12 @@ if [ "$TARGET" = "--dry-run" ]; then
 fi
 
 # На сервере: прежний набор убирается целиком (лишний файл исходников сменил бы их хеш), кэш
-# сборки (zkvm-evm/target) и результаты (remote-out) остаются.
+# сборки (zkvm-evm/target), результаты (remote-out) и задания сервиса-секвенсора (remote-jobs,
+# prove-job.sh) остаются.
 say "отправляю на $TARGET:~/$REMOTE_DIR"
 COPYFILE_DISABLE=1 tar -C "$STAGE" --no-xattrs --no-mac-metadata -czf - . | ssh -- "$TARGET" "set -e
 mkdir -p ~/$REMOTE_DIR && cd ~/$REMOTE_DIR
-find . -mindepth 1 -maxdepth 1 ! -name zkvm-evm ! -name remote-out -exec rm -rf {} +
+find . -mindepth 1 -maxdepth 1 ! -name zkvm-evm ! -name remote-out ! -name remote-jobs -exec rm -rf {} +
 if [ -d zkvm-evm ]; then find zkvm-evm -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} +; fi
 tar -xzf - --no-same-owner --warning=no-unknown-keyword
 sha256sum --quiet -c remote-input/MANIFEST.sha256 && echo '[push] на сервере файлы совпали с MANIFEST.sha256'"
