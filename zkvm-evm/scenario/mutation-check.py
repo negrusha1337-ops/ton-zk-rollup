@@ -53,6 +53,7 @@ CLASSIFY = "revm_refusals_are_classified_by_a_closed_list"
 SHAPE = "bridge_log_of_another_shape_is_an_error"
 FRONTIER = "frontier_root_equals_the_full_recomputation"
 PORTED = "ported_protocol_functions_equal_the_toy_ledger_library"
+PUBLIC_WORDS = "public_values_are_eleven_words_with_the_first_eight_as_before"
 BRIDGE_LOG_SHAPE = (
     "if topics.len() != 2 || topics[0] != WITHDRAWAL_TOPIC || topics[1][..12] != [0u8; 12] || data.len() != 64 {"
 )
@@ -163,7 +164,12 @@ MUTATIONS = [
      "if bytes.len() > FORCED_TX_MAX_BYTES {", "if bytes.len() >= FORCED_TX_MAX_BYTES {",
      "forced_transaction_longer_than_the_limit_is_skipped"),
     ("другой предел длины принудительной транзакции", LIB, "pub const FORCED_TX_MAX_BYTES: usize = 256;",
-     "pub const FORCED_TX_MAX_BYTES: usize = 257;", "forced_transaction_longer_than_the_limit_is_skipped"),
+     "pub const FORCED_TX_MAX_BYTES: usize = 257;", "constants_shared_with_the_contract_are_equal"),
+    ("предел длины принудительной транзакции не проверяется (в батче)", FORCED,
+     "if bytes.len() > FORCED_TX_MAX_BYTES {", "if bytes.len() > FORCED_TX_MAX_BYTES + 1 {",
+     "element_over_the_length_limit_is_skipped_and_at_the_limit_is_parsed"),
+    ("принудительная EIP-1559 недопустима", FORCED, "TxType::Legacy | TxType::Eip2930 | TxType::Eip1559",
+     "TxType::Legacy | TxType::Eip2930", "bridge_call_of_each_ordinary_type_is_well_formed"),
     ("хвост после транзакции допустим", FORCED,
      "TransactionSigned::decode_2718_exact(bytes).map_err(|_| SkipReason::Undecodable)?;",
      "TransactionSigned::decode_2718(&mut &bytes[..]).map_err(|_| SkipReason::Undecodable)?;",
@@ -208,6 +214,11 @@ MUTATIONS = [
 """, "", "bytecode_longer_than_its_bytes_is_rejected"),
     ("форма узлов дерева не проверяется", EXECUTE, "    check_state_tries(&input.parent_state)?;\n", "",
      "witness_node_with_another_reading_is_rejected"),
+    ("ветка глубже длины ключа допустима", WITNESS, "if depth >= KEY_NIBBLES {", "if false {",
+     "branch_deeper_than_the_key_is_rejected"),
+    ("нераскрытый узел на пути чтения — «ключа нет» (копия rsp-mpt)", MPT,
+     "            MptNodeData::Digest(digest) => Err(Error::NodeNotResolved(*digest)),",
+     "            MptNodeData::Digest(_) => Ok(None),", "hidden_sender_account_is_not_an_absent_account"),
     ("деревья хранилищ не обходятся", WITNESS,
      """    for trie in state.storage_tries.values() {
         check_trie(trie)?;
@@ -309,6 +320,8 @@ MUTATIONS = [
      "transaction_with_delegation_is_rejected"),
     ("транзакции EIP-2930 недопустимы", LIB, "TxType::Legacy | TxType::Eip2930 | TxType::Eip1559",
      "TxType::Legacy | TxType::Eip1559", "ordinary_transaction_types_pass_the_type_check"),
+    ("обычные транзакции недопустимы", LIB, "TxType::Legacy | TxType::Eip2930 | TxType::Eip1559",
+     "TxType::Eip2930 | TxType::Eip1559", "ordinary_transaction_types_pass_the_type_check"),
     ("транзакции EIP-1559 недопустимы", LIB, "TxType::Legacy | TxType::Eip2930 | TxType::Eip1559",
      "TxType::Legacy | TxType::Eip2930", "ordinary_transaction_types_pass_the_type_check"),
     ("blob-транзакции допустимы", LIB, BLOB_CHECK,
@@ -336,7 +349,24 @@ MUTATIONS = [
      "batch_data_hash(&data_chunks).map_err(|_| EvmBatchError::DataChunkTooLarge)?;",
      "batch_data_hash(&block_data_chunks(&block.current_block)).map_err(|_| EvmBatchError::DataChunkTooLarge)?;",
      "batch_hash_commits_to_the_chunks_as_published"),
+    ("итоговая длина данных не сверяется", LIB, "    if offset != encoded.len() {\n", "    if false {\n",
+     "data_chunks_must_concatenate_to_the_block"),
+    ("содержимое порций данных не сверяется", LIB,
+     "if end > encoded.len() || encoded[offset..end] != chunk[..] {", "if end > encoded.len() {",
+     "data_chunks_must_concatenate_to_the_block"),
+    ("выход порции данных за конец блока не проверяется", LIB,
+     "if end > encoded.len() || encoded[offset..end] != chunk[..] {",
+     "if false || encoded[offset..end] != chunk[..] {",
+     "data_chunks_must_concatenate_to_the_block"),
+    ("предел порции данных не проверяется", PROTOCOL, "if chunk.len() > MAX_DATA_CHUNK_BYTES {", "if false {",
+     "data_chunk_is_limited"),
+    ("предел порции данных — нестрогий", PROTOCOL, "if chunk.len() > MAX_DATA_CHUNK_BYTES {",
+     "if chunk.len() >= MAX_DATA_CHUNK_BYTES {", "data_chunk_is_limited"),
+    ("другой предел порции данных", PROTOCOL, "pub const MAX_DATA_CHUNK_BYTES: usize = 60_000;",
+     "pub const MAX_DATA_CHUNK_BYTES: usize = 60_001;", "data_chunk_is_limited"),
     # --- очередь L1
+    ("хеш очереди считается от нуля, а не от прежнего хеша", LIB, "    let mut hash = *prev_deposit_hash;\n",
+     "    let mut hash = { let _ = prev_deposit_hash; [0u8; 32] };\n", "deposits_matching_the_queue_extend_its_hash"),
     ("нет сверки очереди с блоком", LIB,
      "let new_deposit_hash = check_queue(credits, &queue_items, &prev_deposit_hash)?;",
      "let new_deposit_hash = { let _ = (credits, &queue_items); prev_deposit_hash };",
@@ -409,6 +439,13 @@ MUTATIONS = [
     ("сумма вывода обрезается до 128 бит", BRIDGE,
      "u128::try_from(U256::from_be_slice(&data[32..])).map_err(|_| MalformedBridgeLog)?;",
      "U256::from_be_slice(&data[32..64]).wrapping_to::<u128>();", SHAPE),
+    ("получатель вывода читается из второго слова данных лога", BRIDGE,
+     "    recipient_hash.copy_from_slice(&data[..32]);", "    recipient_hash.copy_from_slice(&data[32..]);",
+     "withdrawal_is_read_from_the_bridge_log"),
+    ("сумма вывода читается из первого слова данных лога", BRIDGE,
+     "u128::try_from(U256::from_be_slice(&data[32..])).map_err(|_| MalformedBridgeLog)?;",
+     "u128::try_from(U256::from_be_slice(&data[..32])).map_err(|_| MalformedBridgeLog)?;",
+     "withdrawal_is_read_from_the_bridge_log"),
     ("другой адрес моста", BRIDGE, 'Address::new(*b"ton-zk-rollup-bridge")', 'Address::new(*b"ton-zk-rollup-bridgf")',
      "bridge_constants_follow_from_the_bytecode"),
     ("другое событие моста", BRIDGE,
@@ -492,6 +529,27 @@ MUTATIONS = [
      "    let block_timestamp = block.current_block.header.timestamp;\n",
      "    let block_timestamp = block.ancestor_headers.first().map_or(0, |parent| parent.timestamp);\n",
      "block_timestamp_word_is_the_time_in_the_header"),
+    ("число в слове — от младшего байта", PROTOCOL, "    out[16..].copy_from_slice(&value.to_be_bytes());",
+     "    out[16..].copy_from_slice(&value.to_le_bytes());", "amounts_and_counts_are_hashed_as_big_endian_words"),
+    ("число в старшей половине слова", PROTOCOL, "    out[16..].copy_from_slice(&value.to_be_bytes());",
+     "    out[..16].copy_from_slice(&value.to_be_bytes());", "amounts_and_counts_are_hashed_as_big_endian_words"),
+    ("адрес получателя депозита — в старших байтах слова", PROTOCOL, "    out[12..].copy_from_slice(address);",
+     "    out[..20].copy_from_slice(address);", PORTED),
+    ("слова chainId и прежнего состояния переставлены в байтах", PROTOCOL,
+     "            word(self.chain_id as u128),\n            self.prev_state_root,",
+     "            self.prev_state_root,\n            word(self.chain_id as u128),", PUBLIC_WORDS),
+    ("слова состояния переставлены в байтах", PROTOCOL,
+     "            self.prev_state_root,\n            self.new_state_root,",
+     "            self.new_state_root,\n            self.prev_state_root,", PUBLIC_WORDS),
+    ("слова хеша данных и прежнего корня выводов переставлены в байтах", PROTOCOL,
+     "            self.batch_hash,\n            self.prev_withdrawals_root,",
+     "            self.prev_withdrawals_root,\n            self.batch_hash,", PUBLIC_WORDS),
+    ("слова корней выводов переставлены в байтах", PROTOCOL,
+     "            self.prev_withdrawals_root,\n            self.withdrawals_root,",
+     "            self.withdrawals_root,\n            self.prev_withdrawals_root,", PUBLIC_WORDS),
+    ("слова хеша очереди переставлены в байтах", PROTOCOL,
+     "            self.prev_deposit_hash,\n            self.new_deposit_hash,",
+     "            self.new_deposit_hash,\n            self.prev_deposit_hash,", PUBLIC_WORDS),
     ("слова счётчиков выводов переставлены в байтах", PROTOCOL,
      "            word(self.prev_withdrawals_count as u128),\n            word(self.withdrawals_count as u128),",
      "            word(self.withdrawals_count as u128),\n            word(self.prev_withdrawals_count as u128),",
@@ -535,7 +593,8 @@ def run_tests():
     if result.returncode == 0:
         return "ok", []
     output = result.stdout + result.stderr
-    failed = sorted(set(re.findall(r"^test (\S+) \.\.\. FAILED", output, flags=re.M)))
+    # У теста с #[should_panic] строка другая: «test имя - should panic ... FAILED».
+    failed = sorted(set(re.findall(r"^test (\S+)(?: - should panic)? \.\.\. FAILED", output, flags=re.M)))
     if failed:
         return "tests", failed
     return "build", [line for line in output.splitlines() if line.startswith("error")][:3]

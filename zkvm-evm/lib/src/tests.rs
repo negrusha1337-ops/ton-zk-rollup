@@ -191,6 +191,36 @@ fn data_chunks_must_concatenate_to_the_block() {
     changed[1][0] ^= 1;
     assert_eq!(check_block_data(&encoded, &changed), Err(EvmBatchError::DataMismatch));
     assert_eq!(check_block_data(&encoded, &[]), Err(EvmBatchError::DataMismatch));
+    // Каждое из трёх условий по отдельности. Порции короче блока, но байты верные: ловит только
+    // сверка итоговой длины.
+    assert_eq!(check_block_data(&encoded, &[encoded[..100].to_vec(), encoded[100..150].to_vec()]), Err(EvmBatchError::DataMismatch));
+    // Длина верная, байт другой — в первой, в средней и в последней порции: ловит только сверка содержимого.
+    for (chunk, byte) in [(0usize, 0usize), (1, 3), (2, 49)] {
+        let mut chunks = vec![encoded[..50].to_vec(), encoded[50..150].to_vec(), encoded[150..].to_vec()];
+        chunks[chunk][byte] ^= 0x80;
+        assert_eq!(check_block_data(&encoded, &chunks), Err(EvmBatchError::DataMismatch), "порция {chunk}");
+    }
+    // Порция выходит за конец блока: отказ, а не паника на срезе, — в том числе когда начало
+    // порции совпадает с хвостом блока, и когда порция начинается ровно за концом.
+    let mut overrun = split(150);
+    overrun[1].extend_from_slice(&[0, 0]);
+    assert_eq!(check_block_data(&encoded, &overrun), Err(EvmBatchError::DataMismatch));
+    assert_eq!(check_block_data(&encoded, &[encoded.clone(), vec![7]]), Err(EvmBatchError::DataMismatch));
+    // Пустые порции между непустыми ничего не меняют.
+    assert_eq!(check_block_data(&encoded, &[vec![], encoded[..9].to_vec(), vec![], encoded[9..].to_vec(), vec![]]), Ok(()));
+}
+
+#[test]
+fn data_chunk_is_limited() {
+    // Предел порции — ровно MAX_DATA_CHUNK_BYTES: столько помещается во внешнее сообщение TON.
+    assert_eq!(crate::MAX_DATA_CHUNK_BYTES, 60_000);
+    let at_limit = vec![vec![1u8; 10], vec![0u8; crate::MAX_DATA_CHUNK_BYTES]];
+    assert!(batch_data_hash(&at_limit).is_ok());
+    for position in 0..2 {
+        let mut over = at_limit.clone();
+        over[position] = vec![0u8; crate::MAX_DATA_CHUNK_BYTES + 1];
+        assert_eq!(batch_data_hash(&over), Err(crate::protocol::DataChunkTooLarge), "порция {position}");
+    }
 }
 
 // ---------------------------------------------------------------- дерево выводов
@@ -704,8 +734,8 @@ fn revm_refusals_are_classified_by_a_closed_list() {
         (Refusal::PriorityFeeGreaterThanMaxFee, InvalidReason::PriorityFeeAboveMaxFee),
         (Refusal::CallGasCostMoreThanGasLimit { initial_gas: 2, gas_limit: 1 }, InvalidReason::IntrinsicGas),
     ];
-    for (refusal, reason) in skipped {
-        assert_eq!(classify_invalid(&refusal), Some(reason), "{refusal:?}");
+    for (refusal, reason) in &skipped {
+        assert_eq!(classify_invalid(refusal), Some(*reason), "{refusal:?}");
     }
     // Всё остальное — ошибка батча: после проверок формы недостижимо, и молчаливый пропуск
     // скрыл бы расхождение программы с узлом.
@@ -721,6 +751,8 @@ fn revm_refusals_are_classified_by_a_closed_list() {
         Refusal::Eip1559NotSupported,
         Refusal::Eip4844NotSupported,
         Refusal::Eip7702NotSupported,
+        Refusal::Eip7873NotSupported,
+        Refusal::Eip7873MissingTarget,
         Refusal::BlobVersionedHashesNotSupported,
         Refusal::MaxFeePerBlobGasNotSupported,
         Refusal::EmptyBlobs,
@@ -733,9 +765,56 @@ fn revm_refusals_are_classified_by_a_closed_list() {
         Refusal::EmptyAuthorizationList,
         Refusal::Str("другое".into()),
     ];
-    for refusal in batch_errors {
-        assert_eq!(classify_invalid(&refusal), None, "{refusal:?}");
+    for refusal in &batch_errors {
+        assert_eq!(classify_invalid(refusal), None, "{refusal:?}");
     }
+
+    // Оба перечня вместе покрывают ВСЕ варианты `InvalidTransaction` этой версии revm. Разбор
+    // ниже — без ветки «прочее»: новый вариант в revm не даст тесту собраться, пока его не
+    // отнесут к пропускам или к ошибкам батча. Номера — по порядку объявления в revm
+    // (revm-context-interface, src/result.rs).
+    fn variant(refusal: &Refusal) -> usize {
+        match refusal {
+            Refusal::PriorityFeeGreaterThanMaxFee => 0,
+            Refusal::GasPriceLessThanBasefee => 1,
+            Refusal::CallerGasLimitMoreThanBlock => 2,
+            Refusal::CallGasCostMoreThanGasLimit { .. } => 3,
+            Refusal::GasFloorMoreThanGasLimit { .. } => 4,
+            Refusal::RejectCallerWithCode => 5,
+            Refusal::LackOfFundForMaxFee { .. } => 6,
+            Refusal::OverflowPaymentInTransaction => 7,
+            Refusal::NonceOverflowInTransaction => 8,
+            Refusal::NonceTooHigh { .. } => 9,
+            Refusal::NonceTooLow { .. } => 10,
+            Refusal::CreateInitCodeSizeLimit => 11,
+            Refusal::InvalidChainId => 12,
+            Refusal::MissingChainId => 13,
+            Refusal::TxGasLimitGreaterThanCap { .. } => 14,
+            Refusal::AccessListNotSupported => 15,
+            Refusal::MaxFeePerBlobGasNotSupported => 16,
+            Refusal::BlobVersionedHashesNotSupported => 17,
+            Refusal::BlobGasPriceGreaterThanMax { .. } => 18,
+            Refusal::EmptyBlobs => 19,
+            Refusal::BlobCreateTransaction => 20,
+            Refusal::TooManyBlobs { .. } => 21,
+            Refusal::BlobVersionNotSupported => 22,
+            Refusal::AuthorizationListNotSupported => 23,
+            Refusal::AuthorizationListInvalidFields => 24,
+            Refusal::EmptyAuthorizationList => 25,
+            Refusal::Eip2930NotSupported => 26,
+            Refusal::Eip1559NotSupported => 27,
+            Refusal::Eip4844NotSupported => 28,
+            Refusal::Eip7702NotSupported => 29,
+            Refusal::Eip7873NotSupported => 30,
+            Refusal::Eip7873MissingTarget => 31,
+            Refusal::Str(_) => 32,
+        }
+    }
+    const VARIANTS: usize = 33;
+    let covered: std::collections::BTreeSet<usize> =
+        skipped.iter().map(|(refusal, _)| variant(refusal)).chain(batch_errors.iter().map(variant)).collect();
+    assert_eq!(covered, (0..VARIANTS).collect(), "в перечнях теста нет какого-то варианта InvalidTransaction");
+    assert_eq!(skipped.len() + batch_errors.len(), VARIANTS, "вариант стоит в перечнях дважды");
 }
 
 /// Вход батча из фикстуры сценария Reth.
@@ -812,10 +891,60 @@ fn constants_shared_with_the_contract_are_equal() {
     // принудительной транзакции и хеш заголовка генезиса.
     assert_eq!(contract_constant("MAX_BATCH_QUEUE_ITEMS"), MAX_BATCH_QUEUE_ITEMS.to_string());
     assert_eq!(MAX_BATCH_QUEUE_ITEMS, 32);
+    // Предел длины принудительной транзакции: контракт не ставит в очередь длиннее, программа
+    // длиннее не разбирает. Разойдись они — либо контракт пускал бы элементы, которые программа
+    // читает без пользы, либо действительный вывод из очереди был бы пропущен.
+    assert_eq!(contract_constant("MAX_FORCED_TX_BYTES"), FORCED_TX_MAX_BYTES.to_string());
     assert_eq!(contract_constant("WITHDRAWAL_TREE_DEPTH"), WITHDRAWAL_TREE_DEPTH.to_string());
     assert_eq!(contract_constant("FORCED_TRANSACTION_MARKER"), "1 << 255");
     assert_eq!(FORCED_TRANSACTION_MARKER[0], 1 << 7);
     assert_eq!(FORCED_TRANSACTION_MARKER[1..], [0u8; 31]);
     assert_eq!(contract_constant("GENESIS_HASH"), format!("{}", crate::GENESIS_HASH));
     assert_eq!(GAS_LIMIT, 30_000_000);
+}
+
+// ---------------------------------------------------------------- свидетель: глубина дерева
+
+#[test]
+fn branch_deeper_than_the_key_is_rejected() {
+    use rsp_mpt::{EthereumState, MptNode, MptNodeData};
+
+    use crate::witness::check_state_tries;
+
+    // Ключ — 64 полубайта: ветка может стоять на глубинах 0…63, а её потомки-листья — на
+    // глубине 64 с пустым остатком пути. Цепочка веток: в каждой потомок 0 — следующая ветка,
+    // потомок 1 — нераскрытый сосед. `depth` — глубина самой нижней ветки.
+    fn chain(depth: usize, bottom: MptNode) -> MptNode {
+        let digest = || Some(Box::new(MptNode::from(MptNodeData::Digest(B256::repeat_byte(7)))));
+        let mut node = bottom;
+        for _ in 0..depth {
+            let mut children: [Option<Box<MptNode>>; 16] = Default::default();
+            children[0] = Some(Box::new(node));
+            children[1] = digest();
+            node = MptNode::from(MptNodeData::Branch(children));
+        }
+        node
+    }
+    let branch_of = |children: Vec<MptNode>| {
+        let mut slots: [Option<Box<MptNode>>; 16] = Default::default();
+        for (index, child) in children.into_iter().enumerate() {
+            slots[index] = Some(Box::new(child));
+        }
+        MptNode::from(MptNodeData::Branch(slots))
+    };
+    let state = |state_trie: MptNode| EthereumState { state_trie, storage_tries: Default::default() };
+    let leaf = || MptNode::from(MptNodeData::Leaf(vec![0x20], vec![1]));
+    let digest = || MptNode::from(MptNodeData::Digest(B256::repeat_byte(9)));
+
+    // Самая глубокая допустимая ветка — на глубине 63: её листья стоят ровно на глубине ключа.
+    let deepest = chain(63, branch_of(vec![leaf(), leaf()]));
+    assert_eq!(check_state_tries(&state(deepest)), Ok(()));
+    // Ветка на глубине 64 — глубже ключа: под ней «ключи» длиннее 32 байт. Потомки — нераскрытые
+    // узлы, так что отказ может прийти только от проверки глубины ветки.
+    let too_deep = chain(64, branch_of(vec![digest(), digest()]));
+    assert_eq!(check_state_tries(&state(too_deep.clone())), Err(EvmBatchError::Witness("ветка глубже длины ключа".into())));
+    // То же в дереве хранилища.
+    let mut storage = state(MptNode::from(MptNodeData::Null));
+    storage.storage_tries.insert(B256::repeat_byte(1), too_deep);
+    assert_eq!(check_state_tries(&storage), Err(EvmBatchError::Witness("ветка глубже длины ключа".into())));
 }

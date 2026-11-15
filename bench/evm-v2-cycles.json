@@ -13,6 +13,10 @@
     "fullSegmentOfLongestCycles": 20757803,
     "emptyBlockCycles": 7754015
   },
+  "beforeContractLengthLimit": {
+    "fullSegmentOfLongestSkippedCycles": 12870157,
+    "emptyBlockCycles": 7752577
+  },
   "blocks": [
     {
       "number": 1,
@@ -38,33 +42,33 @@
       "withdrawals": 2,
       "gasUsed": 394034,
       "dataBytes": 1704,
-      "zkvmCycles": 9091276
+      "zkvmCycles": 9079774
     },
     {
       "number": 3,
       "note": "пропуски по каждой причине; выводы из контракта L2, откатившийся кадр, DELEGATECALL",
-      "transactions": 8,
-      "queueItems": 21,
+      "transactions": 9,
+      "queueItems": 31,
       "forcedIncluded": 3,
-      "forcedSkipped": 18,
+      "forcedSkipped": 28,
       "deposits": 0,
       "withdrawals": 3,
-      "gasUsed": 259737,
-      "dataBytes": 1791,
-      "zkvmCycles": 9919208
+      "gasUsed": 281300,
+      "dataBytes": 1946,
+      "zkvmCycles": 10307795
     },
     {
       "number": 4,
-      "note": "обнуление слота рядом с веткой (7-1)",
-      "transactions": 1,
+      "note": "обнуление слота рядом с веткой (7-1); откат моста без логов",
+      "transactions": 2,
       "queueItems": 0,
       "forcedIncluded": 0,
       "forcedSkipped": 0,
       "deposits": 0,
       "withdrawals": 0,
-      "gasUsed": 21349,
-      "dataBytes": 735,
-      "zkvmCycles": 8032595
+      "gasUsed": 42944,
+      "dataBytes": 891,
+      "zkvmCycles": 8174445
     },
     {
       "number": 5,
@@ -77,7 +81,7 @@
       "withdrawals": 0,
       "gasUsed": 21349,
       "dataBytes": 735,
-      "zkvmCycles": 8040857
+      "zkvmCycles": 8042645
     },
     {
       "number": 6,
@@ -90,7 +94,7 @@
       "withdrawals": 0,
       "gasUsed": 0,
       "dataBytes": 583,
-      "zkvmCycles": 7752577
+      "zkvmCycles": 7761771
     },
     {
       "number": 7,
@@ -102,8 +106,8 @@
       "deposits": 0,
       "withdrawals": 32,
       "gasUsed": 744320,
-      "dataBytes": 5547,
-      "zkvmCycles": 13601004
+      "dataBytes": 5548,
+      "zkvmCycles": 13584723
     },
     {
       "number": 8,
@@ -116,7 +120,7 @@
       "withdrawals": 0,
       "gasUsed": 0,
       "dataBytes": 583,
-      "zkvmCycles": 10002070
+      "zkvmCycles": 9998219
     },
     {
       "number": 9,
@@ -129,7 +133,7 @@
       "withdrawals": 0,
       "gasUsed": 0,
       "dataBytes": 1513,
-      "zkvmCycles": 8857377
+      "zkvmCycles": 8903039
     },
     {
       "number": 10,
@@ -142,7 +146,7 @@
       "withdrawals": 0,
       "gasUsed": 0,
       "dataBytes": 583,
-      "zkvmCycles": 7914858
+      "zkvmCycles": 7922468
     },
     {
       "number": 11,
@@ -155,11 +159,24 @@
       "withdrawals": 0,
       "gasUsed": 0,
       "dataBytes": 583,
-      "zkvmCycles": 7872827
+      "zkvmCycles": 7880959
     },
     {
       "number": 12,
-      "note": "полный отрезок: принудительные наибольшей длины, пропущены по длине",
+      "note": "полный отрезок элементов наибольшей длины: мусор и включённые выводы со списком доступа",
+      "transactions": 8,
+      "queueItems": 32,
+      "forcedIncluded": 8,
+      "forcedSkipped": 24,
+      "deposits": 0,
+      "withdrawals": 8,
+      "gasUsed": 258880,
+      "dataBytes": 2660,
+      "zkvmCycles": 9785985
+    },
+    {
+      "number": 13,
+      "note": "полный отрезок: вызовы моста с негодными подписями",
       "transactions": 0,
       "queueItems": 32,
       "forcedIncluded": 0,
@@ -168,26 +185,65 @@
       "withdrawals": 0,
       "gasUsed": 0,
       "dataBytes": 583,
-      "zkvmCycles": 12870157
+      "zkvmCycles": 8756631
+    },
+    {
+      "number": 14,
+      "note": "полный отрезок: мусор наибольшей длины",
+      "transactions": 0,
+      "queueItems": 32,
+      "forcedIncluded": 0,
+      "forcedSkipped": 32,
+      "deposits": 0,
+      "withdrawals": 0,
+      "gasUsed": 0,
+      "dataBytes": 583,
+      "zkvmCycles": 8049795
+    },
+    {
+      "number": 15,
+      "note": "полный отрезок: годные по форме вызовы наибольшей длины от счетов, которых нет",
+      "transactions": 0,
+      "queueItems": 32,
+      "forcedIncluded": 0,
+      "forcedSkipped": 32,
+      "deposits": 0,
+      "withdrawals": 0,
+      "gasUsed": 0,
+      "dataBytes": 583,
+      "zkvmCycles": 10566575
     }
   ],
-  "emptyBlockCycles": 7752577,
+  "emptyBlockCycles": 7761771,
   "forcedWithdrawalGas": 23260,
+  "forcedWithdrawalLongestGas": 32360,
   "cyclesPerQueueItem": {
-    "forcedWithdrawalIncluded": 182763,
-    "forcedSkippedByRevm": 70297,
-    "deposit": 34525,
-    "forcedSkippedByForm": 5071,
-    "forcedSkippedLongest": 159924
+    "forcedWithdrawalIncluded": 181967,
+    "forcedSkippedByRevm": 69889,
+    "deposit": 35665,
+    "forcedSkippedByForm": 5022,
+    "forcedSkippedBadSignature": 31089,
+    "forcedSkippedLongest": 9001,
+    "forcedWithdrawalIncludedLongest": 226024,
+    "forcedRefusedLongestAbsentSender": 87650
   },
   "fullSegmentWorstCase": {
-    "cycles": 13601004,
-    "overEmptyBlock": 5848427,
-    "ratioToEmptyBlock": 1.754
+    "cycles": 13584723,
+    "overEmptyBlock": 5822952,
+    "ratioToEmptyBlock": 1.75
   },
   "fullSegmentOfRefused": {
-    "cycles": 10002070,
-    "overEmptyBlock": 2249493,
-    "ratioToEmptyBlock": 1.29
+    "block": 15,
+    "what": "полный отрезок: годные по форме вызовы наибольшей длины от счетов, которых нет",
+    "comparedBlocks": [
+      8,
+      10,
+      13,
+      14,
+      15
+    ],
+    "cycles": 10566575,
+    "overEmptyBlock": 2804804,
+    "ratioToEmptyBlock": 1.361
   }
 }

@@ -23,7 +23,7 @@ use rollup_evm::{
     protocol::{batch_data_hash, deposit_hash, forced_transaction_hash},
     BatchOutcome, Deposit, EvmBatchError, EvmBatchInput, ForcedOutcome, FrontierError, Hash, InvalidReason,
     PublicValues, QueueItem, SkipReason, WithdrawalLeaf, WithdrawalTree, BRIDGE_ADDRESS, BRIDGE_CODE,
-    BRIDGE_CODE_HASH, GAS_LIMIT, GENESIS_HASH, MAX_BATCH_QUEUE_ITEMS, MAX_DATA_CHUNK_BYTES, MAX_WITHDRAWALS,
+    BRIDGE_CODE_HASH, FORCED_TX_MAX_BYTES, GAS_LIMIT, GENESIS_HASH, MAX_BATCH_QUEUE_ITEMS, MAX_DATA_CHUNK_BYTES, MAX_WITHDRAWALS,
     WITHDRAWAL_TREE_DEPTH,
 };
 use rsp_mpt::{MptNode, MptNodeData};
@@ -195,12 +195,20 @@ fn reseal_parent(input: &mut EvmBatchInput) {
 /// Корень состояния блока после правки состояния родителя. Его называет сама программа в отказе
 /// (вычисленный исполнением); тесты, которые этим пользуются, проверяют не корень, а то, что
 /// происходит ПОСЛЕ успешного исполнения либо до него.
+///
+/// Отказ обязан быть именно несовпадением корня: любой другой исход значит, что правка
+/// сломала вход раньше исполнения (или не изменила состояние вовсе), и тест, который
+/// продолжил бы с таким входом, проверял бы не то.
+#[track_caller]
 fn settle_state_root(mut input: EvmBatchInput) -> EvmBatchInput {
-    if let Err(EvmBatchError::MismatchedStateRoot { computed, .. }) = process_evm_batch(input.clone()) {
-        input.block.current_block.header.state_root = B256::from(computed);
-        republish(&mut input);
+    match process_evm_batch(input.clone()) {
+        Err(EvmBatchError::MismatchedStateRoot { computed, .. }) => {
+            input.block.current_block.header.state_root = B256::from(computed);
+            republish(&mut input);
+            input
+        }
+        other => panic!("после правки состояния родителя ожидалось несовпадение корня состояния, получено {other:?}"),
     }
-    input
 }
 
 /// Тестовый ключ, чьему счёту есть место в раскрытой части дерева состояния родителя: путь к
@@ -311,8 +319,8 @@ fn scenario_covers_what_the_tests_rely_on() {
         assert_eq!(values.prev_deposit_hash, values.new_deposit_hash);
         assert_ne!(values.new_deposit_hash, [0u8; 32]);
     }
-    // Блоки 7–10 и 12: отрезок ровно в предел.
-    for block in [7, 8, 9, 10, 12] {
+    // Блоки 7–10 и 12–15: отрезок ровно в предел.
+    for block in [7, 8, 9, 10, 12, 13, 14, 15] {
         let (from, up_to) = segment(block);
         assert_eq!(up_to - from, MAX_BATCH_QUEUE_ITEMS, "блок {block}");
     }
@@ -360,11 +368,14 @@ fn forced_transactions_end_up_as_the_scenario_says() {
         included += in_block.len();
         seen.extend(actual);
     }
-    assert_eq!(included, 4 + MAX_BATCH_QUEUE_ITEMS);
-    // Причины, достижимые на настоящем узле: по каждой есть элемент очереди.
+    // Блок 2 — одна, блок 3 — три, блок 7 — полный отрезок, блок 12 — каждая четвёртая.
+    assert_eq!(included, 4 + MAX_BATCH_QUEUE_ITEMS + MAX_BATCH_QUEUE_ITEMS / 4);
+    // Причины, достижимые с настоящим контрактом: по каждой есть элемент очереди. Пропуска по
+    // длине среди них нет: элемент длиннее предела контракт в очередь не ставит (нативный тест —
+    // `element_over_the_length_limit_is_skipped_and_at_the_limit_is_parsed`).
+    assert!(!seen.contains("Skipped(TooLong)"));
     let required = [
         "Included",
-        "Skipped(TooLong)",
         "Skipped(Undecodable)",
         "Skipped(UnsupportedType)",
         "Skipped(MissingChainId)",
@@ -402,11 +413,11 @@ fn duplicate_of_an_included_forced_transaction_is_skipped() {
 
 #[test]
 fn refused_forced_transactions_leave_no_trace_in_the_state() {
-    // Спайк 3. Блоки 8, 10, 11 и 12 — без транзакций и зачислений, в очереди только пропущенные
-    // принудительные (в блоке 8 все 32 дошли до revm и отвергнуты им). Корень состояния у узла
-    // после такого блока — тот же, что до него, и программа с ним согласна: отказ исполнения не
-    // оставляет следа ни в nonce, ни в балансе, ни в «тронутых» счетах.
-    for block in [8u64, 10, 11, 12] {
+    // Спайк 3. Блоки 8, 10, 11 и 13–15 — без транзакций и зачислений, в очереди только
+    // пропущенные принудительные (в блоках 8 и 15 все 32 дошли до revm и отвергнуты им). Корень
+    // состояния у узла после такого блока — тот же, что до него, и программа с ним согласна:
+    // отказ исполнения не оставляет следа ни в nonce, ни в балансе, ни в «тронутых» счетах.
+    for block in [8u64, 10, 11, 13, 14, 15] {
         let input = batch(block);
         assert!(input.block.current_block.body.transactions.is_empty());
         assert!(!forced_items(&input).is_empty());
@@ -420,10 +431,15 @@ fn refused_forced_transactions_leave_no_trace_in_the_state() {
     let revm_refused = outcome(8).forced;
     assert_eq!(revm_refused.len(), MAX_BATCH_QUEUE_ITEMS);
     assert!(revm_refused.iter().all(|outcome| *outcome == ForcedOutcome::Skipped(SkipReason::Invalid(InvalidReason::NonceTooHigh))));
-    // Блок 12: элементы наибольшей длины, какую контракт ставит в очередь (64 ячейки по 127 байт).
-    let longest = batch(12);
-    assert!(forced_items(&longest).iter().all(|bytes| bytes.len() == 64 * 127));
-    assert!(outcome(12).forced.iter().all(|outcome| *outcome == ForcedOutcome::Skipped(SkipReason::TooLong)));
+    // Блок 15: 32 разных отправителя, которых нет в дереве, — отказ revm по балансу у каждого.
+    let absent = outcome(15).forced;
+    assert_eq!(absent.len(), MAX_BATCH_QUEUE_ITEMS);
+    assert!(absent.iter().all(|outcome| *outcome == ForcedOutcome::Skipped(SkipReason::Invalid(InvalidReason::LackOfFunds))));
+    // Блоки 12, 14 и 15: все элементы — наибольшей длины, какую контракт ставит в очередь.
+    for block in [12u64, 14, 15] {
+        assert!(forced_items(&batch(block)).iter().all(|bytes| bytes.len() == FORCED_TX_MAX_BYTES), "блок {block}");
+    }
+    assert!(outcome(14).forced.iter().all(|outcome| *outcome == ForcedOutcome::Skipped(SkipReason::Undecodable)));
     // Блок 3: пропущенные вперемешку с включёнными и с транзакциями секвенсора; корень состояния
     // со слов узла, который пропущенных транзакций не видел вовсе.
     assert_eq!(outcome(3).values.new_state_root, node_hash(3));
@@ -624,6 +640,121 @@ fn sender_missing_from_the_state_is_skipped() {
     assert_eq!(outcome.forced, [ForcedOutcome::Skipped(SkipReason::Invalid(InvalidReason::NonceTooHigh))]);
 }
 
+/// Вызов моста от `sender` с данными такой длины, чтобы вся транзакция заняла ровно `length` байт.
+fn bridge_call_of_length(sender: &SigningKey, nonce: u64, length: usize) -> Vec<u8> {
+    let build = |data: usize| {
+        let mut transaction = bridge_call(nonce, 50_000_000, RECIPIENT);
+        transaction.input = Bytes::from(vec![0x5a; data]);
+        encoded(&sign(sender, transaction))
+    };
+    let mut data = length.saturating_sub(120);
+    for _ in 0..8 {
+        let actual = build(data).len();
+        if actual == length {
+            return build(data);
+        }
+        data = data + length - actual;
+    }
+    panic!("не удалось подобрать длину данных под {length} байт");
+}
+
+#[test]
+fn element_over_the_length_limit_is_skipped_and_at_the_limit_is_parsed() {
+    // Элемент длиннее FORCED_TX_MAX_BYTES в очередь настоящего контракта не попадёт (предел там
+    // тот же), поэтому в цепочке сценария его нет: вход подложен. Пустой блок 6, в очереди —
+    // вызовы моста одного и того же счёта длиной ровно в предел и на байт больше, и мусор тех же длин.
+    let mut input = batch(6);
+    assert!(input.block.current_block.body.transactions.is_empty() && input.queue_items.is_empty());
+    let sender = free_key(&input);
+    let at_limit = bridge_call_of_length(&sender, 5, FORCED_TX_MAX_BYTES);
+    let over = bridge_call_of_length(&sender, 5, FORCED_TX_MAX_BYTES + 1);
+    assert_eq!((at_limit.len(), over.len()), (256, 257));
+    let items = vec![over.clone(), at_limit.clone(), vec![0xff; 257], vec![0xff; 256]];
+    let queue = |items: &[Vec<u8>]| items.iter().cloned().map(QueueItem::ForcedTransaction).collect::<Vec<_>>();
+
+    // Счёта отправителя нет. 257 байт — пропуск по длине, без разбора; 256 — разобрана, подпись
+    // восстановлена, отказ пришёл уже от revm (nonce транзакции — 5, у отсутствующего счёта — 0).
+    input.queue_items = queue(&items);
+    let outcome = process_evm_batch(input.clone()).unwrap();
+    assert_eq!(
+        outcome.forced,
+        [
+            ForcedOutcome::Skipped(SkipReason::TooLong),
+            ForcedOutcome::Skipped(SkipReason::Invalid(InvalidReason::NonceTooHigh)),
+            ForcedOutcome::Skipped(SkipReason::TooLong),
+            ForcedOutcome::Skipped(SkipReason::Undecodable),
+        ]
+    );
+    // Пропущенные по длине входят в хеш очереди своими байтами, как и все прочие.
+    let expected_hash = items.iter().fold(input.prev_deposit_hash, |hash, bytes| forced_transaction_hash(&hash, bytes));
+    assert_eq!(outcome.values.new_deposit_hash, expected_hash);
+    assert_eq!(outcome.values.new_state_root, node_hash(6));
+
+    // Счёт с балансом и верным nonce: транзакция в 256 байт ДЕЙСТВИТЕЛЬНА, и её отсутствие в
+    // блоке — цензура; та же по смыслу транзакция в 257 байт пропущена. Блок 7 (его свидетель
+    // раскрывает счёт моста, который читает исполнение): в очереди вместо его отрезка — эти две.
+    let mut input = batch(7);
+    let sender = free_key(&input);
+    plant(&mut input, address_of(&sender), plain_account(5, NANOTON));
+    let at_limit = bridge_call_of_length(&sender, 5, FORCED_TX_MAX_BYTES);
+    let over = bridge_call_of_length(&sender, 5, FORCED_TX_MAX_BYTES + 1);
+    input.queue_items = queue(&[over.clone(), at_limit]);
+    assert_eq!(apply_evm_batch(input.clone()), Err(EvmBatchError::ForcedTransactionOmitted(1)));
+    // Одна лишь 257-байтовая: пропущена, и батч доходит до сверки корня состояния (очередь
+    // другая, состояние родителя с подсаженным счётом — отказ уже не про цензуру).
+    input.queue_items = queue(&[over]);
+    assert!(matches!(apply_evm_batch(input), Err(EvmBatchError::MismatchedStateRoot { .. })));
+}
+
+#[test]
+fn bridge_calls_with_bad_signatures_are_skipped_as_the_scenario_says() {
+    // Вызовы моста с негодными подписями (находка Н-1 круга 15): сценарий строил каждый под свой
+    // вид и сам проверил, что ключ не восстанавливается (или восстанавливается в другой адрес).
+    // Здесь — что решает программа нативно; в zkVM те же блоки исполнены хостом (отчёты block-N.json).
+    let cases = expected()["badSignatures"].as_array().unwrap().clone();
+    let kinds = |block: u64| -> BTreeSet<String> {
+        cases.iter().filter(|case| case["block"] == block).map(|case| case["kind"].as_str().unwrap().to_string()).collect()
+    };
+    let required: BTreeSet<String> = [
+        "rNotOnCurve", "rZero", "sZero", "rOrder", "rOrderPlusOne", "rFieldModulus", "rMax", "sOrder", "vFlipped", "degenerate",
+    ]
+    .iter()
+    .map(|kind| kind.to_string())
+    .collect();
+    // Блок 3 идёт в пруф: в нём есть каждый вид. Блок 13 — замер: полный отрезок.
+    assert_eq!(kinds(3), required);
+    assert_eq!(kinds(13), required);
+    assert_eq!(cases.iter().filter(|case| case["block"] == 13).count(), MAX_BATCH_QUEUE_ITEMS);
+    let queue = l1_queue();
+    let other = address(&expected()["other"]);
+    for case in &cases {
+        let block = case["block"].as_u64().unwrap();
+        let number = case["queueNumber"].as_u64().unwrap() as usize;
+        let kind = case["kind"].as_str().unwrap();
+        let bytes = case["bytes"].as_str().unwrap().parse::<Bytes>().unwrap().to_vec();
+        assert_eq!(queue[number - 1], QueueItem::ForcedTransaction(bytes.clone()), "{kind}: элемент очереди {number}");
+        let (from, up_to) = segment(block);
+        assert!(number > from && number <= up_to, "{kind}: элемент {number} не в отрезке блока {block}");
+        // Что стало с элементом в батче: место среди принудительных отрезка.
+        let position = queue[from..number - 1].iter().filter(|item| matches!(item, QueueItem::ForcedTransaction(_))).count();
+        let actual = format!("{:?}", outcome(block).forced[position]);
+        assert_eq!(actual, case["expected"].as_str().unwrap(), "блок {block}, {kind}");
+        // И на уровне проверки формы: ключ не восстанавливается, а у перевёрнутого v —
+        // восстанавливается в посторонний адрес, названный сценарием, а не в адрес счёта B.
+        let decoded = rollup_evm::forced::decode_forced_transaction(&bytes, CHAIN_ID, rollup_evm::FORCED_TX_GAS_CAP)
+            .map(|transaction| transaction.signer());
+        if kind == "vFlipped" {
+            let recovered = decoded.unwrap();
+            assert_eq!(recovered, address(&case["recoversTo"]));
+            assert_ne!(recovered, other);
+            assert_eq!(actual, "Skipped(Invalid(LackOfFunds))");
+        } else {
+            assert_eq!(decoded, Err(SkipReason::Signature), "{kind}");
+            assert!(case["recoversTo"].is_null());
+        }
+    }
+}
+
 /// Заменить узел на пути `nibbles` его дайджестом: дерево с тем же корнем, но с нераскрытым
 /// местом. Возвращает `None`, если путь кончился раньше (ключа нет, скрывать нечего).
 fn hide(node: &MptNode, nibbles: &[u8], depth: usize) -> Option<MptNode> {
@@ -798,6 +929,7 @@ fn withdrawals_are_the_bridge_logs_the_node_reports() {
     assert_eq!(logs("мост откатывает"), (0, 0));
     assert_eq!(logs("нехватка газа"), (0, 0));
     assert_eq!(logs("31 байтом"), (0, 0));
+    assert_eq!(logs("не в целых нанотонах"), (0, 0), "сумма не кратна gwei: мост откатывает");
     // Фронтир после блока — вход следующего.
     for block in 1..block_count() {
         let after = outcome(block);
@@ -910,20 +1042,41 @@ fn bridge_log_counts_only_if_the_bridge_code_is_the_protocol_one() {
 
 #[test]
 fn bridge_code_is_checked_only_when_the_block_has_bridge_logs() {
-    // Контроль: блоки без логов моста проходят, каким бы ни был (и был ли раскрыт) счёт моста в
-    // свидетеле, — проверка кода условная. Без лога нет вывода, а значит и обязательства.
-    for block in [4u64, 6] {
+    // Контроль: проверка кода моста условная — без лога нет вывода, а значит и обязательства.
+    // Блок, в свидетеле которого счёт моста раскрыт, а логов моста нет, обязан проходить и с
+    // ЧУЖИМ кодом по адресу моста. Такой блок в цепочке есть заведомо — блок 4: в нём мост
+    // вызван и откатил вызов. Блоки, где счёт моста не раскрыт, здесь ничего не показали бы.
+    let bridge_path = keccak256(BRIDGE_ADDRESS);
+    let mut exercised = Vec::new();
+    for block in 1..=block_count() {
         let input = batch(block);
-        let revealed = input.block.parent_state.state_trie.get(keccak256(BRIDGE_ADDRESS).as_slice());
-        let outcome = process_evm_batch(input.clone()).unwrap();
-        assert!(outcome.withdrawals.is_empty(), "блок {block}");
-        assert_eq!(outcome.values.withdrawals_root, outcome.values.prev_withdrawals_root);
-        // Если счёт моста всё же раскрыт — подменяем код и убеждаемся, что блок без логов проходит.
-        if revealed.is_ok() {
-            let foreign = with_foreign_bridge_code(block);
-            assert!(process_evm_batch(foreign).unwrap().withdrawals.is_empty());
+        let revealed = matches!(
+            input.block.parent_state.state_trie.get_rlp::<TrieAccount>(bridge_path.as_slice()),
+            Ok(Some(_))
+        );
+        let honest = process_evm_batch(input).unwrap();
+        if !honest.withdrawals.is_empty() || !revealed {
+            continue;
         }
+        let foreign = with_foreign_bridge_code(block);
+        let account: TrieAccount =
+            foreign.block.parent_state.state_trie.get_rlp(bridge_path.as_slice()).unwrap().unwrap();
+        assert_ne!(account.code_hash, BRIDGE_CODE_HASH, "блок {block}: код по адресу моста подменён");
+        let outcome = process_evm_batch(foreign).unwrap_or_else(|error| panic!("блок {block} без логов моста отвергнут: {error:?}"));
+        assert!(outcome.withdrawals.is_empty(), "блок {block}");
+        assert_eq!(outcome.values.withdrawals_root, honest.values.withdrawals_root);
+        assert_eq!(outcome.values.withdrawals_count, honest.values.withdrawals_count);
+        exercised.push(block);
     }
+    assert!(exercised.contains(&4), "ветка «чужой код без логов» не исполнилась на блоке 4: {exercised:?}");
+    // В блоке 4 мост действительно вызывали: транзакция к нему есть, и она откатилась.
+    let reverted = node_block(4)["transactions"].as_array().unwrap().iter().any(|transaction| {
+        transaction["label"].as_str().unwrap().contains("вызов моста") && transaction["status"] == 0 && transaction["bridgeLogs"] == 0
+    });
+    assert!(reverted);
+    assert!(batch(4).block.current_block.body.transactions.iter().any(|transaction| {
+        alloy_consensus::Transaction::to(transaction) == Some(BRIDGE_ADDRESS)
+    }));
 }
 
 // ---------------------------------------------------------------- правила цепочки

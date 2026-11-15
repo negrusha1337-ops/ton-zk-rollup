@@ -1,0 +1,229 @@
+{
+  "blockNumber": 14,
+  "dataBytes": 583,
+  "dataChunksHex": [
+    "f90244f9023ea03f8d668fab79484c75a0164afdfc07b488911f64179b6cc2a3c1376a35d19848a01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d4934794dae150b849d35ddb63240a28bc4331ffc42851c3a06960a0db494900e5315dca1183db1872128b37ce4780691d4669c3423d2decb3a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000800e8401c9c38080846af9abba80a000000000000000000000000000000000000000000000000000000000000000008800000000000000008409585962a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b4218080a00000000000000000000000000000000000000000000000000000000000000000c0c0c0"
+  ],
+  "forced": [
+    {
+      "outcome": "skipped",
+      "queueIndex": 0,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 1,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 2,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 3,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 4,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 5,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 6,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 7,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 8,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 9,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 10,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 11,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 12,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 13,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 14,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 15,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 16,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 17,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 18,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 19,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 20,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 21,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 22,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 23,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 24,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 25,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 26,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 27,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 28,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 29,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 30,
+      "reason": "Undecodable"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 31,
+      "reason": "Undecodable"
+    }
+  ],
+  "programElfSha256": "0x6828d42b82f3bb5ee9c660d30ee0d3eded06a861d0cf4c59e385cbfe7d05fba3",
+  "programVKey": null,
+  "proofMode": null,
+  "proofSeconds": null,
+  "publicValues": {
+    "batchHash": "0x0fc38f09a2b018dc6ddeb899061fc3900cd75705031ca9c3e52458642c66f6f8",
+    "blockTimestamp": "1794747322",
+    "chainId": "362107787851",
+    "newDepositHash": "0xa12c065abaac1b734b0f55031b82423b0209989f1c6dc33cc944dc68cc3ab8b7",
+    "newStateRoot": "0xb3b12ca6cb23b4b8f2ababa28adc43410211ff3e7dcf9f535694a53c82fc292d",
+    "prevDepositHash": "0xc64945dcf71136948f73556f7a5eeecf8a0d96319afb5c99f91e0102c7c7d072",
+    "prevStateRoot": "0x3f8d668fab79484c75a0164afdfc07b488911f64179b6cc2a3c1376a35d19848",
+    "prevWithdrawalsCount": "45",
+    "prevWithdrawalsRoot": "0x48e12547a420eb90599d90eac92752269d2ac2096f805753492b640695a66db0",
+    "withdrawalsCount": "45",
+    "withdrawalsRoot": "0x48e12547a420eb90599d90eac92752269d2ac2096f805753492b640695a66db0"
+  },
+  "publicValuesBytes": "0x000000000000000000000000000000000000000000000000000000544f4e5a4b3f8d668fab79484c75a0164afdfc07b488911f64179b6cc2a3c1376a35d19848b3b12ca6cb23b4b8f2ababa28adc43410211ff3e7dcf9f535694a53c82fc292d0fc38f09a2b018dc6ddeb899061fc3900cd75705031ca9c3e52458642c66f6f848e12547a420eb90599d90eac92752269d2ac2096f805753492b640695a66db048e12547a420eb90599d90eac92752269d2ac2096f805753492b640695a66db0c64945dcf71136948f73556f7a5eeecf8a0d96319afb5c99f91e0102c7c7d072a12c065abaac1b734b0f55031b82423b0209989f1c6dc33cc944dc68cc3ab8b7000000000000000000000000000000000000000000000000000000000000002d000000000000000000000000000000000000000000000000000000000000002d000000000000000000000000000000000000000000000000000000006af9abba",
+  "queueItems": 32,
+  "queueMarkCheckedAgainst": "previous report",
+  "queueProcessedFrom": 232,
+  "queueProcessedUpTo": 264,
+  "supplementedAccounts": [],
+  "transactions": 0,
+  "withdrawals": [],
+  "withdrawalsFrontierAfter": [
+    "0xc260742a6afa5022814d356583a18c2b094bd66b69222b7c8be4d09d0160e182",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x93f94045ce1f2805cb348f3436f34765bfd1a2cd2a2affb91842068460825513",
+    "0x6bf5646c6f9441ae14be352fca9bbaecd21e1e323d6958a7f5e78d77a6e7307f",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0xe3fbf190774fbd4e8de46ecb5124ce0a54f54ad1f63bc235550278448248c617",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000"
+  ],
+  "zkvmCycles": 8049795
+}

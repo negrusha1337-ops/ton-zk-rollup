@@ -1,0 +1,358 @@
+{
+  "blockNumber": 15,
+  "dataBytes": 583,
+  "dataChunksHex": [
+    "f90244f9023ea0b3b12ca6cb23b4b8f2ababa28adc43410211ff3e7dcf9f535694a53c82fc292da01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d4934794dae150b849d35ddb63240a28bc4331ffc42851c3a06960a0db494900e5315dca1183db1872128b37ce4780691d4669c3423d2decb3a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421b9010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000800f8401c9c38080846af9abbb80a0000000000000000000000000000000000000000000000000000000000000000088000000000000000084082d4e36a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b4218080a00000000000000000000000000000000000000000000000000000000000000000c0c0c0"
+  ],
+  "forced": [
+    {
+      "outcome": "skipped",
+      "queueIndex": 0,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 1,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 2,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 3,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 4,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 5,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 6,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 7,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 8,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 9,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 10,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 11,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 12,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 13,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 14,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 15,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 16,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 17,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 18,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 19,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 20,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 21,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 22,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 23,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 24,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 25,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 26,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 27,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 28,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 29,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 30,
+      "reason": "Invalid(LackOfFunds)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 31,
+      "reason": "Invalid(LackOfFunds)"
+    }
+  ],
+  "programElfSha256": "0x6828d42b82f3bb5ee9c660d30ee0d3eded06a861d0cf4c59e385cbfe7d05fba3",
+  "programVKey": null,
+  "proofMode": null,
+  "proofSeconds": null,
+  "publicValues": {
+    "batchHash": "0x7d436bc0b171bc7ff3a4e2e56c3077ee64ac5a4d1c098473f01e8f7c18a9690e",
+    "blockTimestamp": "1794747323",
+    "chainId": "362107787851",
+    "newDepositHash": "0x97ae37d28fac5da4c7794c295cb0f72ab1e2da10d67c4ad51e8e2fd437941a87",
+    "newStateRoot": "0x46cf60b54d0b10eb9693fc5ce8597e57406427463419736ea242d4ba00480aa8",
+    "prevDepositHash": "0xa12c065abaac1b734b0f55031b82423b0209989f1c6dc33cc944dc68cc3ab8b7",
+    "prevStateRoot": "0xb3b12ca6cb23b4b8f2ababa28adc43410211ff3e7dcf9f535694a53c82fc292d",
+    "prevWithdrawalsCount": "45",
+    "prevWithdrawalsRoot": "0x48e12547a420eb90599d90eac92752269d2ac2096f805753492b640695a66db0",
+    "withdrawalsCount": "45",
+    "withdrawalsRoot": "0x48e12547a420eb90599d90eac92752269d2ac2096f805753492b640695a66db0"
+  },
+  "publicValuesBytes": "0x000000000000000000000000000000000000000000000000000000544f4e5a4bb3b12ca6cb23b4b8f2ababa28adc43410211ff3e7dcf9f535694a53c82fc292d46cf60b54d0b10eb9693fc5ce8597e57406427463419736ea242d4ba00480aa87d436bc0b171bc7ff3a4e2e56c3077ee64ac5a4d1c098473f01e8f7c18a9690e48e12547a420eb90599d90eac92752269d2ac2096f805753492b640695a66db048e12547a420eb90599d90eac92752269d2ac2096f805753492b640695a66db0a12c065abaac1b734b0f55031b82423b0209989f1c6dc33cc944dc68cc3ab8b797ae37d28fac5da4c7794c295cb0f72ab1e2da10d67c4ad51e8e2fd437941a87000000000000000000000000000000000000000000000000000000000000002d000000000000000000000000000000000000000000000000000000000000002d000000000000000000000000000000000000000000000000000000006af9abbb",
+  "queueItems": 32,
+  "queueMarkCheckedAgainst": "previous report",
+  "queueProcessedFrom": 264,
+  "queueProcessedUpTo": 296,
+  "supplementedAccounts": [
+    {
+      "address": "0x3e692edd39a308df2164cbb72299803acd17b342",
+      "revealedNodes": 2
+    },
+    {
+      "address": "0x6f97992bc60fd4bd4f01f6eb6a765f4d01e10441",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0xf8af28f5a8236afaeca8394b8a5dda616b971d7d",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0x8eb5327241db3a2f72f84c67e13d4c5dcff9dde8",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x76ec5e5550e4a5e0c50ed63eca08abcd1556f36d",
+      "revealedNodes": 2
+    },
+    {
+      "address": "0x28f10c47123f4c97476ff4b955630b99c2b1dae4",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0xcd9284109019335eedd827322211c3aa3001b867",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0xc26d5fb85de9060da5eff764b354f043f03674c9",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x0003527a09f1b37823469cb011dcd5a4a22d6ec1",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0x57bf2526790109791b702840ac3df2019be40aa7",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0xb4ad3419e6cbcffca78a8e60f2c4e0f752806f96",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0x9661a6182da1da7bae062e131ce9bedc4971f39e",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0xfd660f9d759e94a736c4fc89bd4236f2438f5e54",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x09d78dec7e4bc12e8c6445c8d719fce2c4af77ff",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0xca248dfeebfc1b69a8873c1291caba82e1b08f7f",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0xf7bfd8e4a9471558be9c2c6ba4a294cf2b68cb60",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x3e1d149e96df0d5762dbee8f8dc2173b997b92f3",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x84f005a76511a4e1cb720b5c3225f33b0509c330",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0x558a913432b3803091169a02a0387f20d2434cf1",
+      "revealedNodes": 2
+    },
+    {
+      "address": "0x754d535ace50d3d68be290477697c5f3ba117583",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x180f11b50daaec3c145727228f6114898190ecef",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0x10d02dece6174e868a1e6fd132600685c68b9a61",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x5aaec570ea2f1b5b4709b4811b999f98fb54ea7a",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x54d6ceaee10449eb3b86c3eb592bfd012c664bea",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x7f4473344c387d67769ab12b381c38db2c437e1c",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x2802a36720ca10f8bd0e4cbcf2db7500d3bb9b25",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x893eed9921dc3f93dee82afd3f55f1ce90422ed8",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x1fa3d5beeb1a5748e32b8342bf03d08942122cfb",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x24eb8cd1d9ec1a8d17070b0e59987d9ba580cc08",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0x69a02239787603ff59c1b25b734e37f4b5feeb24",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0x0914a174c2164a8a816156c8756dd06fda035a1b",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0xc5b1b59050ab3aa7b3b23e72f9a50c36db461650",
+      "revealedNodes": 2
+    }
+  ],
+  "transactions": 0,
+  "withdrawals": [],
+  "withdrawalsFrontierAfter": [
+    "0xc260742a6afa5022814d356583a18c2b094bd66b69222b7c8be4d09d0160e182",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x93f94045ce1f2805cb348f3436f34765bfd1a2cd2a2affb91842068460825513",
+    "0x6bf5646c6f9441ae14be352fca9bbaecd21e1e323d6958a7f5e78d77a6e7307f",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0xe3fbf190774fbd4e8de46ecb5124ce0a54f54ad1f63bc235550278448248c617",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000"
+  ],
+  "zkvmCycles": 10566575
+}
