@@ -159,6 +159,84 @@ describe('Rollup: генезис и параметры развёртывани�
         await refusesToStart(await deploy({}, planted), RollupErrors.badGenesis);
     });
 
+    it('раскладка состояния в обёртке — та же, что в контракте: каждое подложенное поле читается на своём месте', async () => {
+        // Подложенные состояния строит обёртка (Rollup.buildData), а читает их контракт. Если
+        // порядок или ширина полей разойдутся, тесты на подложенных состояниях будут проверять
+        // не то, что написано, — и могут проходить по случайности. Здесь все поля разные и
+        // ненулевые, а читаются get-методами контракта, по именам.
+        const depositor = new Address(0, Buffer.alloc(32, 0xd1));
+        const debtor = new Address(0, Buffer.alloc(32, 0xd2));
+        const queueItems = Rollup.queueItemsDictionary();
+        queueItems.set(12n, { hashBefore: 0xaa01n, queuedAt: 1_700_000_123, receipt: { depositor, amount: 777n } });
+        queueItems.set(13n, { hashBefore: 0xaa02n, queuedAt: 1_700_000_456, receipt: null });
+        const pendingData = Rollup.pendingDataDictionary();
+        pendingData.set(8n, 0xbb01n);
+        const owed = Rollup.owedDictionary();
+        owed.set(0xcc01n, { recipient: debtor, amount: 555n });
+        const rollup = await deploy(
+            { genesisStateRoot: 0x1001n },
+            {
+                withdrawalsRoot: 0x1002n,
+                withdrawalsCount: 3n,
+                batchIndex: 7n,
+                queue: { head: { count: 13n, hash: 0x1003n }, processed: { count: 11n, hash: 0x1004n }, prunedCount: 9n },
+                queueItems,
+                pendingData,
+                owed,
+                frozen: true,
+            },
+        );
+        expect(await rollup.getRollupState()).toEqual({
+            stateRoot: 0x1001n,
+            withdrawalsRoot: 0x1002n,
+            batchIndex: 7,
+            withdrawalsCount: 3n,
+        });
+        expect(await rollup.getDepositQueue()).toEqual({
+            head: { count: 13n, hash: 0x1003n },
+            processed: { count: 11n, hash: 0x1004n },
+            prunedCount: 9n,
+        });
+        expect(await rollup.getQueueItem(12)).toEqual({ hashBefore: 0xaa01n, queuedAt: 1_700_000_123 });
+        expect(await rollup.getQueueItem(13)).toEqual({ hashBefore: 0xaa02n, queuedAt: 1_700_000_456 });
+        const receipt = await rollup.getDepositReceipt(12);
+        expect(receipt?.depositor.equals(depositor)).toBe(true);
+        expect(receipt?.amount).toBe(777n);
+        expect(await rollup.getDepositReceipt(13)).toBeNull();
+        expect(await rollup.getBatchDataHash(8)).toBe(0xbb01n);
+        expect(await rollup.getBatchDataHash(7)).toBe(0n);
+        const debt = await rollup.getOwedPayout(0xcc01n);
+        expect(debt?.recipient.equals(debtor)).toBe(true);
+        expect(debt?.amount).toBe(555n);
+        // Срок считается от записи элемента processed + 1.
+        expect(await rollup.getEscapeState()).toEqual({ frozen: true, oldestPendingAt: 1_700_000_123, timeout: TIMEOUT });
+        const deployment = await rollup.getDeployment();
+        expect(deployment.chainId).toBe(CHAIN_ID);
+        expect(deployment.escapeTimeout).toBe(TIMEOUT);
+        expect(deployment.maxBlockAge).toBe(3600);
+
+        // Три словаря и признак заморозки занимают по одному биту подряд: когда все четыре бита
+        // равны, перестановка соседних полей не видна. Поэтому ещё два состояния, где биты
+        // чередуются: «данные есть, очереди нет, заморожен, долгов нет» и наоборот.
+        const pattern = async (first: boolean) => {
+            const planted = await deploy(
+                { genesisStateRoot: first ? 0x2001n : 0x2002n },
+                {
+                    pendingData: first ? pendingData : undefined,
+                    queueItems: first ? undefined : queueItems,
+                    frozen: first,
+                    owed: first ? undefined : owed,
+                },
+            );
+            expect((await planted.getBatchDataHash(8)) !== 0n).toBe(first);
+            expect((await planted.getQueueItem(12)) !== null).toBe(!first);
+            expect((await planted.getEscapeState()).frozen).toBe(first);
+            expect((await planted.getOwedPayout(0xcc01n)) !== null).toBe(!first);
+        };
+        await pattern(true);
+        await pattern(false);
+    });
+
     it('срок заморозки меньше наименьшего — ключ не фиксируется; ровно наименьший — годится', async () => {
         const minimum = constants.minEscapeTimeout;
         expect(minimum).toBe(MIN_ESCAPE_TIMEOUT_SECONDS);

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { mkdirSync, readdirSync, writeFileSync } from 'fs';
 import path from 'path';
 
 export type BenchRow = {
@@ -47,9 +47,14 @@ export function saveGasReport(
     gas: Record<string, number>,
     required: string[],
 ) {
-    // Пока работает скрипт мутаций (zk/evm-exit-mutation-check.py), в рабочем дереве лежит
-    // контракт со снятой защитой: его замеры в bench попасть не должны, кто бы ни запустил тесты.
-    if (existsSync(path.join(__dirname, '..', '..', 'contracts', 'rollup', 'evm_exit.tolk.orig'))) {
+    // Пока работает скрипт мутаций (zk/evm-exit-mutation-check.py, zk/rollup-mutation-check.py),
+    // в рабочем дереве лежит контракт со снятой защитой, а рядом — копия исходника (*.tolk.orig):
+    // его замеры в bench попасть не должны, кто бы ни запустил тесты.
+    const contracts = path.join(__dirname, '..', '..', 'contracts');
+    const mutating = [contracts, path.join(contracts, 'rollup')].some((directory) =>
+        readdirSync(directory).some((name) => name.endsWith('.tolk.orig')),
+    );
+    if (mutating) {
         console.warn(`bench/${fileName} не обновлён: идёт проверка мутациями, контракт подменён`);
         return;
     }

@@ -452,6 +452,11 @@ describe('Rollup: выплата не теряется', () => {
         const enough = await confirmFromNullifier(12, recipientOf(0xd2), amount, value);
         expect(enough.transactions).toHaveTransaction({ from: rollup.address, to: recipientOf(0xd2), value: amount });
         expect(await owedBy(12n)).toBeNull();
+        // Сам запас — не то, что назвал контракт (границу выше тест взял у него же, и без запаса
+        // на хранение она сдвинулась бы вместе с ним), а то, что обещано: после выплаты на
+        // пределе на контракте остаётся не меньше 0,05 TON на плату за хранение.
+        expect(await balanceOf(rollup.address)).toBeGreaterThanOrEqual(toNano('0.05'));
+        expect(budgets.payoutOverhead).toBeGreaterThan(toNano('0.05') + budgets.payoutStepValue);
     });
 
     it('ранняя проверка баланса не считает монеты самого сообщения', async () => {
