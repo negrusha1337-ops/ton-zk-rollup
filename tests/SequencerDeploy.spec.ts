@@ -9,6 +9,7 @@ import { Bn254VerifierOpcodes } from '../wrappers/Bn254Groth16Verifier';
 import { loadEvmRollupKey, loadRethExpected } from '../wrappers/evmProofs';
 import { Rollup } from '../wrappers/Rollup';
 import { deploy, DeployInputs, deployConfig, DeployRefused, networkForwardPrices, serviceCommands } from '../sequencer/deploy';
+import { randomChainId, usedChainIds } from '../sequencer/chainId';
 import { serialize } from '../sequencer/state';
 import { checkTestnet, MIN_WALLET_BALANCE } from '../sequencer/testnet';
 import { rateLimiter } from '../sequencer/queue/toncenter';
@@ -24,7 +25,8 @@ import { sandboxChain } from './helpers/sandboxChain';
 
 const WORK = path.join(__dirname, '..', '.tools', 'sequencer-test', 'deploy');
 const key = loadEvmRollupKey();
-const expected = loadRethExpected();
+// chainId — свой у развёртывания (круг 23, пункт 2): случайный, не бывший в прогонах.
+const expected = { chainId: randomChainId(usedChainIds()).toString(), genesisHash: loadRethExpected().genesisHash };
 const PARAMS = { escapeTimeout: 21600, maxBlockAge: 3600, expectedProofTime: 1800 };
 
 describe('deploy: развёртывание rollup v2 кошельком сервиса', () => {
@@ -78,7 +80,7 @@ describe('deploy: развёртывание rollup v2 кошельком сер
     beforeAll(async () => {
         code = await compile('Rollup');
         nullifierCode = await compile('RollupNullifier');
-        wallet = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: (await mnemonicNew()).join(' '), WALLET_VERSION: 'v5r1' });
+        wallet = await SequencerWallet.fromEnv({ SEQUENCER_MNEMONIC: (await mnemonicNew()).join(' '), SEQUENCER_WALLET_VERSION: 'v5r1' });
         blockchain = await Blockchain.create();
         blockchain.now = 1_800_000_000;
         funder = await blockchain.treasury('funder');
@@ -193,7 +195,7 @@ describe('deploy: развёртывание rollup v2 кошельком сер
 
         it('на кошельке не хватает на развёртывание и остаток сервису', async () => {
             await blockchain.loadFrom(funded);
-            const poor = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: (await mnemonicNew()).join(' '), WALLET_VERSION: 'v5r1' });
+            const poor = await SequencerWallet.fromEnv({ SEQUENCER_MNEMONIC: (await mnemonicNew()).join(' '), SEQUENCER_WALLET_VERSION: 'v5r1' });
             await funder.send({ to: poor.address, value: toNano('0.25'), bounce: false });
             const error = await refusal(deploy(inputs({ wallet: poor })));
             expect(error.message).toMatch(/^на кошельке 0\.25 TON, нужно [\d.]+ TON: не хватает [\d.]+ TON\. Ничего не отправлено$/);
@@ -216,6 +218,9 @@ describe('deploy: развёртывание rollup v2 кошельком сер
             expect((await params({ maxBlockAge: 2400 })).message).toMatch(/сервис не запустится: время проверки кандидата 300 с \+ время пруфа 1800 с \+ запас 300 с = 2400 с не меньше maxBlockAge 2400 с/);
             const genesis = await refusal(deploy(inputs({ chainSource: { ...expected, genesisHash: '0x' + '11'.repeat(32) } })));
             expect(genesis.message).toMatch(/генезис цепочки Reth \(expected\.json\) 0x1111.*, а константа протокола сервиса 0xc0284e91/);
+            // chainId, которого не примут программа (Linea) или генезис узла (больше 2^53 − 1).
+            expect((await refusal(deploy(inputs({ chainSource: { ...expected, chainId: '59144' } })))).message).toMatch(/chainId 59144 — сеть Linea: программа батча такие отвергает/);
+            expect((await refusal(deploy(inputs({ chainSource: { ...expected, chainId: String(2n ** 53n) } })))).message).toMatch(/chainId 9007199254740992 — не число от 1 до 2\^53 − 1/);
             const keyCheck = await refusal(deploy(inputs({ keyCheck: () => 'части ключа не те' })));
             expect(keyCheck.message).toMatch(/key\.json не сходится с исходниками программы: части ключа не те/);
         }, 60_000);

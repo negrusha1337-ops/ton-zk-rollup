@@ -80,7 +80,7 @@ describe('TestnetSubmitter в Sandbox: настоящий контракт, ко
         const nullifierCode = await compile('RollupNullifier');
         const constants = await readProtocolConstants(code, nullifierCode);
         const key = loadEvmRollupKey();
-        wallet = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: (await mnemonicNew()).join(' '), WALLET_VERSION: 'v4' });
+        wallet = await SequencerWallet.fromEnv({ SEQUENCER_MNEMONIC: (await mnemonicNew()).join(' '), SEQUENCER_WALLET_VERSION: 'v4' });
         blockchain = await Blockchain.create();
         blockchain.now = BLOCK.timestamp;
         owner = await blockchain.treasury('owner');
@@ -309,19 +309,19 @@ describe('TestnetSubmitter в Sandbox: настоящий контракт, ко
     });
 
     it('кошелёк, сеть и ключ: чужой секвенсор — отказ; ключ не печатается; не testnet — отказ', async () => {
-        const stranger = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: (await mnemonicNew()).join(' '), WALLET_VERSION: 'v5r1' });
+        const stranger = await SequencerWallet.fromEnv({ SEQUENCER_MNEMONIC: (await mnemonicNew()).join(' '), SEQUENCER_WALLET_VERSION: 'v5r1' });
         const other = new TestnetSubmitter({ chain: net.chain, rollup: rollup.address, wallet: stranger, stateDir: dir });
-        await expect(other.deployment()).rejects.toThrow(/^секвенсор контракта — .*, а кошелёк из WALLET_MNEMONIC — .*: батчи от него контракт не примет$/);
+        await expect(other.deployment()).rejects.toThrow(/^секвенсор контракта — .*, а кошелёк из SEQUENCER_MNEMONIC — .*: батчи от него контракт не примет$/);
         expect(await submitter().deployment()).toEqual({ chainId: FAKE_CHAIN_ID, maxBlockAge: (await rollup.getDeployment()).maxBlockAge });
         const words = (await mnemonicNew()).join(' ');
-        const shown = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: words, WALLET_VERSION: 'v4' });
+        const shown = await SequencerWallet.fromEnv({ SEQUENCER_MNEMONIC: words, SEQUENCER_WALLET_VERSION: 'v4' });
         for (const text of [inspect(shown), JSON.stringify(shown), String(shown)]) for (const word of words.split(' ')) expect(text).not.toContain(` ${word} `);
         expect(inspect(shown)).toBe(`SequencerWallet(${shown.address.toString({ testOnly: true })}, v4)`);
-        await expect(SequencerWallet.fromEnv({ WALLET_MNEMONIC: 'тайное слово', WALLET_VERSION: 'v4' })).rejects.toThrow(
-            new Error('кошелёк секвенсора: WALLET_MNEMONIC не разбирается как мнемоника TON'),
+        await expect(SequencerWallet.fromEnv({ SEQUENCER_MNEMONIC: 'тайное слово', SEQUENCER_WALLET_VERSION: 'v4' })).rejects.toThrow(
+            new Error('кошелёк секвенсора: SEQUENCER_MNEMONIC не разбирается как мнемоника TON'),
         );
-        await expect(SequencerWallet.fromEnv({ WALLET_MNEMONIC: words, WALLET_VERSION: 'v3r2' })).rejects.toThrow('WALLET_VERSION=v3r2 не поддерживается');
-        await expect(SequencerWallet.fromEnv({})).rejects.toThrow('нужны переменные окружения WALLET_MNEMONIC и WALLET_VERSION');
+        await expect(SequencerWallet.fromEnv({ SEQUENCER_MNEMONIC: words, SEQUENCER_WALLET_VERSION: 'v3r2' })).rejects.toThrow('SEQUENCER_WALLET_VERSION=v3r2 не поддерживается');
+        await expect(SequencerWallet.fromEnv({})).rejects.toThrow('нужны SEQUENCER_MNEMONIC и SEQUENCER_WALLET_VERSION');
         expect(() => assertTestnetEndpoint('https://toncenter.com/api/v2/jsonRPC')).toThrow(
             'адрес API toncenter.com: секвенсор работает только с testnet.toncenter.com (стенд без аудита)',
         );
@@ -380,14 +380,14 @@ describe('TestnetSubmitter в Sandbox: настоящий контракт, ко
                 checkTestnet({ chain: net.chain, rollup: rollup.address, wallet, now: () => blockchain.now!, maxBlockAge: 1800, expectedProofTime: 600, ...overrides });
             expect((await checkNow()).problems).toEqual([]);
             // Круг 21, 5а: кошелёк v4 — предупреждение (не отказ), v5r1 — без него.
-            const warning = /^ВНИМАНИЕ: кошелёк секвенсора v4 — рекомендуется WALLET_VERSION=v5r1 и отдельная мнемоника/;
+            const warning = /^ВНИМАНИЕ: кошелёк секвенсора v4 — рекомендуется SEQUENCER_WALLET_VERSION=v5r1 и отдельная мнемоника/;
             expect((await checkNow()).lines).toContainEqual(expect.stringMatching(warning));
-            const v5 = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: (await mnemonicNew()).join(' '), WALLET_VERSION: 'v5r1' });
+            const v5 = await SequencerWallet.fromEnv({ SEQUENCER_MNEMONIC: (await mnemonicNew()).join(' '), SEQUENCER_WALLET_VERSION: 'v5r1' });
             expect((await checkNow({ wallet: v5 })).lines).not.toContainEqual(expect.stringMatching(warning));
             // Пруф по умолчанию (1800 с) в срок 1800 с не помещается; сеть не testnet; чужой кошелёк.
             expect((await checkNow({ expectedProofTime: 1800 })).problems).toEqual([expect.stringMatching(/^время проверки кандидата 300 с \+ время пруфа 1800 с/)]);
             net.control.globalId = -239;
-            const stranger = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: (await mnemonicNew()).join(' '), WALLET_VERSION: 'v4' });
+            const stranger = await SequencerWallet.fromEnv({ SEQUENCER_MNEMONIC: (await mnemonicNew()).join(' '), SEQUENCER_WALLET_VERSION: 'v4' });
             expect((await checkNow({ wallet: stranger })).problems).toEqual([
                 'сеть с global_id -239 — не testnet (-3)',
                 expect.stringMatching(/^секвенсор контракта .*, а кошелёк — /),

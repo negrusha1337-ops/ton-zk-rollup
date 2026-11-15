@@ -202,8 +202,10 @@ export type WalletVersion = 'v4' | 'v5r1';
 type AnyWallet = WalletContractV4 | WalletContractV5R1;
 
 /**
- * Кошелёк секвенсора из мнемоники (как у Blueprint: WALLET_MNEMONIC, WALLET_VERSION, по желанию
- * WALLET_ID / SUBWALLET_NUMBER). Секретный ключ живёт только в замыкании этого объекта: не
+ * Кошелёк секвенсора из мнемоники (круг 23, пункт 1: SEQUENCER_MNEMONIC, SEQUENCER_WALLET_VERSION,
+ * по желанию SEQUENCER_WALLET_ID / SEQUENCER_SUBWALLET_NUMBER; WALLET_MNEMONIC — кошелёк прогонов
+ * Blueprint, сервис его не берёт). Окружение снимает serviceEnv.ts. Секретный ключ живёт только в
+ * замыкании этого объекта: не
  * печатается (inspect и JSON показывают адрес), не пишется на диск и не уходит в сообщения об ошибках.
  */
 export class SequencerWallet {
@@ -217,13 +219,13 @@ export class SequencerWallet {
         return this.contract.address;
     }
 
-    static async fromEnv(env: NodeJS.ProcessEnv = process.env): Promise<SequencerWallet> {
-        const words = (env.WALLET_MNEMONIC ?? '').trim().split(/\s+/).filter(Boolean);
-        const version = (env.WALLET_VERSION ?? '').trim().toLowerCase();
+    static async fromEnv(env: Readonly<Record<string, string | undefined>>): Promise<SequencerWallet> {
+        const words = (env.SEQUENCER_MNEMONIC ?? '').trim().split(/\s+/).filter(Boolean);
+        const version = (env.SEQUENCER_WALLET_VERSION ?? '').trim().toLowerCase();
         if (words.length === 0 || version === '')
-            throw new Error('кошелёк секвенсора: нужны переменные окружения WALLET_MNEMONIC и WALLET_VERSION (как у Blueprint)');
+            throw new Error('кошелёк секвенсора: нужны SEQUENCER_MNEMONIC и SEQUENCER_WALLET_VERSION (в .env проекта или в окружении)');
         if (version !== 'v4' && version !== 'v5r1')
-            throw new Error(`кошелёк секвенсора: WALLET_VERSION=${version} не поддерживается — только v4 или v5r1`);
+            throw new Error(`кошелёк секвенсора: SEQUENCER_WALLET_VERSION=${version} не поддерживается — только v4 или v5r1`);
         const number = (name: string): number | undefined => {
             const value = env[name];
             if (value === undefined || value === '') return undefined;
@@ -236,16 +238,16 @@ export class SequencerWallet {
             keyPair = await mnemonicToPrivateKey(words);
         } catch {
             // Текст ошибки библиотеки может нести слова мнемоники — не пересказывается.
-            throw new Error('кошелёк секвенсора: WALLET_MNEMONIC не разбирается как мнемоника TON');
+            throw new Error('кошелёк секвенсора: SEQUENCER_MNEMONIC не разбирается как мнемоника TON');
         }
         const contract: AnyWallet =
             version === 'v4'
-                ? WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey, walletId: number('WALLET_ID') })
+                ? WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey, walletId: number('SEQUENCER_WALLET_ID') })
                 : WalletContractV5R1.create({
                       publicKey: keyPair.publicKey,
                       walletId: {
                           networkGlobalId: TESTNET_GLOBAL_ID,
-                          context: { workchain: 0, subwalletNumber: number('SUBWALLET_NUMBER') ?? 0, walletVersion: 'v5r1' },
+                          context: { workchain: 0, subwalletNumber: number('SEQUENCER_SUBWALLET_NUMBER') ?? 0, walletVersion: 'v5r1' },
                       },
                   });
         const secretKey = keyPair.secretKey;
@@ -267,18 +269,6 @@ export class SequencerWallet {
                 ),
             });
         return new SequencerWallet(version, contract, sign);
-    }
-
-    /**
-     * Кошелёк из окружения процесса; мнемоника после разбора удаляется из `process.env` (круг 21,
-     * пункт 3): дочерние процессы и всё, что читает окружение позже, её уже не увидят.
-     */
-    static async fromProcessEnv(): Promise<SequencerWallet> {
-        try {
-            return await SequencerWallet.fromEnv(process.env);
-        } finally {
-            delete process.env.WALLET_MNEMONIC;
-        }
     }
 
     /** seqno и баланс кошелька на снимке (неразвёрнутый — seqno 0). */

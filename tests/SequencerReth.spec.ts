@@ -12,6 +12,7 @@ import { forcedTransactionCell } from '../wrappers/rollupMath';
 import { BuildRequest, ExecutionPayload } from '../sequencer/block/payload';
 import { liveChildren } from '../sequencer/children';
 import { NodeOptions, RunningNode, startNode } from '../sequencer/node';
+import { randomChainId, usedChainIds } from '../sequencer/chainId';
 import { BRIDGE_ADDRESS, GENESIS_HASH } from '../sequencer/protocol';
 import { MockProver } from '../sequencer/prover';
 import { SandboxFeed, SandboxQueueSource } from '../sequencer/queue/sandbox';
@@ -41,7 +42,9 @@ const TOOLS = {
 const missing = Object.entries(TOOLS)
     .filter(([, file]) => !existsSync(file))
     .map(([name]) => name);
-const CHAIN_ID = 362107787851n;
+// chainId — случайный, как у нового развёртывания (круг 23, пункт 2): узел, rsp, хост и программа
+// обязаны принимать любой, а генезис от него не зависит (checkGenesis при старте узла — GENESIS_HASH).
+const CHAIN_ID = randomChainId(usedChainIds());
 const GWEI = 1_000_000_000n;
 // Каталог тестов — отдельно от каталога сервиса по умолчанию (.tools/sequencer).
 const WORK = path.join(ROOT, '.tools', 'sequencer-test', 'reth');

@@ -27,7 +27,7 @@ const live = new Set<ChildProcess>();
 const groups = new WeakSet<ChildProcess>();
 
 /** Переменные окружения сервиса, которые дочерним не передаются (круг 21, пункт 3). */
-export const SECRET_ENV = ['WALLET_MNEMONIC', 'TONCENTER_API_KEY'] as const;
+export const SECRET_ENV = ['WALLET_MNEMONIC', 'SEQUENCER_MNEMONIC', 'TONCENTER_API_KEY'] as const;
 
 /** Окружение дочернего процесса: окружение сервиса и `extra`, без секретов (SECRET_ENV). */
 export function childEnv(extra: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {

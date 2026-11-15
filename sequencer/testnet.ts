@@ -17,6 +17,7 @@ import { QueueLagError } from './queue/types';
 import { DEFAULT_EXPECTED_PROOF_TIME, DEFAULT_PROGRAM_KEYS, DEFAULT_SUBMIT_MARGIN, Sequencer, SequencerConfig, SequencerStop } from './service';
 import { DEFAULT_STATE_DIR, lockStateDir, StateDirBusy } from './state';
 import { StaleSnapshot, TestnetSubmitter } from './submitter';
+import { serviceWallet, ServiceEnv } from './serviceEnv';
 import { rollupOn, SequencerWallet, TESTNET_GLOBAL_ID, TonChain, ToncenterChain } from './ton';
 
 // Сервис-секвенсор против контракта в testnet (команды `check` и `run` в main.ts).
@@ -92,7 +93,7 @@ export async function checkTestnet(options: {
     // Круг 21, 5а: у v4 нет привязки подписи к сети (у v5r1 — global_id), а мнемоника в окружении
     // сервиса — повод держать для секвенсора отдельный кошелёк.
     if (options.wallet.version === 'v4')
-        lines.push('ВНИМАНИЕ: кошелёк секвенсора v4 — рекомендуется WALLET_VERSION=v5r1 и отдельная мнемоника только для секвенсора');
+        lines.push('ВНИМАНИЕ: кошелёк секвенсора v4 — рекомендуется SEQUENCER_WALLET_VERSION=v5r1 и отдельная мнемоника только для секвенсора');
     if (wallet.balance < MIN_WALLET_BALANCE) problems.push(`на кошельке ${fromNano(wallet.balance)} TON, нужно не меньше ${fromNano(MIN_WALLET_BALANCE)} TON`);
     else if (wallet.balance < RECOMMENDED_WALLET_BALANCE) lines.push(`ВНИМАНИЕ: на кошельке меньше рекомендуемых ${fromNano(RECOMMENDED_WALLET_BALANCE)} TON`);
     return { lines, problems };
@@ -109,6 +110,8 @@ export type TestnetOptions = {
     expectedProofTime: number;
     includePool: boolean;
     pollSeconds: number;
+    /** Окружение сервиса (serviceEnv.ts): кошелёк — только SEQUENCER_MNEMONIC. */
+    env: ServiceEnv;
 };
 
 export const defaultTools = (): ProgramTools => ({
@@ -159,7 +162,7 @@ const nodeOptions = (options: TestnetOptions, chainId: bigint) => ({
 async function connect(options: TestnetOptions) {
     const limit = rateLimiter(options.apiKey ? 9 : 1);
     const chain = new ToncenterChain({ apiKey: options.apiKey, limit });
-    const wallet = await SequencerWallet.fromProcessEnv();
+    const wallet = await serviceWallet(options.env);
     return { chain, wallet, limit };
 }
 

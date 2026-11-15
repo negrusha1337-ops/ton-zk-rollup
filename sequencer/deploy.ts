@@ -10,6 +10,7 @@ import { DEPLOY_VALUE, KEY_FINALIZE_VALUE, KEY_PART_VALUE } from '../wrappers/ro
 import { estimateWalletFees, ForwardPrices, timeConfigProblems } from '../wrappers/testnetPlan';
 import { childEnv } from './children';
 import { DEFAULT_EXPECTED_CHECK_TIME, startBudgetProblem } from './deadline';
+import { chainIdProblems } from './chainId';
 import { GENESIS_HASH } from './protocol';
 import { DEFAULT_SUBMIT_MARGIN } from './service';
 import { lockStateDir } from './state';
@@ -17,9 +18,10 @@ import { Effect, TestnetSubmitter, TestnetSubmitterOptions } from './submitter';
 import { AccountSnapshot, rollupOn, SequencerWallet, TESTNET_GLOBAL_ID, TonChain } from './ton';
 
 // Развёртывание rollup-контракта протокола v2 кошельком сервиса (`sequencer/main.ts deploy`):
-// владелец и секвенсор — этот кошелёк; chainId и генезис — цепочки Reth
-// (fixtures/evm_batches/reth/expected.json): узел сервиса строит свою цепочку от того же генезиса
-// протокола (sequencer/protocol.ts, GENESIS_HASH) с тем chainId, что прочитает у контракта; ключ —
+// владелец и секвенсор — этот кошелёк; chainId — свой у каждого развёртывания (sequencer/chainId.ts:
+// --chain-id или случайный, записан в каталоге состояния), генезис — протокола (GENESIS_HASH, от
+// chainId не зависит): узел сервиса строит свою цепочку от него с тем chainId, что прочитает у
+// контракта; ключ —
 // fixtures/evm_batches/key.json частями и FinalizeKey; в конце — сверка развёртывания
 // (wrappers/rollupDeployment.ts, как scripts/verifyRollupDeployment.ts).
 //
@@ -43,7 +45,7 @@ export class DeployRefused extends Error {}
 
 export type DeployParams = { escapeTimeout: number; maxBlockAge: number; expectedProofTime: number };
 
-/** Цепочка, под которую развёртывается контракт: chainId и хеш генезиса (подмножество expected.json). */
+/** Цепочка, под которую развёртывается контракт: chainId развёртывания и хеш генезиса протокола. */
 export type ChainSource = { chainId: string; genesisHash: string };
 
 export type DeployInputs = {
@@ -105,8 +107,10 @@ export function deployConfigProblems(params: DeployParams, chainSource: ChainSou
     // и с ним контракт сверяет начальное слово состояния при FinalizeKey (7333).
     if (BigInt(chainSource.genesisHash) !== BigInt(GENESIS_HASH))
         problems.push(`генезис цепочки Reth (expected.json) ${chainSource.genesisHash}, а константа протокола сервиса ${GENESIS_HASH}`);
-    if (!/^\d+$/.test(chainSource.chainId) || BigInt(chainSource.chainId) === 0n || BigInt(chainSource.chainId) >= 2n ** 64n)
-        problems.push(`chainId цепочки Reth «${chainSource.chainId}» — не число от 1 до 2^64 − 1`);
+    // chainId — свой у каждого развёртывания (chainId.ts, resolveDeployChainId); здесь — только то,
+    // без чего узел или программа его не примут.
+    if (!/^\d+$/.test(chainSource.chainId)) problems.push(`chainId «${chainSource.chainId}» — не число`);
+    else problems.push(...chainIdProblems(BigInt(chainSource.chainId), new Set()));
     if (key.file.protocolVersion !== PROTOCOL_VERSION)
         problems.push(`key.json выведен для протокола v${key.file.protocolVersion}, а сервис — протокола v${PROTOCOL_VERSION}`);
     return problems;

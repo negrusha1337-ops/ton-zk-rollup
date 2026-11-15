@@ -9,7 +9,7 @@ import { LocalProver, LocalProverOptions, ProverFailure } from '../sequencer/pro
 import { SequencerStop } from '../sequencer/service';
 import { StateDirBusy } from '../sequencer/state';
 import { serve } from '../sequencer/testnet';
-import { SequencerWallet } from '../sequencer/ton';
+import { serviceWallet, takeServiceEnv } from '../sequencer/serviceEnv';
 import { fakeProveScript, rethJob } from './helpers/fakeProver';
 
 // Правки круга 21 в процессах сервиса: секреты не уходят дочерним (3), сторож прувера и всё, что
@@ -65,23 +65,27 @@ describe('круг 21: окружение дочерних, группы про�
     describe('3: мнемоника не уходит дочерним', () => {
         const saved = { ...process.env };
         afterEach(() => {
-            for (const name of ['WALLET_MNEMONIC', 'WALLET_VERSION', 'TONCENTER_API_KEY']) {
+            for (const name of ['WALLET_MNEMONIC', 'WALLET_VERSION', 'SEQUENCER_MNEMONIC', 'SEQUENCER_WALLET_VERSION', 'TONCENTER_API_KEY']) {
                 if (saved[name] === undefined) delete process.env[name];
                 else process.env[name] = saved[name];
             }
         });
 
-        it('после разбора кошелька WALLET_MNEMONIC в окружении процесса нет', async () => {
-            process.env.WALLET_MNEMONIC = (await mnemonicNew()).join(' ');
-            process.env.WALLET_VERSION = 'v5r1';
-            const wallet = await SequencerWallet.fromProcessEnv();
-            expect(wallet.version).toBe('v5r1');
+        it('после снятия окружения сервиса мнемоник в окружении процесса нет (круг 23: обе пары)', async () => {
+            process.env.SEQUENCER_MNEMONIC = (await mnemonicNew()).join(' ');
+            process.env.SEQUENCER_WALLET_VERSION = 'v5r1';
+            process.env.WALLET_MNEMONIC = 'кошелёк прогонов';
+            const env = takeServiceEnv({ file: null });
+            expect(process.env.SEQUENCER_MNEMONIC).toBeUndefined();
+            expect(process.env.SEQUENCER_WALLET_VERSION).toBeUndefined();
             expect(process.env.WALLET_MNEMONIC).toBeUndefined();
-            expect(process.env.WALLET_VERSION).toBe('v5r1');
-            // И при негодной мнемонике — тоже удаляется.
-            process.env.WALLET_MNEMONIC = 'тайное слово';
-            await expect(SequencerWallet.fromProcessEnv()).rejects.toThrow('WALLET_MNEMONIC не разбирается');
-            expect(process.env.WALLET_MNEMONIC).toBeUndefined();
+            // Мнемоника прогонов другая: кошелёк сервиса годен, ключ — из SEQUENCER_MNEMONIC.
+            expect((await serviceWallet(env)).version).toBe('v5r1');
+            // И при негодной мнемонике сервиса — тоже удаляется.
+            process.env.SEQUENCER_MNEMONIC = 'тайное слово';
+            process.env.SEQUENCER_WALLET_VERSION = 'v5r1';
+            await expect(serviceWallet(takeServiceEnv({ file: null }))).rejects.toThrow('SEQUENCER_MNEMONIC не разбирается');
+            expect(process.env.SEQUENCER_MNEMONIC).toBeUndefined();
         });
 
         it('сторож прувера не видит WALLET_MNEMONIC и TONCENTER_API_KEY, даже если они в окружении сервиса', async () => {

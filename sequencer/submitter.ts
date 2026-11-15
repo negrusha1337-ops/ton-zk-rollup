@@ -277,7 +277,7 @@ function parseSeen(file: string, value: unknown): Seen {
 }
 
 /**
- * Отправщик в testnet. Сообщения — переводы кошелька секвенсора (WALLET_MNEMONIC) на контракт с
+ * Отправщик в testnet. Сообщения — переводы кошелька секвенсора (SEQUENCER_MNEMONIC) на контракт с
  * суммами из wrappers/rollupValues.ts. Каждое ожидание — по состоянию контракта и кошелька (снимки
  * с временем блока), не по таймеру. Повтор после любого сбоя не шлёт дубль: исходящий журнал
  * (outbox.json, записывается ДО отправки) держит seqno и срок последнего сообщения.
@@ -377,7 +377,7 @@ export class TestnetSubmitter implements BatchSubmitter {
         const deployment = await this.on(await this.snapshot())((rollup) => rollup.getDeployment());
         if (!deployment.sequencer.equals(this.options.wallet.address))
             throw new Error(
-                `секвенсор контракта — ${deployment.sequencer.toString({ testOnly: true })}, а кошелёк из WALLET_MNEMONIC — ` +
+                `секвенсор контракта — ${deployment.sequencer.toString({ testOnly: true })}, а кошелёк из SEQUENCER_MNEMONIC — ` +
                     `${this.options.wallet.address.toString({ testOnly: true })}: батчи от него контракт не примет`,
             );
         return { chainId: deployment.chainId, maxBlockAge: deployment.maxBlockAge };

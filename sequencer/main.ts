@@ -4,14 +4,19 @@ import { compile } from '@ton/blueprint';
 import { loadEvmRollupKey, loadRethExpected } from '../wrappers/evmProofs';
 import { RollupNullifier } from '../wrappers/RollupNullifier';
 import { BATCH_COST_ESTIMATE, check, defaultTools, DEFAULT_RETH, DEFAULT_STATE_DIR, MIN_WALLET_BALANCE, run, TestnetOptions } from './testnet';
+import { resolveDeployChainId, usedChainIds } from './chainId';
 import { DEFAULT_ESCAPE_TIMEOUT, DEFAULT_MAX_BLOCK_AGE, deploy, networkForwardPrices, serviceCommands } from './deploy';
 import { rateLimiter, TestnetQueueSource } from './queue/toncenter';
 import { QueueLagError, QueueMismatchError } from './queue/types';
-import { onSnapshot, rollupOn, SequencerWallet, ToncenterChain } from './ton';
+import { serviceWallet, ServiceEnv, takeServiceEnv } from './serviceEnv';
+import { onSnapshot, rollupOn, ToncenterChain } from './ton';
 import { claimProofCell, recipientHashOf, withdrawalClaims } from './withdrawals';
 
-// Сборщик блоков из командной строки (ts-node). Только testnet; ключ API toncenter — из
-// TONCENTER_API_KEY (по желанию), кошелёк секвенсора — WALLET_MNEMONIC и WALLET_VERSION.
+// Сборщик блоков из командной строки (ts-node). Только testnet. Окружение — .env проекта (читается
+// сам, без печати; переменная окружения процесса главнее) и окружение процесса (serviceEnv.ts):
+// кошелёк сервиса — ТОЛЬКО SEQUENCER_MNEMONIC и SEQUENCER_WALLET_VERSION; WALLET_MNEMONIC — кошелёк
+// прогонов, сервис его не берёт (тот же ключ — отказ); обе пары удаляются из process.env в начале
+// любой команды. Ключ API toncenter — TONCENTER_API_KEY (по желанию).
 //
 //   npx ts-node sequencer/main.ts queue <адрес контракта> [--from=<номер>] [--max=<число>]
 //       очередь L1 контракта, каждый элемент сверен с хешем цепочки; ничего не отправляет и ключей
@@ -26,8 +31,10 @@ import { claimProofCell, recipientHashOf, withdrawalClaims } from './withdrawals
 //   npx ts-node sequencer/main.ts address
 //       testnet-адрес кошелька сервиса (для пополнения); сети не касается;
 //   npx ts-node sequencer/main.ts deploy [--escape-timeout=21600] [--max-block-age=3600]
-//       [--proof-time=1800] [--state-dir=<каталог>] [--dry-run]
+//       [--proof-time=1800] [--state-dir=<каталог>] [--chain-id=<число>] [--dry-run]
 //       развернуть rollup v2 кошельком сервиса (владелец и секвенсор — он), загрузить ключ,
+//       chainId — --chain-id или случайный 40-битный, не бывший в прогонах (sequencer/chainId.ts),
+//       записан в <каталог>/deploy-chain.json (и при --dry-run): повтор возьмёт его же;
 //       сверить развёртывание и напечатать команды check и run; возобновляемо. --dry-run — всё
 //       посчитать и проверить, ничего не слать. Отказ — код 1 и причина;
 //   npx ts-node sequencer/main.ts withdrawals <адрес контракта> [--state-dir=<каталог>] [--recipient=<адрес TON>]
@@ -54,18 +61,20 @@ const seconds = (flags: Map<string, string>, name: string, fallback: number) => 
     return Number(value);
 };
 
-async function deployCommand(args: string[]) {
+async function deployCommand(args: string[], env: ServiceEnv) {
     if (args.some((arg) => !arg.startsWith('--'))) throw new Error(`deploy не принимает адреса: адрес выводится из кошелька и параметров (${usage})`);
-    const flags = flagsOf(args, ['escape-timeout', 'max-block-age', 'proof-time', 'state-dir', 'dry-run']);
+    const flags = flagsOf(args, ['escape-timeout', 'max-block-age', 'proof-time', 'state-dir', 'dry-run', 'chain-id']);
     const params = {
         escapeTimeout: seconds(flags, 'escape-timeout', DEFAULT_ESCAPE_TIMEOUT),
         maxBlockAge: seconds(flags, 'max-block-age', DEFAULT_MAX_BLOCK_AGE),
         expectedProofTime: seconds(flags, 'proof-time', 1800),
     };
     const stateDir = path.resolve(flags.get('state-dir') || DEFAULT_STATE_DIR);
-    const apiKey = process.env.TONCENTER_API_KEY || undefined;
+    const apiKey = env.values.TONCENTER_API_KEY;
     const chain = new ToncenterChain({ apiKey, limit: rateLimiter(apiKey ? 9 : 1) });
-    const wallet = await SequencerWallet.fromProcessEnv();
+    const wallet = await serviceWallet(env);
+    // Свой chainId у каждого развёртывания (круг 23, пункт 2): записан в каталоге до первой отправки.
+    const chainId = resolveDeployChainId({ stateDir, flag: flags.has('chain-id') ? flags.get('chain-id') : undefined, used: usedChainIds(), log: print });
     const result = await deploy({
         chain,
         wallet,
@@ -76,7 +85,7 @@ async function deployCommand(args: string[]) {
         code: await compile('Rollup'),
         nullifierCode: await compile('RollupNullifier'),
         key: loadEvmRollupKey(),
-        chainSource: loadRethExpected(),
+        chainSource: { chainId: chainId.toString(), genesisHash: loadRethExpected().genesisHash },
         forward: networkForwardPrices(),
         reserve: MIN_WALLET_BALANCE,
     });
@@ -87,23 +96,23 @@ async function deployCommand(args: string[]) {
     for (const line of serviceCommands(result.address, params, stateDir, DEFAULT_STATE_DIR)) print(`  ${line}`);
 }
 
-async function addressCommand(args: string[]) {
+async function addressCommand(args: string[], env: ServiceEnv) {
     if (args.length > 0) throw new Error(`address не принимает параметров: ${usage}`);
-    const wallet = await SequencerWallet.fromProcessEnv();
+    const wallet = await serviceWallet(env);
     console.log(`Кошелёк сервиса (${wallet.version}), testnet:`);
     console.log(`  для пополнения (non-bounceable): ${wallet.address.toString({ testOnly: true, bounceable: false })}`);
     console.log(`  он же (bounceable):              ${wallet.address.toString({ testOnly: true })}`);
     console.log(`  raw:                             ${wallet.address.toRawString()}`);
 }
 
-async function withdrawalsCommand(args: string[]) {
+async function withdrawalsCommand(args: string[], env: ServiceEnv) {
     const positional = args.filter((arg) => !arg.startsWith('--'));
     if (positional.length !== 1) throw new Error(`ожидается один адрес контракта: ${usage}`);
     const flags = flagsOf(args, ['state-dir', 'recipient']);
     const address = Address.parse(positional[0]);
     const stateDir = path.resolve(flags.get('state-dir') || DEFAULT_STATE_DIR);
     const recipient = flags.has('recipient') ? recipientHashOf(Address.parse(flags.get('recipient')!)) : null;
-    const apiKey = process.env.TONCENTER_API_KEY || undefined;
+    const apiKey = env.values.TONCENTER_API_KEY;
     const chain = new ToncenterChain({ apiKey, limit: rateLimiter(apiKey ? 9 : 1) });
     const snapshot = await chain.account(address);
     const on = rollupOn(address, snapshot);
@@ -122,7 +131,7 @@ async function withdrawalsCommand(args: string[]) {
     }
 }
 
-function serviceOptions(args: string[]): TestnetOptions {
+function serviceOptions(args: string[], env: ServiceEnv): TestnetOptions {
     const positional = args.filter((arg) => !arg.startsWith('--'));
     if (positional.length !== 1) throw new Error(`ожидается один адрес контракта: ${usage}`);
     const flags = new Map(args.filter((arg) => arg.startsWith('--')).map((arg) => {
@@ -143,19 +152,20 @@ function serviceOptions(args: string[]): TestnetOptions {
         rollup: Address.parse(positional[0]),
         feeRecipient,
         stateDir: path.resolve(flags.get('state-dir') || DEFAULT_STATE_DIR),
-        apiKey: process.env.TONCENTER_API_KEY || undefined,
+        apiKey: env.values.TONCENTER_API_KEY,
         reth: DEFAULT_RETH,
         tools: defaultTools(),
         ports: { http: number('http-port', 8645), auth: number('auth-port', 8651), p2p: number('p2p-port', 30403) },
         expectedProofTime: number('proof-time', 1800),
         includePool: flags.has('include-pool'),
         pollSeconds: number('poll', 30),
+        env,
     };
 }
 
 const print = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
 
-async function queue(args: string[]) {
+async function queue(args: string[], env: ServiceEnv) {
     const positional = args.filter((arg) => !arg.startsWith('--'));
     const options = Object.fromEntries(
         args.filter((arg) => arg.startsWith('--')).map((arg) => arg.slice(2).split('=')),
@@ -165,7 +175,7 @@ async function queue(args: string[]) {
         if (!['from', 'max'].includes(key) || !/^\d+$/.test(options[key] ?? ''))
             throw new Error(`непонятный аргумент --${key}: ${usage}`);
     const address = Address.parse(positional[0]);
-    const apiKey = process.env.TONCENTER_API_KEY || undefined;
+    const apiKey = env.values.TONCENTER_API_KEY;
     // Пределы «змейки» и отрезка — у самого контракта.
     const limit = rateLimiter(apiKey ? 9 : 1);
     const probe = new TestnetQueueSource(address, { maxForcedTxCells: 0, maxForcedTxBytes: 0 }, { apiKey, limit });
@@ -201,15 +211,17 @@ async function queue(args: string[]) {
 
 async function main() {
     const [command, ...rest] = process.argv.slice(2);
-    if (command === 'address') return addressCommand(rest);
-    if (command === 'deploy') return deployCommand(rest);
-    if (command === 'withdrawals') return withdrawalsCommand(rest);
-    if (command === 'queue') return queue(rest);
+    // До любой команды: окружение сервиса снято, обе пары кошельков из process.env удалены.
+    const env = takeServiceEnv();
+    if (command === 'address') return addressCommand(rest, env);
+    if (command === 'deploy') return deployCommand(rest, env);
+    if (command === 'withdrawals') return withdrawalsCommand(rest, env);
+    if (command === 'queue') return queue(rest, env);
     if (command === 'check') {
-        if (!(await check(serviceOptions(rest), print))) process.exit(1);
+        if (!(await check(serviceOptions(rest, env), print))) process.exit(1);
         return;
     }
-    if (command === 'run') process.exit(await run(serviceOptions(rest), print));
+    if (command === 'run') process.exit(await run(serviceOptions(rest, env), print));
     throw new Error(`команда не указана: ${usage}`);
 }
 
