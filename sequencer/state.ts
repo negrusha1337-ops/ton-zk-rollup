@@ -1,15 +1,4 @@
-import { randomBytes } from 'crypto';
-import {
-    closeSync,
-    existsSync,
-    fsyncSync,
-    mkdirSync,
-    openSync,
-    readFileSync,
-    renameSync,
-    rmSync,
-    writeFileSync,
-} from 'fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'fs';
 import path from 'path';
 import { emptyWithdrawalFrontier } from '../wrappers/rollupMath';
 import { BuildRequest, ExecutionPayload } from './block/payload';
@@ -63,7 +52,21 @@ export type BlockRecord = {
     hash: string;
     status: 'checked' | 'proven' | 'accepted';
     dir: string;
+    /**
+     * Пока батч не принят: вершина до блока и его отрезок — чтобы пересобрать блок, не успевший
+     * в окно maxBlockAge (0.3). После приёма стираются.
+     */
+    parent?: Tip;
+    segment?: QueuedItem[];
+    /** Батч мог уйти контракту (записано до отправки): пересборка — только после конца срока. */
+    submitting?: boolean;
 };
+
+/**
+ * Пересборка блока, батч которого контракт уже не примет: та же высота, тот же отрезок очереди,
+ * свежее время. Держится до проверки нового блока (переживает перезапуск).
+ */
+export type Rebuild = { number: number; segment: QueuedItem[]; cut: boolean; replaces: string; reason: string };
 
 export type Rejection = { number: number; attempt: number; hash: string; reason: string; at: string };
 
@@ -76,6 +79,10 @@ export type SequencerState = {
     pending: Pending | null;
     blocks: BlockRecord[];
     rejections: Rejection[];
+    /** Пересборка в работе; нет поля — нет пересборки. */
+    rebuild?: Rebuild | null;
+    /** С какого времени машины источник сообщений очереди отстаёт (QueueLagError); нет — не отстаёт. */
+    queueLagSince?: number;
 };
 
 // --- сериализация: bigint и Buffer — строками ---
@@ -131,75 +138,7 @@ export function writeAtomically(file: string, contents: string | Buffer): void {
     syncPath(path.dirname(file));
 }
 
-/** Каталог состояния занят другим экземпляром сервиса. */
-export class StateDirBusy extends Error {}
-
-/** Блокировки каталогов состояния, которые держит этот процесс: токен → файл. */
-const heldLocks = new Map<string, string>();
-let exitHookInstalled = false;
-
-const processAlive = (pid: number): boolean => {
-    try {
-        process.kill(pid, 0);
-        return true;
-    } catch (error) {
-        // EPERM — процесс есть, но чужой: он жив.
-        return (error as NodeJS.ErrnoException).code === 'EPERM';
-    }
-};
-
-/**
- * Блокировка каталога состояния: файл `sequencer.lock`, созданный с O_EXCL, в нём pid и токен
- * владельца. Занят живым процессом (или другим открытым экземпляром в этом же процессе) —
- * отказ StateDirBusy; хозяин мёртв — блокировка снимается и берётся заново. Возвращает функцию
- * снятия; при выходе процесса снимаются все.
- */
-export function lockStateDir(dir: string): () => void {
-    mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, 'sequencer.lock');
-    const token = randomBytes(16).toString('hex');
-    for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-            const fd = openSync(file, 'wx', 0o600);
-            try {
-                writeFileSync(fd, JSON.stringify({ pid: process.pid, token }) + '\n');
-                fsyncSync(fd);
-            } finally {
-                closeSync(fd);
-            }
-            heldLocks.set(token, file);
-            if (!exitHookInstalled) {
-                exitHookInstalled = true;
-                process.on('exit', () => heldLocks.forEach((held) => rmSync(held, { force: true })));
-            }
-            return () => {
-                if (!heldLocks.delete(token)) return;
-                rmSync(file, { force: true });
-            };
-        } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        }
-        let owner: { pid?: number; token?: string } = {};
-        try {
-            owner = JSON.parse(readFileSync(file, 'utf8'));
-        } catch {
-            // Файл без содержимого: хозяин упал между созданием и записью — блокировка мёртвая.
-        }
-        const pid = Number(owner.pid);
-        if (Number.isInteger(pid) && pid > 0) {
-            if (pid === process.pid && owner.token && heldLocks.has(owner.token))
-                throw new StateDirBusy(
-                    `каталог состояния ${dir} занят другим экземпляром сервиса в этом же процессе (${file})`,
-                );
-            if (pid !== process.pid && processAlive(pid))
-                throw new StateDirBusy(
-                    `каталог состояния ${dir} занят сервисом с pid ${pid} (${file}): второй экземпляр не запускается`,
-                );
-        }
-        rmSync(file, { force: true });
-    }
-    throw new StateDirBusy(`блокировку каталога состояния ${dir} не удалось взять (${file})`);
-}
+export { lockStateDir, StateDirBusy } from './lock';
 
 export function genesisState(chainId: bigint): SequencerState {
     return {

@@ -388,8 +388,9 @@ describe('сборщик блоков: блокировка каталога с�
             await new Promise((resolve) => holder.once('exit', resolve));
         }
         lockStateDir(dir)();
+        // Пустой файл — блокировку пишут (круг 19): занят, пока молод; старый — снимается (SequencerProcess.spec.ts).
         writeFileSync(path.join(dir, 'sequencer.lock'), '');
-        lockStateDir(dir)();
+        expect(() => lockStateDir(dir)).toThrow(/без содержимого моложе/);
     });
 });
 
