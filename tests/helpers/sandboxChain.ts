@@ -8,8 +8,14 @@ import { AccountSnapshot, TESTNET_GLOBAL_ID, TonChain } from '../../sequencer/to
 //   hold     — сообщение в пути: доставляется на releaseAfter-м следующем чтении счёта;
 //   drop     — сообщение не доставлено и ответ «потерян»;
 //   lag      — снимок этого счёта отдаётся прежний (отстающий сервер за балансировщиком);
-//   tick     — сдвиг времени L1 при каждом чтении счёта (ожидание по состоянию, а не по таймеру).
+//   tick     — сдвиг времени L1 при каждом чтении счёта (ожидание по состоянию, а не по таймеру);
+//   lagReads — сколько чтений отдавать `lag` этого счёта (нет записи — всегда);
+//   rewind   — после доставки сообщения `delivery`: первые `skip` чтений счёта `address` — настоящие
+//              (подтверждение), следующие `reads` — снимок, сделанный прямо перед доставкой
+//              (отстающий сервер toncenter, круг 21, пункт 1).
 // Сбой применяется к сообщению, для которого `which(номер отправки)` — да.
+
+export type ChainRewind = { address: string; delivery: number; skip: number; reads: number };
 
 export type ChainFault = { kind: 'loseAck' | 'drop' } | { kind: 'hold'; releaseAfter: number };
 
@@ -20,11 +26,21 @@ export function sandboxChain(blockchain: Blockchain) {
         fault: null as ChainFault | null,
         which: (_index: number) => true,
         lag: new Map<string, AccountSnapshot>(),
+        lagReads: new Map<string, number>(),
         tick: 0,
         globalId: TESTNET_GLOBAL_ID,
+        rewind: null as ChainRewind | null,
+        /** Отдавать ли список транзакций (без него отказ контракта виден только по ожиданию). */
+        listTransactions: true,
     };
+    let rewound: { snapshot: AccountSnapshot; skip: number; reads: number } | null = null;
+    let deliveries = 0;
     let held: { message: Cell; reads: number } | null = null;
     const deliver = async (message: Cell) => {
+        deliveries++;
+        const rewind = control.rewind;
+        if (rewind && rewind.delivery === deliveries)
+            rewound = { snapshot: await read(Address.parseRaw(rewind.address)), skip: rewind.skip, reads: rewind.reads };
         results.push(await blockchain.sendMessage(loadMessage(message.beginParse())));
     };
     const read = async (address: Address): Promise<AccountSnapshot> => {
@@ -46,7 +62,21 @@ export function sandboxChain(blockchain: Blockchain) {
                 held = null;
                 await deliver(message);
             }
-            return control.lag.get(address.toRawString()) ?? read(address);
+            const raw = address.toRawString();
+            if (rewound && control.rewind?.address === raw) {
+                if (rewound.skip > 0) rewound.skip--;
+                else if (rewound.reads > 0) {
+                    rewound.reads--;
+                    return rewound.snapshot;
+                }
+            }
+            const lagged = control.lag.get(raw);
+            const left = control.lagReads.get(raw);
+            if (lagged && left !== undefined) {
+                if (left <= 0) return read(address);
+                control.lagReads.set(raw, left - 1);
+            }
+            return lagged ?? read(address);
         },
         sendExternal: async (message) => {
             attempts.push(message);
@@ -60,6 +90,14 @@ export function sandboxChain(blockchain: Blockchain) {
             if (fault?.kind === 'loseAck') throw new Error('сеть не ответила (сообщение дошло)');
         },
         globalId: async () => control.globalId,
+        transactions: async (address, limit) => {
+            if (!control.listTransactions) return [];
+            return results
+                .flatMap((result) => result.transactions)
+                .filter((transaction) => address.equals(new Address(0, Buffer.from(transaction.address.toString(16).padStart(64, '0'), 'hex'))))
+                .reverse()
+                .slice(0, limit);
+        },
     };
     return { chain, control, results, attempts, snapshot: read };
 }

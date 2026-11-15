@@ -8,13 +8,15 @@ import { compile } from '@ton/blueprint';
 import { mnemonicNew } from '@ton/crypto';
 import '@ton/test-utils';
 import { Bn254Groth16Verifier } from '../wrappers/Bn254Groth16Verifier';
-import { loadEvmRollupKey, loadProvenRethBatch } from '../wrappers/evmProofs';
+import { dataChunksOf, loadEvmRollupKey, loadProvenRethBatch } from '../wrappers/evmProofs';
+import { dataHashStep } from '../wrappers/rollupMath';
+import { StateDirBusy } from '../sequencer/state';
 import { Rollup, RollupOpcodes } from '../wrappers/Rollup';
-import { DEPLOY_VALUE, KEY_FINALIZE_VALUE, KEY_PART_VALUE } from '../wrappers/rollupValues';
+import { DEPLOY_VALUE, KEY_FINALIZE_VALUE, KEY_PART_VALUE, PUBLISH_DATA_VALUE } from '../wrappers/rollupValues';
 import { DEFAULT_CIRCUITS_DIR } from '../sequencer/proofImport';
 import { BatchProof, jobKeyOf, LocalProver, Prover } from '../sequencer/prover';
 import { Interrupted, Sequencer, SequencerConfig } from '../sequencer/service';
-import { Batch, TestnetSubmitter } from '../sequencer/submitter';
+import { Batch, TestnetSubmitter, TestnetSubmitterOptions } from '../sequencer/submitter';
 import { assertTestnetEndpoint, SequencerWallet } from '../sequencer/ton';
 import { checkTestnet } from '../sequencer/testnet';
 import { fakeProveScript, rethJob } from './helpers/fakeProver';
@@ -46,15 +48,16 @@ describe('TestnetSubmitter в Sandbox: настоящий контракт, ко
     let dir: string;
     let net: ReturnType<typeof sandboxChain>;
     let lines: string[];
-    const submitter = (options: { pollAttempts?: number } = {}) =>
+    const submitter = (options: Partial<TestnetSubmitterOptions> = {}) =>
         new TestnetSubmitter({
             chain: net.chain,
             rollup: rollup.address,
             wallet,
             stateDir: path.join(dir, 'state'),
             pollMs: 0,
-            pollAttempts: options.pollAttempts ?? 20,
+            pollAttempts: 20,
             log: (line) => lines.push(line),
+            ...options,
         });
     const opsTo = (results: { transactions: Transaction[] }[]) =>
         results.flatMap((result) =>
@@ -146,8 +149,118 @@ describe('TestnetSubmitter в Sandbox: настоящий контракт, ко
         expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: false });
         expect(submits()).toBe(1);
         expect(net.attempts).toHaveLength(chunks + 2);
-        expect(lines.some((line) => /сообщение «батч 1» \(seqno \d+\) не принято кошельком до срока \d+: не дошло/.test(line))).toBe(true);
+        expect(lines.some((line) => /сообщение «батч 1» \(seqno \d+\) не принято кошельком до срока \d+ \(\+60 с\): не дошло/.test(line))).toBe(true);
     }, 120_000);
+
+    describe('круг 21: монотонные снимки, срок сообщения, отказ контракта, сброс и продолжение данных', () => {
+        const raw = () => rollup.address.toRawString();
+        const publishOps = () => Array(chunks).fill(RollupOpcodes.publishData);
+
+        it('снимок rollup\'а старее подтверждения порции — перечитывается: дубля порции нет, данные верны', async () => {
+            net.control.tick = 1;
+            net.control.rewind = { address: raw(), delivery: 1, skip: 1, reads: 1 };
+            expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: false });
+            expect(net.attempts).toHaveLength(chunks + 1);
+            expect(opsTo(net.results)).toEqual([...publishOps(), RollupOpcodes.submitBatch]);
+            expect(await rollup.getRollupState()).toMatchObject({ batchIndex: 1, stateRoot: BigInt(BLOCK.hash) });
+        }, 120_000);
+
+        it('снимок кошелька старее последнего — seqno не из прошлого: сообщение с годным seqno, без лишней попытки', async () => {
+            net.control.tick = 1;
+            net.control.rewind = { address: wallet.address.toRawString(), delivery: 1, skip: 1, reads: 1 };
+            expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: false });
+            expect(net.attempts).toHaveLength(chunks + 1);
+            expect(opsTo(net.results)).toEqual([...publishOps(), RollupOpcodes.submitBatch]);
+        }, 120_000);
+
+        it('после подтверждения SubmitBatch снимок отстал — «принят» не теряется и SubmitBatch не повторяется', async () => {
+            net.control.tick = 1;
+            net.control.rewind = { address: raw(), delivery: chunks + 1, skip: 1, reads: 1 };
+            expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: false });
+            expect(net.attempts).toHaveLength(chunks + 1);
+            expect(submits()).toBe(1);
+        }, 120_000);
+
+        it('наибольшее время снимка переживает перезапуск (stateDir/l1-seen.json)', async () => {
+            const old = await net.snapshot(rollup.address);
+            net.control.tick = 5;
+            const seen = (await submitter().contractState()).utime;
+            expect(seen).toBe(old.utime + 5);
+            net.control.lag.set(raw(), old);
+            net.control.lagReads.set(raw(), 1);
+            expect((await submitter().contractState()).utime).toBe(seen + 10);
+            // Отстающий сервер так и не догнал: предел перечитываний — отказ шага, не старое состояние.
+            net.control.lagReads.set(raw(), 100);
+            await expect(submitter({ staleRereads: 2 }).contractState()).rejects.toThrow(/^снимок счёта .* на время \d+, а уже виден снимок на \d+: 3 ответов подряд/);
+        }, 60_000);
+
+        it('«не дошло» — только после validUntil + expiryMargin: в запасе ждать, после — слать снова', async () => {
+            net.control.fault = { kind: 'drop' };
+            net.control.which = (index) => index === 1;
+            await expect(submitter().submit(batch())).rejects.toThrow('сеть не ответила (сообщение не дошло)');
+            net.control.fault = null;
+            const outbox = JSON.parse(require('fs').readFileSync(path.join(dir, 'state', 'outbox.json'), 'utf8')) as { validUntil: number };
+            blockchain.now = outbox.validUntil + 30;
+            await expect(submitter({ pollAttempts: 2 }).submit(batch())).rejects.toThrow(/^не дождался: кошелёк принял сообщение «данные батча 1/);
+            expect(net.attempts).toHaveLength(1);
+            blockchain.now = outbox.validUntil + 61;
+            expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: false });
+            expect(net.attempts).toHaveLength(chunks + 2);
+        }, 120_000);
+
+        it('отказ контракта сообщению, принятому кошельком (SubmitBatch после срока), — по транзакции контракта, сразу', async () => {
+            const { maxBlockAge } = await rollup.getDeployment();
+            blockchain.now = BLOCK.timestamp + maxBlockAge + 10;
+            const outcome = await submitter({ pollAttempts: 50 }).submit(batch());
+            expect(outcome).toEqual({ accepted: false, reason: expect.stringMatching(/^контракт отверг сообщение «батч 1» \(код \d+\)/) });
+            // Без списка транзакций — прежний ответ по истечении ожидания.
+            await blockchain.loadFrom(ready);
+            rmSync(path.join(dir, 'state'), { recursive: true, force: true });
+            net = sandboxChain(blockchain);
+            net.control.listTransactions = false;
+            blockchain.now = BLOCK.timestamp + maxBlockAge + 10;
+            expect(await submitter({ pollAttempts: 3 }).submit(batch())).toEqual({
+                accepted: false,
+                reason: expect.stringMatching(/^сообщение «батч 1» кошелёк отправил \(seqno \d+\), а контракт его не учёл/),
+            });
+        }, 120_000);
+
+        it('перед каждой отправкой — своя блокировка: снята — StateDirBusy, сообщение не уходит', async () => {
+            let calls = 0;
+            const assertHeld = () => {
+                if (++calls > chunks) throw new StateDirBusy('блокировка снята');
+            };
+            await expect(submitter({ assertHeld }).submit(batch())).rejects.toThrow(StateDirBusy);
+            expect(net.attempts).toHaveLength(chunks);
+            expect(require('fs').existsSync(path.join(dir, 'state', 'outbox.json'))).toBe(false);
+        }, 120_000);
+
+        it('чужие данные батча у контракта — сброс (DiscardBatchData), затем порции и SubmitBatch', async () => {
+            const foreign = dataChunksOf(reportOf(2))[0];
+            await rollup.sendPublishData(blockchain.sender(wallet.address), { batchIndex: 1, data: foreign, value: PUBLISH_DATA_VALUE });
+            expect(await rollup.getBatchDataHash(1)).not.toBe(0n);
+            expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: false });
+            expect(opsTo(net.results)).toEqual([RollupOpcodes.discardBatchData, ...publishOps(), RollupOpcodes.submitBatch]);
+            expect(net.attempts).toHaveLength(chunks + 2);
+        }, 120_000);
+
+        it('часть порций уже опубликована — продолжение с середины, без сброса и без повтора', async () => {
+            // Данные блока 1, разрезанные на три порции (у настоящих блоков цепочки порция одна).
+            const whole = Buffer.from(reportOf(1).dataChunksHex[0], 'hex');
+            const parts = [whole.subarray(0, 200), whole.subarray(200, 400), whole.subarray(400)].map((part) => part.toString('hex'));
+            const report = { ...reportOf(1), dataChunksHex: parts };
+            const cells = dataChunksOf(report);
+            const hash = cells.reduce(dataHashStep, 0n);
+            report.publicValues = { ...report.publicValues, batchHash: '0x' + hash.toString(16).padStart(64, '0') };
+            await rollup.sendPublishData(blockchain.sender(wallet.address), { batchIndex: 1, data: cells[0], value: PUBLISH_DATA_VALUE });
+            const outcome = await submitter().submit({ ...batch(), report });
+            // Данные опубликованы целиком; дальше — сверка публичного входа (отчёт подменён тестом).
+            expect(outcome).toEqual({ accepted: false, reason: expect.stringMatching(/^контракт ждёт публичный вход/) });
+            expect(opsTo(net.results)).toEqual([RollupOpcodes.publishData, RollupOpcodes.publishData]);
+            expect(net.attempts).toHaveLength(2);
+            expect(await rollup.getBatchDataHash(1)).toBe(hash);
+        }, 120_000);
+    });
 
     it('кошелёк, сеть и ключ: чужой секвенсор — отказ; ключ не печатается; не testnet — отказ', async () => {
         const stranger = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: (await mnemonicNew()).join(' '), WALLET_VERSION: 'v5r1' });

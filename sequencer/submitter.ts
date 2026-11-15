@@ -176,19 +176,41 @@ export class SandboxSubmitter implements BatchSubmitter {
 /** Чем контракт показывает, что сообщение учтено: хеш данных батча или номер принятого батча. */
 type Effect = { kind: 'dataHash'; batch: number; value: bigint } | { kind: 'batchIndex'; atLeast: number };
 
+const sameEffect = (a: Effect, b: Effect): boolean =>
+    a.kind === 'dataHash' && b.kind === 'dataHash'
+        ? a.batch === b.batch && a.value === b.value
+        : a.kind === 'batchIndex' && b.kind === 'batchIndex' && a.atLeast === b.atLeast;
+
 /**
  * Запись исходящего журнала: внешнее сообщение кошельку ушло (или могло уйти) с этим seqno и
  * сроком. Пока запись есть, новое сообщение не шлётся: сначала выясняется, принял ли кошелёк
  * прежнее (seqno вырос — тогда ждать его следствия у контракта) или его срок истёк (время L1 позже
- * validUntil при прежнем seqno — сообщение не дошло и уже не дойдёт).
+ * validUntil + expiryMargin при прежнем seqno — сообщение не дошло и уже не дойдёт).
+ * `bodyHash` и `sentUtime` — чтобы узнать транзакцию контракта с этим сообщением (отказ — сразу).
  */
-type Outbox = { what: string; seqno: number; validUntil: number; effect: Effect; messageHash: string; sentAt: string };
+type Outbox = {
+    what: string;
+    seqno: number;
+    validUntil: number;
+    effect: Effect;
+    messageHash: string;
+    sentAt: string;
+    bodyHash?: string;
+    sentUtime?: number;
+};
+
+/** Чем кончилось прежнее сообщение из журнала. */
+type Settled =
+    | { kind: 'none' }
+    | { kind: 'expired' }
+    | { kind: 'seen'; effect: Effect }
+    | { kind: 'failed'; reason: string };
 
 export type TestnetSubmitterOptions = {
     chain: TonChain;
     rollup: Address;
     wallet: SequencerWallet;
-    /** Каталог состояния сервиса: исходящий журнал — outbox.json. */
+    /** Каталог состояния сервиса: исходящий журнал — outbox.json, время снимков — l1-seen.json. */
     stateDir: string;
     /** Пауза между опросами состояния, мс; по умолчанию 3 с. */
     pollMs?: number;
@@ -196,31 +218,92 @@ export type TestnetSubmitterOptions = {
     pollAttempts?: number;
     /** Срок действия внешнего сообщения после времени L1, с; по умолчанию 120. */
     messageTtl?: number;
+    /**
+     * Запас после срока сообщения, с (круг 21, 5б): «не дошло» — только при времени L1 позже
+     * validUntil + expiryMargin. Отстающий сервер toncenter иначе дал бы дубль. По умолчанию 60.
+     */
+    expiryMargin?: number;
+    /** Сколько раз перечитать снимок старее уже виденного (круг 21, 1); по умолчанию 20. */
+    staleRereads?: number;
+    /** Перепроверка своей блокировки каталога — перед каждой отправкой (круг 21, 5в). */
+    assertHeld?: () => void;
     log?: (line: string) => void;
 };
 
 const ton = (nano: bigint) => `${fromNano(nano)} TON`;
+
+/** Снимок старее уже виденного не уходит за `staleRereads` перечитываний (круг 21, пункт 1). */
+export class StaleSnapshot extends Error {}
+
+/** Ожидание по состоянию не дождалось изменения за `pollAttempts` опросов. */
+class PollTimeout extends Error {}
 
 /**
  * Отправщик в testnet. Сообщения — переводы кошелька секвенсора (WALLET_MNEMONIC) на контракт с
  * суммами из wrappers/rollupValues.ts. Каждое ожидание — по состоянию контракта и кошелька (снимки
  * с временем блока), не по таймеру. Повтор после любого сбоя не шлёт дубль: исходящий журнал
  * (outbox.json, записывается ДО отправки) держит seqno и срок последнего сообщения.
+ *
+ * Снимки монотонны (круг 21, пункт 1): у toncenter за балансировщиком следующий ответ может прийти
+ * от отстающего сервера — с прежним seqno кошелька и прежним хешем данных, что дало бы дубль порции
+ * или сообщение с негодным seqno. Поэтому по каждому адресу помнится наибольшее время снимка (в
+ * процессе и в stateDir/l1-seen.json — переживает перезапуск), и снимок старее него перечитывается.
  */
 export class TestnetSubmitter implements BatchSubmitter {
     private readonly outboxFile: string;
+    private readonly seenFile: string;
+    private readonly seen: Map<string, number>;
 
     constructor(private readonly options: TestnetSubmitterOptions) {
         this.outboxFile = path.join(options.stateDir, 'outbox.json');
+        this.seenFile = path.join(options.stateDir, 'l1-seen.json');
+        this.seen = new Map(Object.entries(this.readSeen()));
     }
 
     private log(line: string) {
         this.options.log?.(`отправщик: ${line}`);
     }
 
-    /** Снимок счёта rollup'а: get-методы и время L1 из одного ответа. */
+    private readSeen(): Record<string, number> {
+        if (!existsSync(this.seenFile)) return {};
+        const parsed = JSON.parse(readFileSync(this.seenFile, 'utf8')) as unknown;
+        if (typeof parsed !== 'object' || parsed === null || Object.values(parsed).some((value) => !Number.isInteger(value)))
+            throw new Error(`${this.seenFile}: не таблица «адрес → время снимка»`);
+        return parsed as Record<string, number>;
+    }
+
+    /** Запомнить время снимка: в процессе и на диске (наибольшее из записанного и нового). */
+    private remember(key: string, utime: number): void {
+        if (utime <= (this.seen.get(key) ?? 0)) return;
+        this.seen.set(key, utime);
+        const merged = { ...this.readSeen() };
+        for (const [address, time] of this.seen) merged[address] = Math.max(merged[address] ?? 0, time);
+        writeAtomically(this.seenFile, JSON.stringify(merged, null, 1) + '\n');
+    }
+
+    /** Снимок счёта не старее уже виденного по этому адресу; старее — перечитать (с паузой и пределом). */
+    private async fresh(address: Address): Promise<AccountSnapshot> {
+        const key = address.toRawString();
+        const rereads = this.options.staleRereads ?? 20;
+        for (let attempt = 0; ; attempt++) {
+            const floor = this.seen.get(key) ?? 0;
+            const snapshot = await this.options.chain.account(address);
+            if (snapshot.utime >= floor) {
+                this.remember(key, snapshot.utime);
+                return snapshot;
+            }
+            if (attempt >= rereads)
+                throw new StaleSnapshot(
+                    `снимок счёта ${address.toString({ testOnly: true })} на время ${snapshot.utime}, а уже виден снимок на ${floor}: ` +
+                        `${rereads + 1} ответов подряд от отстающего сервера; повтор шага продолжит без дубля`,
+                );
+            await new Promise((resolve) => setTimeout(resolve, this.options.pollMs ?? 3000));
+        }
+    }
+
+    /** Снимок счёта rollup'а: get-методы и время L1 из одного ответа, не старее уже виденного. */
     snapshot(): Promise<AccountSnapshot> {
-        return this.options.chain.account(this.options.rollup);
+        return this.fresh(this.options.rollup);
     }
 
     /** Время L1 — время блока провайдера в снимке счёта rollup'а. */
@@ -259,10 +342,10 @@ export class TestnetSubmitter implements BatchSubmitter {
             if (value !== null) return value;
             await new Promise((resolve) => setTimeout(resolve, this.options.pollMs ?? 3000));
         }
-        throw new Error(`не дождался: ${description} (${attempts} опросов); повтор шага продолжит без дубля`);
+        throw new PollTimeout(`не дождался: ${description} (${attempts} опросов); повтор шага продолжит без дубля`);
     }
 
-    /** Следствие сообщения уже видно у контракта (на свежем снимке). */
+    /** Следствие сообщения уже видно у контракта (на снимке не старее виденного). */
     private async effectHolds(effect: Effect): Promise<boolean> {
         const on = this.on(await this.snapshot());
         if (effect.kind === 'batchIndex') return (await on((rollup) => rollup.getRollupState())).batchIndex >= effect.atLeast;
@@ -270,34 +353,73 @@ export class TestnetSubmitter implements BatchSubmitter {
     }
 
     /**
-     * Прежнее сообщение из журнала: дождаться, пока кошелёк его примет (seqno вырос) и контракт
-     * покажет его следствие, либо пока истечёт его срок. Журнал после этого пуст. Строка — отказ:
-     * кошелёк сообщение отправил, а контракт его не учёл (отклонил).
+     * Транзакция контракта с сообщением из журнала, если контракт его отверг (круг 21, 5е): код
+     * выхода. null — такой транзакции нет (ещё не дошла) или она успешна. Сеть без списка
+     * транзакций — null: тогда отказ виден только по истечении ожидания.
      */
-    private async settleOutbox(): Promise<string | null> {
+    private async rejectedByContract(outbox: Outbox): Promise<string | null> {
+        const list = this.options.chain.transactions;
+        if (!list || !outbox.bodyHash || outbox.sentUtime === undefined) return null;
+        for (const transaction of await list.call(this.options.chain, this.options.rollup, 16)) {
+            const message = transaction.inMessage;
+            if (!message || message.info.type !== 'internal' || !this.options.wallet.address.equals(message.info.src)) continue;
+            if (transaction.now < outbox.sentUtime || message.body.hash().toString('hex') !== outbox.bodyHash) continue;
+            const description = transaction.description;
+            if (description.type !== 'generic') return 'транзакция не обычная';
+            if (description.computePhase.type !== 'vm') return `вычисление пропущено (${description.computePhase.reason})`;
+            if (!description.computePhase.success) return `код ${description.computePhase.exitCode}`;
+            if (description.aborted) return `фаза действий не прошла (код вычисления ${description.computePhase.exitCode})`;
+        }
+        return null;
+    }
+
+    /**
+     * Прежнее сообщение из журнала: дождаться, пока кошелёк его примет (seqno вырос) и контракт
+     * покажет его следствие (или отвергнет его), либо пока истечёт его срок. Журнал после этого пуст.
+     */
+    private async settleOutbox(): Promise<Settled> {
         const outbox = this.readOutbox();
-        if (!outbox) return null;
+        if (!outbox) return { kind: 'none' };
+        const margin = this.options.expiryMargin ?? 60;
         const verdict = await this.poll(`кошелёк принял сообщение «${outbox.what}» (seqno ${outbox.seqno}) либо истёк его срок`, async () => {
-            const snapshot = await this.options.chain.account(this.options.wallet.address);
+            const snapshot = await this.fresh(this.options.wallet.address);
             const { seqno } = await this.options.wallet.state(snapshot);
             if (seqno > outbox.seqno) return 'applied' as const;
-            if (snapshot.utime > outbox.validUntil) return 'expired' as const;
+            if (snapshot.utime > outbox.validUntil + margin) return 'expired' as const;
             return null;
         });
         if (verdict === 'expired') {
-            this.log(`сообщение «${outbox.what}» (seqno ${outbox.seqno}) не принято кошельком до срока ${outbox.validUntil}: не дошло`);
+            this.log(`сообщение «${outbox.what}» (seqno ${outbox.seqno}) не принято кошельком до срока ${outbox.validUntil} (+${margin} с): не дошло`);
             rmSync(this.outboxFile, { force: true });
-            return null;
+            return { kind: 'expired' };
         }
-        const seen = await this.poll(`контракт учёл «${outbox.what}»`, async () => ((await this.effectHolds(outbox.effect)) ? true : null)).then(
-            () => true,
-            () => false,
-        );
+        const result = await this.poll(`контракт учёл «${outbox.what}»`, async () => {
+            if (await this.effectHolds(outbox.effect)) return { seen: true as const };
+            const rejected = await this.rejectedByContract(outbox);
+            return rejected === null ? null : { seen: false as const, rejected };
+        }).catch((error) => {
+            // Сбой сети — не ответ контракта: журнал остаётся, повтор шага продолжит ожидание.
+            if (error instanceof PollTimeout) return { seen: false as const, rejected: null };
+            throw error;
+        });
         rmSync(this.outboxFile, { force: true });
-        if (!seen)
-            return `сообщение «${outbox.what}» кошелёк отправил (seqno ${outbox.seqno}), а контракт его не учёл: смотрите транзакции контракта в обозревателе`;
+        if (!result.seen && result.rejected !== null)
+            return { kind: 'failed', reason: `контракт отверг сообщение «${outbox.what}» (${result.rejected}): смотрите транзакции контракта в обозревателе` };
+        if (!result.seen)
+            return {
+                kind: 'failed',
+                reason: `сообщение «${outbox.what}» кошелёк отправил (seqno ${outbox.seqno}), а контракт его не учёл: смотрите транзакции контракта в обозревателе`,
+            };
         this.log(`«${outbox.what}» учтено контрактом`);
-        return null;
+        return { kind: 'seen', effect: outbox.effect };
+    }
+
+    /** Довести прежнее сообщение: строка — отказ, true — это и было ожидаемое следствие, false — нет. */
+    private async settled(effect: Effect): Promise<string | boolean> {
+        const settled = await this.settleOutbox();
+        if (settled.kind === 'failed') return settled.reason;
+        // Следствие только что увидено: повторная проверка по новому снимку не нужна (круг 21, 1).
+        return settled.kind === 'seen' && sameEffect(settled.effect, effect);
     }
 
     /**
@@ -307,10 +429,10 @@ export class TestnetSubmitter implements BatchSubmitter {
      */
     private async sendOnce(what: string, message: SenderArguments, effect: Effect): Promise<string | null> {
         for (let attempt = 0; attempt < 3; attempt++) {
-            const failed = await this.settleOutbox();
-            if (failed) return failed;
-            if (await this.effectHolds(effect)) return null;
-            const snapshot = await this.options.chain.account(this.options.wallet.address);
+            const done = await this.settled(effect);
+            if (typeof done === 'string') return done;
+            if (done || (await this.effectHolds(effect))) return null;
+            const snapshot = await this.fresh(this.options.wallet.address);
             const wallet = await this.options.wallet.state(snapshot);
             if (wallet.balance < message.value)
                 return `на кошельке секвенсора ${ton(wallet.balance)}, а сообщению «${what}» нужно ${ton(message.value)} и комиссия`;
@@ -323,22 +445,26 @@ export class TestnetSubmitter implements BatchSubmitter {
                 effect,
                 messageHash: external.hash().toString('hex'),
                 sentAt: new Date().toISOString(),
+                bodyHash: (message.body ?? beginCell().endCell()).hash().toString('hex'),
+                sentUtime: snapshot.utime,
             };
+            // Отправка — только под своей блокировкой каталога (круг 21, 5в).
+            this.options.assertHeld?.();
             // Журнал — ДО отправки: сбой между отправкой и записью иначе дал бы дубль.
             writeAtomically(this.outboxFile, serialize(outbox));
             this.log(`«${what}»: seqno ${wallet.seqno}, ${ton(message.value)}, действительно до ${validUntil}`);
             await this.options.chain.sendExternal(external);
         }
-        const failed = await this.settleOutbox();
-        if (failed) return failed;
-        if (await this.effectHolds(effect)) return null;
+        const done = await this.settled(effect);
+        if (typeof done === 'string') return done;
+        if (done || (await this.effectHolds(effect))) return null;
         return `сообщение «${what}» не дошло до кошелька за три попытки (каждая — до конца срока)`;
     }
 
     async submit(batch: Batch): Promise<SubmitOutcome> {
         // Прежнее сообщение — сначала: пока оно в пути, состояние контракта ещё не окончательное.
         const pending = await this.settleOutbox();
-        if (pending) return { accepted: false, reason: pending };
+        if (pending.kind === 'failed') return { accepted: false, reason: pending.reason };
         const early = acceptanceOutcome(await this.contractState(), batch);
         if (early) return early;
         const rollup = Rollup.createFromAddress(this.options.rollup);

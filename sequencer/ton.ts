@@ -11,6 +11,7 @@ import {
     SendMode,
     SenderArguments,
     storeMessage,
+    Transaction,
 } from '@ton/core';
 import { mnemonicToPrivateKey, mnemonicValidate } from '@ton/crypto';
 import { TonClient, WalletContractV4, WalletContractV5R1 } from '@ton/ton';
@@ -46,6 +47,11 @@ export interface TonChain {
     sendExternal(message: Cell): Promise<void>;
     /** global_id сети: testnet — TESTNET_GLOBAL_ID. */
     globalId(): Promise<number>;
+    /**
+     * Последние транзакции счёта, новые первыми (круг 21, 5е: отказ контракта виден сразу). Сеть
+     * без этого метода — отказ виден только по истечении ожидания следствия.
+     */
+    transactions?(address: Address, limit: number): Promise<Transaction[]>;
 }
 
 /** Адрес API — toncenter testnet, и только он (testnetGuard.ts: по адресу mainnet от testnet не отличить). */
@@ -90,6 +96,10 @@ export class ToncenterChain implements TonChain {
             code: info.code ? Cell.fromBoc(info.code)[0] : null,
             data: info.data ? Cell.fromBoc(info.data)[0] : null,
         };
+    }
+
+    async transactions(address: Address, limit: number): Promise<Transaction[]> {
+        return this.call(() => this.client.getTransactions(address, { limit, archival: true }));
     }
 
     async sendExternal(message: Cell): Promise<void> {
