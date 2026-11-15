@@ -269,6 +269,10 @@ node zk/gen-evm-exit-fixture.mjs                 # фикстура выхода
 npx jest --runInBand tests/SequencerReth.spec.ts   # сборщик блоков: узел Reth + хост + двойник в Sandbox (sequencer/README.md)
 npx ts-node sequencer/main.ts queue <адрес> [--from=N]   # очередь L1 контракта в testnet, сверенная с хешами (только чтение)
 npx ts-node sequencer/main.ts check|run <адрес> --fee-recipient=0x…   # сервис-секвенсор против testnet (check ничего не шлёт; sequencer/README.md)
+npx ts-node sequencer/main.ts address | deploy [--dry-run] [--escape-timeout=21600] [--max-block-age=3600]   # кошелёк сервиса; развернуть контракт v2 им (возобновляемо)
+npx ts-node sequencer/main.ts withdrawals <адрес>   # листья выводов по отчётам блоков сервиса, сверенные с контрактом (только чтение)
+npx blueprint run sequencerTraffic --testnet --mnemonic <адрес> [check|report|settle] [interval=3600] [budget=2]   # нагрузка: депозиты и выводы через мост, другим кошельком
+node zk/sequencer-run-report.mjs <адрес>   # отчёт прогона сервиса по транзакциям контракта → bench/testnet-sequencer-run.json
 npx blueprint run verifyRollupDeployment --testnet <адрес> <chainId> <мин. срок, с> <макс. срок, с> <макс. возраст блока, с> [sequencer=<адрес>] [owner=<адрес>]   # сверка развёрнутого контракта v2, ничего не шлёт
 ```
 
@@ -297,13 +301,18 @@ npx blueprint run verifyRollupDeployment --testnet <адрес> <chainId> <ми�
   `zkvm-evm/host/prover-shards.env`, импорт `import-sp1-fixture.mjs sp1_evm_sequencer --out-dir
   --report` — в каталог задания, не в fixtures/), заготовка `RemoteProver`; отправщик —
   `TestnetSubmitter` (кошелёк `WALLET_MNEMONIC`/`WALLET_VERSION`, журнал `outbox.json` до отправки,
-  get-методы на снимке счёта с его `sync_utime`); `main.ts check|run`. **В testnet сервис не
-  запускался.** Наружу окончательный только `finalized` (`safe` откатывается при пересборке). Порядок «свидетель до головы» и
+  get-методы на снимке счёта с его `sync_utime`); `main.ts check|run`; `main.ts deploy` (`deploy.ts`)
+  разворачивает контракт v2 кошельком сервиса тем же отправщиком (`TestnetSubmitter.send`, следствия
+  `deployed`/`keyPart`/`keyHash`; запись `outbox.json` несёт адрес контракта) со сверкой
+  развёртывания; нагрузка — `scripts/sequencerTraffic.ts` (кошелёк прогонов, НЕ сервиса; ключи L2
+  для выводов — `.tools/sequencer-traffic/keys.json`, 600; доказательства выводов —
+  `sequencer/withdrawals.ts` по `blocks/<N>/report.json`). Суточный прогон — TESTNET.md, «Секвенсор
+  как сервис». **В testnet сервис не запускался.** Наружу окончательный только `finalized` (`safe` откатывается при пересборке). Порядок «свидетель до головы» и
   чего нет — `sequencer/README.md`. Форму принудительных сервис спрашивает у программы:
   `rollup-evm-host --classify-forced`; сборку хоста сверяет с `program.json` через
   `rollup-evm-host --identity` (при старте и по каждому отчёту). Судьбу принудительных — по
   порядку (две одинаковые в отрезке законны, круг 18). Тесты сборщика без узла —
-  `tests/Sequencer{Units,Checks,Service,Queue,Submitter,Round20,Prover,Testnet}.spec.ts`; каталог сквозного теста —
+  `tests/Sequencer{Units,Checks,Service,Queue,Submitter,Round20,Prover,Testnet,Deploy,Traffic,Withdrawals}.spec.ts`; каталог сквозного теста —
   `.tools/sequencer-test/`, не каталог сервиса.
 - `contracts/bn254/` — программное спаривание BN254; `constants.tolk` генерируется
   `node zk/gen-bn254-constants.mjs`, эталонные векторы — `node zk/gen-bn254-vectors.mjs`,
