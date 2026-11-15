@@ -5,7 +5,8 @@
     python3 zk/rollup-mutation-check.py --only <часть названия>      # выборочно, без отчёта
     python3 zk/rollup-mutation-check.py --dry                        # только сверить образцы с исходниками
 
-Убирает по одной защите из contracts/rollup/logic.tolk, escape.tolk и storage.tolk (а для двух
+Убирает по одной защите из contracts/rollup/logic.tolk, escape.tolk, storage.tolk и bytes.tolk
+(форма «змейки» принудительной транзакции), из contracts/rollup_nullifier.tolk (а для двух
 проверок точки входа — из contracts/rollup.tolk) и запускает два теста: тот, что обязан эту
 мутацию убить, и контрольный (tests/RollupCompiles.spec.ts), который только собирает контракты.
 Контрольный падает, лишь если мутант не собрался, — так «не собралась» не выдаётся за «убита».
@@ -21,7 +22,9 @@
 bench/rollup-mutation-report.txt. Нагрузка: сборка контракта и один-два теста на мутацию, по
 одной; весь прогон — около получаса.
 
-Мутации разбора счёта EVM и чтения «змейки» ячеек — отдельный скрипт, zk/evm-exit-mutation-check.py.
+Мутации разбора счёта EVM — отдельный скрипт, zk/evm-exit-mutation-check.py; чтение «змейки»
+ячеек (bytes.tolk) мутируется в обоих: там убийцы — тесты выхода счёта EVM, здесь — тесты формы
+принудительной транзакции (tests/RollupForced.spec.ts).
 """
 import datetime
 import pathlib
@@ -34,7 +37,9 @@ LOGIC = ROOT / "contracts/rollup/logic.tolk"
 ESCAPE = ROOT / "contracts/rollup/escape.tolk"
 STORAGE = ROOT / "contracts/rollup/storage.tolk"
 ENTRY = ROOT / "contracts/rollup.tolk"
-SOURCES = [LOGIC, ESCAPE, STORAGE, ENTRY]
+BYTES = ROOT / "contracts/rollup/bytes.tolk"
+NULLIFIER = ROOT / "contracts/rollup_nullifier.tolk"
+SOURCES = [LOGIC, ESCAPE, STORAGE, ENTRY, BYTES, NULLIFIER]
 REPORT = ROOT / "bench/rollup-mutation-report.txt"
 CONTROL_SPEC = "tests/RollupCompiles.spec.ts"
 CONTROL = "контракт, двойник и нуллификатор собираются"
@@ -68,7 +73,13 @@ KEY_IMMUTABLE = "после фиксации ключ неизменяем: ни
 BLOCK_AGE = "возраст блока: не меньше получаса и не больше срока заморозки — по секунде с обеих сторон"
 REFUND_ONCE = "после заморозки депозит возвращается вносителю, кто бы ни попросил, и только один раз"
 FORCED_AFTER_FREEZE = "после заморозки в очередь ничего не ставится, а «возврата» у транзакции нет"
-RETH_INPUTS = "контракт требует для каждого из блоков 1–11 ровно тот публичный вход, что программа выдала в zkVM"
+RETH_INPUTS = "контракт требует для каждого блока цепочки ровно тот публичный вход, что программа выдала в zkVM"
+DEPOSIT_HASH = "ставит депозит в очередь и считает накопительный хеш"
+EMPTY_NOT_FROZEN = "без необработанных элементов заморозить нельзя, сколько бы ни прошло времени"
+FUTURE_BLOCK = "блок из будущего отклоняется: на секунду позже времени L1 — отказ, ровно «сейчас» — принят"
+ITEMS_LIMIT = "ровно предел — принят, на один больше — отказ, хотя элементы в очереди есть"
+BYTE_LENGTH = "длина в байтах: ровно предел принят при любой нарезке, на байт больше — отказ"
+DEBT_ONCE = "долг выплачивается, когда деньги появились: ровно один раз и только записанному получателю"
 FULL_PATH = "полный путь: депозит → батч → принудительная транзакция → два батча с данными → выводы"
 LAYOUT = "раскладка состояния в обёртке — та же, что в контракте: каждое подложенное поле читается на своём месте"
 
@@ -195,7 +206,25 @@ MUTATIONS = [
      "  assert (roots.blockTimestamp + storage.maxBlockAge > now) throw RollupErrors.BlockTooOld;",
      T_ROLLUP, "устаревший блок отклоняется: ровно maxBlockAge назад — принят, на секунду старше — отказ"),
 
+    ("ровно предел элементов на батч уже не принимается", LOGIC,
+     "  assert (n - queue.processedCount <= MAX_BATCH_QUEUE_ITEMS) throw RollupErrors.TooManyQueueItems;",
+     "  assert (n - queue.processedCount < MAX_BATCH_QUEUE_ITEMS) throw RollupErrors.TooManyQueueItems;",
+     T_QUEUE, ITEMS_LIMIT),
+    ("отметка N, равная processed, не принимается", LOGIC,
+     "  assert ((n >= queue.processedCount) && (n <= queue.headCount)) throw RollupErrors.QueueMarkOutOfRange;",
+     "  assert ((n > queue.processedCount) && (n <= queue.headCount)) throw RollupErrors.QueueMarkOutOfRange;",
+     T_QUEUE, "N равно processed — пустой отрезок: батч принят, очередь не сдвинулась"),
+    ("отметка N, равная head, не принимается", LOGIC,
+     "  assert ((n >= queue.processedCount) && (n <= queue.headCount)) throw RollupErrors.QueueMarkOutOfRange;",
+     "  assert ((n >= queue.processedCount) && (n < queue.headCount)) throw RollupErrors.QueueMarkOutOfRange;",
+     T_QUEUE, "N равно head — очередь обработана целиком"),
+    ("блок со временем ровно «сейчас» не принимается", LOGIC,
+     "  assert (roots.blockTimestamp <= now) throw RollupErrors.BlockFromFuture;",
+     "  assert (roots.blockTimestamp < now) throw RollupErrors.BlockFromFuture;", T_ROLLUP, FUTURE_BLOCK),
+
     # --- применение батча ---
+    ("батч не записывает слово состояния", LOGIC,
+     "  next.stateRoot = batch.roots.newStateRoot;\n", "", T_ROLLUP, STATE_AFTER_BATCH),
     ("батч обнуляет счётчик убранных записей", LOGIC,
      "    prunedCount: batch.queue.prunedCount,", "    prunedCount: 0,",
      T_QUEUE, "батч не трогает счётчик убранных записей: уборка продолжается с того же места"),
@@ -233,7 +262,7 @@ MUTATIONS = [
      "queuedAt: blockchain.now(), receipt: receipt });", "queuedAt: 0, receipt: receipt });",
      T_ESCAPE, "срок считается от самого старого необработанного элемента"),
     ("запас газа шага депозита меньше измеренного", LOGIC,
-     "const DEPOSIT_STEP_GAS: int = 40000", "const DEPOSIT_STEP_GAS: int = 30000", T_QUEUE, DEEP_STEPS),
+     "const DEPOSIT_STEP_GAS: int = 45000", "const DEPOSIT_STEP_GAS: int = 30000", T_QUEUE, DEEP_STEPS),
     ("запас газа шага принудительной транзакции меньше измеренного", LOGIC,
      "const FORCE_TRANSACTION_STEP_GAS: int = 50000", "const FORCE_TRANSACTION_STEP_GAS: int = 35000", T_QUEUE, DEEP_STEPS),
 
@@ -257,6 +286,10 @@ MUTATIONS = [
      "  return FORCE_TRANSACTION_FEE;",
      T_GAS, "принудительную транзакцию цена газа не запирает: плата растёт вместе с ней"),
 
+    ("плата за принудительную транзакцию не растёт с длиной хвоста", LOGIC,
+     "  return forceTransactionFee() << queueFeeDoublings(queue);", "  return forceTransactionFee();",
+     T_FEE, "принудительную транзакцию очередь не вытесняет: она только дорожает"),
+
     # --- депозит ---
     ("депозит принимается до фиксации ключа", LOGIC,
      "  assert (storage.keys.load().vkData != null) throw RollupErrors.KeyNotFinalized;\n  var state = storage.state.load();\n  // В замороженный",
@@ -275,7 +308,7 @@ MUTATIONS = [
     ("в хеш очереди идёт приложенная сумма, а не сумма за вычетом комиссии", LOGIC,
      "  pushQueueItem(mutate state, msg.l2Recipient, amount, DepositReceipt { depositor: sender, amount: amount });",
      "  pushQueueItem(mutate state, msg.l2Recipient, valueCoins, DepositReceipt { depositor: sender, amount: amount });",
-     T_RETH, RETH_INPUTS),
+     T_ROLLUP, DEPOSIT_HASH),
 
     # --- принудительная транзакция ---
     ("принудительная транзакция принимается до фиксации ключа", LOGIC,
@@ -302,7 +335,38 @@ MUTATIONS = [
      "  pushQueueItem(mutate state, 0, keccak256OfParts(parts), null);",
      T_FORCED, "элемент очереди — keccak-256 байтов транзакции под меткой: спутать с депозитом нельзя"),
 
+    # --- форма «змейки» принудительной транзакции (bytes.tolk) ---
+    ("экзотическая ячейка в «змейке» читается как обычная", BYTES,
+     "    assert (!isExotic) throw errorCode;\n", "",
+     T_FORCED, "экзотическая ячейка — отказ: байты обязаны лежать в самом сообщении"),
+    ("нецелое число байт в ячейке «змейки» допустимо", BYTES,
+     "    assert (bits % 8 == 0) throw errorCode;\n", "",
+     T_FORCED, "нецелое число байт — отказ, в первой ячейке и в любой следующей"),
+    ("число ячеек «змейки» не ограничено", BYTES,
+     "    assert (parts.size() <= maxParts) throw errorCode;\n", "",
+     T_FORCED, "«змейка» из одной ячейки, из предельного числа и на одну больше: предел ячеек — у контракта"),
+    ("вторая ссылка у ячейки «змейки» допустима", BYTES,
+     "    assert (refs <= 1) throw errorCode;\n", "",
+     T_FORCED, "две ссылки у ячейки — отказ: продолжение было бы неоднозначным"),
+    ("длина «змейки» — длина последней ячейки, а не сумма", BYTES,
+     "    bits += parts.get(index).remainingBitsCount();", "    bits = parts.get(index).remainingBitsCount();",
+     T_FORCED, BYTE_LENGTH),
+    ("длина «змейки» всегда ноль", BYTES, "  return bits;\n}", "  return 0 * bits;\n}", T_FORCED, BYTE_LENGTH),
+
+    # --- нуллификатор ---
+    ("нуллификатор принимает заявку от кого угодно", NULLIFIER,
+     "      assert (inMsg.senderAddress == storage.rollup) throw NullifierErrors.NotRollup;\n", "",
+     T_ROLLUP, "нуллификатор принимает заявки только от своего rollup"),
+    ("нуллификатор подтверждает заявку повторно", NULLIFIER,
+     "      assert (!storage.claimed) throw NullifierErrors.AlreadyClaimed;\n", "",
+     T_ROLLUP, "повторный вывод того же листа не выплачивается"),
+    ("нуллификатор помечает заявку при любой сумме монет", NULLIFIER,
+     "      assert (inMsg.valueCoins >= nullifierMinValue()) throw NullifierErrors.NotEnoughValue;\n", "",
+     T_PAYOUT, "нуллификатор не помечает заявку, если монет не хватит довести цепочку до конца"),
+
     # --- вывод и выплата ---
+    ("отсутствие записи о долге — не свой код отказа", LOGIC,
+     "  assert (entry.isFound) throw RollupErrors.NothingOwed;\n", "", T_PAYOUT, DEBT_ONCE),
     ("минимум монет на вывод не проверяется", LOGIC,
      "  assert (valueCoins >= withdrawMinValue()) throw RollupErrors.NotEnoughValue;\n", "",
      T_ROLLUP, "требует достаточно монет на цепочку сообщений"),
@@ -426,6 +490,9 @@ MUTATIONS = [
     ("заморозка возможна секундой раньше", ESCAPE,
      "(blockchain.now() - oldest > storage.escapeTimeout)", "(blockchain.now() - oldest >= storage.escapeTimeout)",
      T_FORCED, "цензура ведёт к заморозке: необработанная транзакция запускает срок"),
+    ("обработанная целиком очередь не даёт нулевого срока", ESCAPE,
+     "  if (queue.processedCount == queue.headCount) {\n    return 0;", "  if (false) {\n    return 0;",
+     T_ESCAPE, EMPTY_NOT_FROZEN),
     ("срок заморозки считается от самого нового элемента", ESCAPE,
      "  val oldest = state.queueItems.get(queue.processedCount + 1);", "  val oldest = state.queueItems.get(queue.headCount);",
      T_ESCAPE, "срок считается от самого старого необработанного элемента"),
@@ -442,6 +509,8 @@ MUTATIONS = [
     ("обработанный депозит возвращается", ESCAPE,
      "  assert (msg.depositIndex > state.queue.load().processedCount) throw RollupErrors.DepositAlreadyProcessed;\n", "",
      T_ESCAPE, "обработанный депозит вернуть нельзя: он уже на L2"),
+    ("отсутствие записи о депозите — не свой код отказа", ESCAPE,
+     "  assert (entry.isFound) throw RollupErrors.NoSuchDeposit;\n", "", T_ESCAPE, REFUND_ONCE),
     ("запись о возвращённом депозите не удаляется", ESCAPE,
      "  val entry = state.queueItems.deleteAndGetDeleted(msg.depositIndex);", "  val entry = state.queueItems.get(msg.depositIndex);",
      T_ESCAPE, REFUND_ONCE),
@@ -457,8 +526,7 @@ MUTATIONS = [
     # --- раскладка хранилища против обёртки ---
     ("в записи очереди время постановки стоит раньше хеша", STORAGE,
      "  hashBefore: uint256\n  /// Когда элемент встал в очередь: от него считается срок заморозки.\n  queuedAt: uint32\n",
-     "  queuedAt: uint32\n  hashBefore: uint256\n",
-     T_QUEUE, "батч с отметкой в середине очереди отказывает кодом 7334, если записи в словаре нет"),
+     "  queuedAt: uint32\n  hashBefore: uint256\n", T_GENESIS, LAYOUT),
     ("счётчик выводов хранится после номера батча", STORAGE,
      "  withdrawalsCount: uint64\n  batchIndex: uint64\n", "  batchIndex: uint64\n  withdrawalsCount: uint64\n", T_GENESIS, LAYOUT),
     ("счётчик убранных записей хранится перед отметкой обработанного", STORAGE,
@@ -477,6 +545,16 @@ EQUIVALENT = [
     "сообщениями от генезиса: формулы расходятся, только когда неубранных записей больше предела, а "
     "постановка растит словарь, лишь когда мусора в нём нет (тогда счёты совпадают). Мутация в списке "
     "есть и убита — но тестом на ПОДЛОЖЕННОМ состоянии",
+    "«ключ можно зафиксировать повторно» (assert vkData == null в FinalizeKey): эквивалентна с точностью до "
+    "кода отказа. После фиксации части ключа стёрты, а загрузить новые не даёт отдельная проверка в "
+    "UploadKeyPart, поэтому повторная фиксация без этой проверки всё равно отказывает — сборкой ключа из "
+    "пустого словаря частей, кодом 7105 вместо 7304. Мутация в списке есть и «убита» только потому, что "
+    "тест ждёт точный код",
+    "«отсутствие записи о долге / о депозите — не свой код отказа» (NothingOwed, NoSuchDeposit по isFound): "
+    "без проверки чтение отсутствующей записи всё равно бросает исключение — меняется только код отказа; "
+    "тест ждёт точный код",
+    "проверки чтения «змейки» (bytes.tolk) мутируются и в zk/evm-exit-mutation-check.py: там убийцы — "
+    "тесты выхода счёта EVM, здесь — тесты формы принудительной транзакции",
 ]
 
 
@@ -584,8 +662,8 @@ def main() -> int:
     REPORT.write_text(
         f"Проверка тестов rollup-контракта протокола v2 мутациями, {datetime.date.today().isoformat()}\n"
         "Команда: python3 zk/rollup-mutation-check.py\n"
-        "Мутируются contracts/rollup/logic.tolk, escape.tolk, storage.tolk и две проверки точки входа\n"
-        "contracts/rollup.tolk. На каждую мутацию запускаются её тест и контрольный (только собирает\n"
+        "Мутируются contracts/rollup/logic.tolk, escape.tolk, storage.tolk, bytes.tolk,\n"
+        "contracts/rollup_nullifier.tolk и две проверки точки входа contracts/rollup.tolk. На каждую мутацию запускаются её тест и контрольный (только собирает\n"
         "контракты: падает, лишь если мутант не собрался). «убита» — контрольный прошёл, тест мутации упал.\n"
         "В скобках: файл мутации → набор и тест, который обязан был её убить.\n\n"
         + "\n".join(lines)
