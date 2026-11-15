@@ -1,14 +1,20 @@
 import { keccak_256 } from '@noble/hashes/sha3';
 import { createHash } from 'crypto';
+import { readFileSync } from 'fs';
+import path from 'path';
 import {
     appendWithdrawalLeaf,
+    batchDataHash,
     batchDigest,
     batchPublicValueWords,
     byteSnake,
+    dataChunkCell,
+    depositHash,
     emptyWithdrawalFrontier,
     FORCED_TRANSACTION_MARKER,
     forcedTransactionCell,
     forcedTransactionHash,
+    forcedTransactionKeccak,
     MAX_FORCED_TX_BYTES,
     MAX_FORCED_TX_CELLS,
     MAX_WITHDRAWALS,
@@ -206,6 +212,107 @@ describe('Арифметика протокола v2', () => {
             );
             expect(() => byteSnake(Buffer.alloc(10), [4, 5])).toThrow('не складываются');
             expect(() => byteSnake(Buffer.alloc(128), [128])).toThrow('не помещается');
+        });
+    });
+
+    // Векторы пишет нативный тест программы zkVM (zkvm-evm/lib, protocol_vectors_fixture_is_current):
+    // это значения, посчитанные кодом на Rust, который исполняется в zkVM. Здесь с ними
+    // сверяется TypeScript; контракт сверяется с TypeScript в наборах на двойнике и напрямую с
+    // программой — в tests/RollupEvmReth.spec.ts.
+    describe('сверка с программой zkVM: fixtures/evm_batches/protocol-vectors.json', () => {
+        type Vectors = {
+            previous: string;
+            publicValues: Record<string, string>;
+            deposit: { l2Recipient: string; amount: string; hash: string };
+            forcedTransaction: { bytes: string; keccak: string; hash: string };
+            withdrawals: {
+                leafIndex: number;
+                recipientHash: string;
+                amount: string;
+                leafHash: string;
+                countAfter: string;
+                frontierAfter: string[];
+                rootAfter: string;
+            }[];
+            dataChunks: { data: string; cellHash: string }[];
+            batchData: { chunks: string[]; hash: string };
+            constants: { forcedTxMaxBytes: number; maxWithdrawals: string };
+        };
+        const vectors = JSON.parse(
+            readFileSync(path.join(__dirname, '..', 'fixtures', 'evm_batches', 'protocol-vectors.json'), 'utf8'),
+        ) as Vectors;
+        const fromHex = (hex: string) => Buffer.from(hex.replace(/^0x/, ''), 'hex');
+        const previous = BigInt(vectors.previous);
+
+        it('дайджест батча: те же 352 байта и тот же публичный вход', () => {
+            const v = vectors.publicValues;
+            const values = {
+                chainId: BigInt(v.chainId),
+                prevStateRoot: BigInt(v.prevStateRoot),
+                newStateRoot: BigInt(v.newStateRoot),
+                batchHash: BigInt(v.batchHash),
+                prevWithdrawalsRoot: BigInt(v.prevWithdrawalsRoot),
+                withdrawalsRoot: BigInt(v.withdrawalsRoot),
+                prevDepositHash: BigInt(v.prevDepositHash),
+                newDepositHash: BigInt(v.newDepositHash),
+                prevWithdrawalsCount: BigInt(v.prevWithdrawalsCount),
+                withdrawalsCount: BigInt(v.withdrawalsCount),
+                blockTimestamp: BigInt(v.blockTimestamp),
+            };
+            // Все одиннадцать слов вектора различны и ненулевые: перестановка была бы видна.
+            expect(new Set(Object.values(values)).size).toBe(11);
+            expect(Object.values(values).every((word) => word !== 0n)).toBe(true);
+            const bytes = Buffer.concat(
+                batchPublicValueWords(values).map((word) => Buffer.from(word.toString(16).padStart(64, '0'), 'hex')),
+            );
+            expect('0x' + bytes.toString('hex')).toBe(v.bytes);
+            expect(batchDigest(values)).toBe(BigInt(v.digest));
+        });
+
+        it('элементы очереди L1: депозит и принудительная транзакция', () => {
+            const { deposit, forcedTransaction } = vectors;
+            expect(previous).not.toBe(0n);
+            expect(depositHash(previous, BigInt(deposit.l2Recipient), BigInt(deposit.amount))).toBe(BigInt(deposit.hash));
+            const bytes = fromHex(forcedTransaction.bytes);
+            expect(forcedTransactionKeccak(bytes)).toBe(BigInt(forcedTransaction.keccak));
+            expect(forcedTransactionHash(previous, bytes)).toBe(BigInt(forcedTransaction.hash));
+        });
+
+        it('дерево выводов: лист, фронтир, счётчик и корень после каждой дозаписи', () => {
+            let state = { frontier: emptyWithdrawalFrontier(), count: 0n };
+            const leaves: WithdrawalLeaf[] = [];
+            expect(vectors.withdrawals.length).toBeGreaterThanOrEqual(9);
+            for (const vector of vectors.withdrawals) {
+                const leaf = { leafIndex: vector.leafIndex, recipientHash: BigInt(vector.recipientHash), amount: BigInt(vector.amount) };
+                expect(BigInt(leaf.leafIndex)).toBe(state.count);
+                expect(withdrawalLeafHash(leaf)).toBe(BigInt(vector.leafHash));
+                state = appendWithdrawalLeaf(state.frontier, state.count, withdrawalLeafHash(leaf));
+                leaves.push(leaf);
+                expect(state.count).toBe(BigInt(vector.countAfter));
+                expect(state.frontier).toEqual(vector.frontierAfter.map(BigInt));
+                expect(withdrawalFrontierRoot(state.frontier, state.count)).toBe(BigInt(vector.rootAfter));
+                // И корень разреженного дерева, по которому строятся доказательства для Withdraw.
+                expect(withdrawalTree(leaves).root).toBe(BigInt(vector.rootAfter));
+            }
+            expect(MAX_WITHDRAWALS).toBe(BigInt(vectors.constants.maxWithdrawals));
+        });
+
+        it('данные батча: хеш ячейки порции при каждой длине и накопительный хеш порций', () => {
+            const lengths = vectors.dataChunks.map(({ data }) => fromHex(data).length);
+            // Длины вокруг границ ячейки (127 байт) и уровней дерева (4 потомка на ячейку).
+            expect(lengths).toEqual(expect.arrayContaining([0, 1, 126, 127, 128, 508, 635, 636]));
+            for (const { data, cellHash } of vectors.dataChunks) {
+                expect('0x' + dataChunkCell(fromHex(data)).hash().toString('hex')).toBe(cellHash);
+            }
+            const chunks = vectors.batchData.chunks.map((chunk) => dataChunkCell(fromHex(chunk)));
+            expect(chunks.length).toBeGreaterThan(1);
+            expect(batchDataHash(chunks)).toBe(BigInt(vectors.batchData.hash));
+            // Порядок порций — часть хеша.
+            expect(batchDataHash([...chunks].reverse())).not.toBe(BigInt(vectors.batchData.hash));
+        });
+
+        it('предел длины принудительной транзакции — тот же, что у программы', () => {
+            expect(MAX_FORCED_TX_BYTES).toBe(vectors.constants.forcedTxMaxBytes);
         });
     });
 });

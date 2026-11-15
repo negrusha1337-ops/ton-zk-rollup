@@ -1,4 +1,6 @@
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
+import { readFileSync } from 'fs';
+import path from 'path';
 import { Address, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
@@ -81,6 +83,24 @@ describe('Rollup: генезис и параметры развёртывани�
         await starts(rollup);
         const deposit = await rollup.sendDeposit(user.getSender(), { l2Recipient: 1n, value: toNano('1') });
         expect(deposit.transactions).toHaveTransaction({ to: rollup.address, success: true });
+    });
+
+    it('константы контракта — те же, что у цепочки узла Reth и у программы zkVM', () => {
+        // Хеш заголовка генезиса: контракт сверяет с константой начальное слово состояния, а
+        // цепочка L2 начинается с генезиса, хеш которого узел Reth сообщил сценарию. Они обязаны
+        // совпасть — иначе первый же батч настоящей цепочки не продолжил бы состояние контракта.
+        const fixtures = path.join(__dirname, '..', 'fixtures', 'evm_batches');
+        const chain = JSON.parse(readFileSync(path.join(fixtures, 'reth', 'expected.json'), 'utf8'));
+        const vectors = JSON.parse(readFileSync(path.join(fixtures, 'protocol-vectors.json'), 'utf8'));
+        expect(constants.genesisHash).toBe(BigInt(chain.genesisHash));
+        expect(chain.genesisHash).toMatch(/^0x[0-9a-f]{64}$/);
+        expect(chain.blocks[0].parentHash).toBe(chain.genesisHash);
+        expect(constants.protocolVersion).toBe(chain.protocolVersion);
+        // Пределы, которые обязаны совпадать у контракта и программы (векторы пишет тест на Rust).
+        expect(constants.maxBatchQueueItems).toBe(vectors.constants.maxBatchQueueItems);
+        expect(constants.maxForcedTxBytes).toBe(vectors.constants.forcedTxMaxBytes);
+        // Сумма депозита на L2 держится программой в 64 битах.
+        expect(constants.depositAmountLimit).toBe(1n << 64n);
     });
 
     it('генезис не тот — ключ не фиксируется', async () => {
