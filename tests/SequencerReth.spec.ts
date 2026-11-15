@@ -1,6 +1,6 @@
 import { execFileSync } from 'child_process';
 import { randomBytes } from 'crypto';
-import { existsSync, readFileSync, rmSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import path from 'path';
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { toNano } from '@ton/core';
@@ -9,12 +9,14 @@ import '@ton/test-utils';
 import { EvmBatchReport } from '../wrappers/evmProofs';
 import { Rollup } from '../wrappers/Rollup';
 import { forcedTransactionCell } from '../wrappers/rollupMath';
-import { BuildRequest } from '../sequencer/block/payload';
-import { RunningNode, startNode } from '../sequencer/node';
+import { BuildRequest, ExecutionPayload } from '../sequencer/block/payload';
+import { liveChildren } from '../sequencer/children';
+import { NodeOptions, RunningNode, startNode } from '../sequencer/node';
 import { BRIDGE_ADDRESS, GENESIS_HASH } from '../sequencer/protocol';
 import { MockProver } from '../sequencer/prover';
 import { SandboxFeed, SandboxQueueSource } from '../sequencer/queue/sandbox';
-import { Interrupted, Sequencer, SequencerConfig, SequencerDeps, SequencerStop } from '../sequencer/service';
+import { NodeRpc } from '../sequencer/rpc';
+import { Interrupted, Phase, Sequencer, SequencerConfig, SequencerDeps, SequencerStop } from '../sequencer/service';
 import { BatchSubmitter, SandboxSubmitter } from '../sequencer/submitter';
 import { finalizeDummyKeys, ProtocolConstants, readProtocolConstants, testConfig } from './helpers/rollupSetup';
 
@@ -22,10 +24,11 @@ import { finalizeDummyKeys, ProtocolConstants, readProtocolConstants, testConfig
 // программы и rsp, двойник контракта в Sandbox (пруф — заглушка). Очередь L1 ставится
 // сообщениями; сервис сам читает её, собирает блоки, проверяет каждый программой до того, как
 // он станет проверенной вершиной, и отправляет батчи. Случаи: депозиты; принудительные — годная,
-// мусор, негодная подпись, «nonce выше»; отрезок, обрезанный перед принудительной от счёта,
-// которому зачисляется депозит; перезапуск после newPayload до forkchoiceUpdated; кандидат,
-// который программа отвергает (номер зачисления с единицы), — вершина и safe не двигаются;
-// транзакция из пула.
+// мусор, негодная подпись, «nonce выше», две одинаковые в одном отрезке (H1); отрезок, обрезанный
+// перед принудительной от счёта с депозитом; перезапуск сервиса и УЗЛА в фазах inserted,
+// tentative, checked, proven (M1); кандидат, которого программа отвергает, — вершина и safe не
+// двигаются; вторая попытка без пула и пул при выключенном флаге (T6); подменённые ответы узла и
+// отчёт хоста (T2, T4) — остановка с точным текстом; finalized — только после приёма батча (T1).
 //
 // Нужны бинарники вне репозитория: .tools/reth/bin/reth, .tools/rsp/target/release/rsp и хост
 // zkvm-evm/target/release/rollup-evm-host (PROVING.md). Без них набор — todo с причиной.
@@ -40,7 +43,8 @@ const missing = Object.entries(TOOLS)
     .map(([name]) => name);
 const CHAIN_ID = 362107787851n;
 const GWEI = 1_000_000_000n;
-const WORK = path.join(ROOT, '.tools', 'sequencer', 'test-reth');
+// Каталог тестов — отдельно от каталога сервиса по умолчанию (.tools/sequencer).
+const WORK = path.join(ROOT, '.tools', 'sequencer-test', 'reth');
 const SUITE = 'сборщик блоков на узле Reth: очередь L1 → блоки, проверенные программой → батчи на двойнике';
 
 type Wallet = { address: string; sign: (transactions: object[]) => string[] };
@@ -64,10 +68,47 @@ function wallet(): Wallet {
 }
 const bytes = (raw: string) => Buffer.from(raw.replace(/^0x/, ''), 'hex');
 
+/** Как хост портит отчёт (обёртка над настоящим хостом, T2). */
+type ReportTamper = 'none' | 'word' | 'mark' | 'frontier' | 'forcedOutcome' | 'forcedLength';
+
+/**
+ * Скрипт на месте хоста: зовёт настоящий хост с теми же аргументами и, в режиме расчёта блока,
+ * портит его отчёт так, как записано в файле режима. Форма принудительных и --identity — как есть.
+ */
+function hostWrapper(dir: string): { host: string; set: (mode: ReportTamper) => void } {
+    mkdirSync(dir, { recursive: true });
+    const modeFile = path.join(dir, 'tamper.txt');
+    const host = path.join(dir, 'host-wrapper.js');
+    writeFileSync(
+        host,
+        `#!/usr/bin/env node
+const { spawnSync } = require('child_process');
+const fs = require('fs');
+const args = process.argv.slice(2);
+const run = spawnSync(${JSON.stringify(TOOLS.host)}, args, { stdio: 'inherit' });
+if (run.status !== 0) process.exit(run.status ?? 1);
+const mode = fs.readFileSync(${JSON.stringify(modeFile)}, 'utf8').trim();
+if (!args.includes('--block-input') || mode === 'none') process.exit(0);
+const file = args[args.indexOf('--report') + 1];
+const report = JSON.parse(fs.readFileSync(file, 'utf8'));
+if (mode === 'word') report.publicValues.blockTimestamp = String(BigInt(report.publicValues.blockTimestamp) + 1n);
+if (mode === 'mark') report.queueProcessedUpTo += 1;
+if (mode === 'frontier') report.withdrawalsFrontierAfter[0] = '0x' + '01'.repeat(32);
+if (mode === 'forcedOutcome') report.forced[0] = { ...report.forced[0], outcome: 'skipped', reason: 'Signature' };
+if (mode === 'forcedLength') report.forced.pop();
+fs.writeFileSync(file, JSON.stringify(report));
+`,
+    );
+    chmodSync(host, 0o755);
+    const set = (mode: ReportTamper) => writeFileSync(modeFile, mode);
+    set('none');
+    return { host, set };
+}
+
 if (missing.length > 0) {
     describe(SUITE, () => {
         it.todo(
-            `нет бинарников ${missing.join(', ')} (PROVING.md: reth v2.2.0 в .tools/reth/bin, rsp и rollup-evm-host собраны)`,
+            `ждёт бинарников ${missing.join(', ')} (PROVING.md: reth v2.2.0 в .tools/reth/bin, rsp и rollup-evm-host собраны)`,
         );
     });
 } else {
@@ -78,9 +119,14 @@ if (missing.length > 0) {
         let rollup: SandboxContract<Rollup>;
         let feed: SandboxFeed;
         let node: RunningNode;
+        let nodeOptions: NodeOptions;
         let config: SequencerConfig;
+        let wrapper: ReturnType<typeof hostWrapper>;
+        const open: Sequencer[] = [];
         const A = wallet();
         const S = wallet();
+        const P = wallet();
+        const Q = wallet();
         const recipientHash = '0x' + 'ab'.repeat(32);
         const lines: string[] = [];
         const feeRecipient = '0x' + randomBytes(20).toString('hex');
@@ -124,15 +170,44 @@ if (missing.length > 0) {
                 },
             };
         };
-        const sequencer = (faults?: SequencerDeps['faults']) =>
-            new Sequencer(config, {
-                node: node.rpc,
+        /** Новый экземпляр сервиса; прежние закрываются (каталог состояния — под блокировкой). */
+        const sequencer = (faults?: SequencerDeps['faults'], rpc?: NodeRpc) => {
+            open.splice(0).forEach((instance) => instance.close());
+            const instance = new Sequencer(config, {
+                node: rpc ?? node.rpc,
                 queue: new SandboxQueueSource(rollup, feed, constants),
                 prover: new MockProver(),
                 submitter: submitter(),
+                l1Now: async () => blockchain.now ?? Math.floor(Date.now() / 1000),
                 log: (line) => lines.push(line),
                 faults,
             });
+            open.push(instance);
+            return instance;
+        };
+        /** Узел — тот же каталог и порты, новый процесс: неканонические блоки в памяти теряются. */
+        const restartNode = async () => {
+            await node.stop();
+            node = await startNode(nodeOptions);
+        };
+        /** Обёртка над RPC узла, подменяющая ответ одного метода. */
+        const tampered = (method: string, change: (answer: any, params: unknown[]) => unknown): NodeRpc => {
+            const wrap =
+                (call: NodeRpc['eth']) =>
+                async (name: string, params: unknown[]) => {
+                    const answer = await call(name, params);
+                    return (name === method ? change(answer, params) : answer) as any;
+                };
+            return { eth: wrap(node.rpc.eth) as NodeRpc['eth'], engine: wrap(node.rpc.engine) as NodeRpc['engine'] };
+        };
+        const sendToPool = async (raw: string) => {
+            try {
+                await node.rpc.eth('eth_sendRawTransaction', [raw]);
+            } catch (error) {
+                // Узел перезапускали: транзакция могла пережить его в пуле — это не ошибка.
+                if (!/already known/i.test(String(error))) throw error;
+            }
+        };
         const withdrawal = (nonce: number, value: bigint, extra: object = {}) => ({
             nonce,
             gas: 40_000,
@@ -142,27 +217,17 @@ if (missing.length > 0) {
             ...extra,
         });
         const block = (tag: string | number) =>
-            node.rpc.eth<{ hash: string; number: string; parentHash: string } | null>('eth_getBlockByNumber', [
-                typeof tag === 'number' ? '0x' + tag.toString(16) : tag,
-                false,
-            ]);
+            node.rpc.eth<{ hash: string; number: string; parentHash: string; transactions: string[] } | null>(
+                'eth_getBlockByNumber',
+                [typeof tag === 'number' ? '0x' + tag.toString(16) : tag, false],
+            );
         const reportOf = (service: Sequencer, number: number) =>
             JSON.parse(
                 readFileSync(path.join(service.snapshot.blocks[number - 1].dir, 'report.json'), 'utf8'),
             ) as EvmBatchReport;
-        /** Два шага: блок проверен программой, затем батч принят контрактом. */
-        const blockAndBatch = async (service: Sequencer) => {
-            const checked = await service.step();
-            if (checked.kind !== 'checked') throw new Error(`ожидался проверенный блок, а шаг дал ${checked.kind}`);
-            const accepted = await service.step();
-            expect(accepted).toEqual({
-                kind: 'accepted',
-                number: checked.number,
-                hash: checked.hash,
-                alreadyAccepted: false,
-            });
+        /** Батч принят: состояние контракта — слова программы; finalized узла — этот блок. */
+        const expectAccepted = async (service: Sequencer, checked: { number: number; hash: string }) => {
             const report = reportOf(service, checked.number);
-            // Контракт принял батч: его состояние — слова программы, отметка очереди — та, что заявлена.
             const state = await rollup.getRollupState();
             expect({ stateRoot: state.stateRoot, batchIndex: state.batchIndex }).toEqual({
                 stateRoot: BigInt(checked.hash),
@@ -174,7 +239,63 @@ if (missing.length > 0) {
             });
             expect(state.withdrawalsCount).toBe(BigInt(report.publicValues.withdrawalsCount));
             expect((await block('finalized'))!.hash).toBe(checked.hash);
+            return report;
+        };
+        /**
+         * Два шага: блок проверен программой, затем батч принят контрактом. После первого шага
+         * safe — новый блок, а finalized — прежний (правило 0.3): двигается только после приёма.
+         */
+        const blockAndBatch = async (service: Sequencer) => {
+            const finalizedBefore = (await block('finalized'))!.hash;
+            const checked = await service.step();
+            if (checked.kind !== 'checked') throw new Error(`ожидался проверенный блок, а шаг дал ${checked.kind}`);
+            expect({ safe: (await block('safe'))!.hash, finalized: (await block('finalized'))!.hash }).toEqual({
+                safe: checked.hash,
+                finalized: finalizedBefore,
+            });
+            const accepted = await service.step();
+            expect(accepted).toEqual({
+                kind: 'accepted',
+                number: checked.number,
+                hash: checked.hash,
+                alreadyAccepted: false,
+            });
+            const report = await expectAccepted(service, checked);
             return { checked, report };
+        };
+        /** Остановка на этом шаге с точным текстом; вершина сервиса, safe и finalized — прежние. */
+        const expectStop = async (service: Sequencer, text: string | RegExp) => {
+            const before = {
+                tip: service.snapshot.tip.number,
+                safe: (await block('safe'))!.hash,
+                finalized: (await block('finalized'))!.hash,
+            };
+            const error = await service.step().then(
+                () => null,
+                (caught: unknown) => caught,
+            );
+            expect(error).toBeInstanceOf(SequencerStop);
+            const message = (error as Error).message;
+            if (typeof text === 'string') expect(message).toBe(text);
+            else expect(message).toMatch(text);
+            expect({
+                tip: service.snapshot.tip.number,
+                safe: (await block('safe'))!.hash,
+                finalized: (await block('finalized'))!.hash,
+            }).toEqual(before);
+        };
+        /** Первый экземпляр останавливается после фазы, узел перезапускается, второй продолжает. */
+        const interruptAndRestartNode = async (phase: Phase, faults: SequencerDeps['faults'] = {}) => {
+            const first = sequencer({ ...faults, stopAfter: phase });
+            await first.start();
+            // Пруф — на шаге после проверки блока.
+            if (phase === 'proven') expect(await first.step()).toMatchObject({ kind: 'checked' });
+            await expect(first.step()).rejects.toThrow(new Interrupted(phase).message);
+            const snapshot = first.snapshot;
+            await restartNode();
+            const second = sequencer();
+            await second.start();
+            return { snapshot, second };
         };
 
         beforeAll(async () => {
@@ -201,14 +322,16 @@ if (missing.length > 0) {
             await finalizeDummyKeys(rollup, owner);
             expect(await rollup.getGenesisHash()).toBe(BigInt(GENESIS_HASH));
             feed = new SandboxFeed(rollup.address);
-            node = await startNode({
+            nodeOptions = {
                 reth: TOOLS.reth,
                 dir: path.join(WORK, 'node'),
                 chainId: CHAIN_ID,
                 httpPort: 8748,
                 authPort: 8752,
                 p2pPort: 30599,
-            });
+            };
+            node = await startNode(nodeOptions);
+            wrapper = hostWrapper(path.join(WORK, 'tools'));
             config = {
                 chainId: await rollup.getChainId(),
                 feeRecipient,
@@ -216,23 +339,26 @@ if (missing.length > 0) {
                 rpcUrl: node.rpcUrl,
                 genesisPath: node.genesisPath,
                 includePool: false,
-                tools: { host: TOOLS.host, rsp: TOOLS.rsp, executeInZkvm: false },
-                // Предел отрезка — у контракта, не копией.
+                tools: { host: wrapper.host, rsp: TOOLS.rsp, executeInZkvm: false },
+                // Пределы и срок — у контракта, не копией.
                 maxBatchQueueItems: constants.maxBatchQueueItems,
+                maxBlockAge: (await rollup.getDeployment()).maxBlockAge,
             };
         }, 300_000);
 
         afterAll(async () => {
+            open.forEach((instance) => instance.close());
             await node?.stop();
         }, 60_000);
 
         it('блок 1: депозиты из очереди зачисляются с номерами от нуля; батч принят, публичный вход — 11 слов программы', async () => {
             await deposit(A.address, toNano('3'));
             await deposit('0x' + '33'.repeat(20), toNano('0.5'));
+            await deposit(P.address, toNano('1'));
             const service = sequencer();
             await service.start();
             const { checked, report } = await blockAndBatch(service);
-            expect(checked).toMatchObject({ number: 1, attempts: 1, queueItems: 2, included: 0 });
+            expect(checked).toMatchObject({ number: 1, attempts: 1, queueItems: 3, included: 0 });
             expect(report.publicValues.prevStateRoot).toBe(GENESIS_HASH);
             expect(BigInt(await node.rpc.eth<string>('eth_getBalance', [A.address, 'latest']))).toBe(
                 toNano('3') * GWEI,
@@ -241,7 +367,7 @@ if (missing.length > 0) {
             expect(await service.step()).toEqual({ kind: 'idle' });
         }, 600_000);
 
-        it('блок 2: принудительные — годная включена, мусор, негодная подпись и «nonce выше» пропущены программой', async () => {
+        it('блок 2: принудительные — годная включена, мусор, негодная подпись и «nonce выше» пропущены; пул без флага не берётся', async () => {
             const [valid, badSignature, nonceHigh] = A.sign([
                 withdrawal(0, 100_000_000n),
                 withdrawal(1, 50_000_000n, { signature: 'sZero' }),
@@ -251,10 +377,12 @@ if (missing.length > 0) {
             await force(randomBytes(40));
             await force(badSignature);
             await force(nonceHigh);
+            // Транзакция в пуле узла при выключенном флаге в блок не идёт (T6).
+            await sendToPool(P.sign([{ nonce: 0, gas: 21_000, to: '0x' + '55'.repeat(20), value: '1000' }])[0]);
             const service = sequencer();
             await service.start();
             const { checked, report } = await blockAndBatch(service);
-            expect(checked).toMatchObject({ number: 2, queueItems: 4, included: 1 });
+            expect(checked).toMatchObject({ number: 2, queueItems: 4, included: 1, pool: 0 });
             expect(report.forced).toEqual([
                 { queueIndex: 0, outcome: 'included' },
                 { queueIndex: 1, outcome: 'skipped', reason: 'Undecodable' },
@@ -262,43 +390,39 @@ if (missing.length > 0) {
                 { queueIndex: 3, outcome: 'skipped', reason: 'Invalid(NonceTooHigh)' },
             ]);
             expect(report.withdrawals).toEqual([{ leafIndex: 0, recipientHash, amount: '100000000' }]);
-            const transactions = (
-                await node.rpc.eth<{ transactions: string[] }>('eth_getBlockByNumber', ['0x2', false])
-            ).transactions;
-            expect(transactions).toHaveLength(1);
+            expect((await block(2))!.transactions).toHaveLength(1);
         }, 600_000);
 
-        it('блок 3: перезапуск после newPayload до forkchoiceUpdated продолжает того же кандидата; отрезок обрезан перед принудительной от счёта с депозитом', async () => {
+        it('блок 3: перезапуск сервиса и узла после newPayload — тот же кандидат отдаётся узлу заново; отрезок обрезан перед принудительной от счёта с депозитом', async () => {
             await force(A.sign([withdrawal(1, 60_000_000n)])[0]);
             await deposit(S.address, toNano('1'));
             await force(S.sign([withdrawal(0, 50_000_000n)])[0]);
-            const first = sequencer({ stopAfter: 'inserted' });
-            await first.start();
-            await expect(first.step()).rejects.toThrow(Interrupted);
-            const pending = first.snapshot.pending!;
+            const { snapshot, second } = await interruptAndRestartNode('inserted');
+            const pending = snapshot.pending!;
             expect(pending.phase).toBe('inserted');
-            // Отданный узлу кандидат ещё не голова: на высоте 3 узел ничего не отдаёт.
+            // Отданный узлу кандидат не был головой: перезапущенный узел его не знает.
             expect(await block(3)).toBeNull();
-
-            const second = sequencer();
-            await second.start();
             const { checked, report } = await blockAndBatch(second);
             // Тот же кандидат, без пересборки (у новой сборки было бы другое время и другой хеш).
             expect(checked.hash).toBe(pending.payload.blockHash);
             expect((await block(3))!.hash).toBe(pending.payload.blockHash);
-            expect(
-                lines.some((line) =>
-                    line.includes(`продолжается кандидат ${pending.payload.blockHash} с фазы inserted`),
-                ),
-            ).toBe(true);
+            expect(lines).toContain(`блок 3: продолжается кандидат ${pending.payload.blockHash} с фазы inserted`);
+            expect(lines).toContain(
+                `блок 3: узел не знает кандидата ${pending.payload.blockHash} (SYNCING) — newPayload из сохранённого ответа`,
+            );
             // Отрезок: принудительная A и депозит S; принудительная S — в следующий блок.
             expect(report.queueProcessedUpTo - report.queueProcessedFrom).toBe(2);
-            expect(lines.some((line) => line.includes('отправителю зачисляется депозит в этом же отрезке'))).toBe(true);
+            expect(lines).toContain('блок 3: отрезок до 9 — элемент №10: отправителю зачисляется депозит в этом же отрезке');
             expect(report.forced).toEqual([{ queueIndex: 0, outcome: 'included' }]);
+            expect(second.snapshot.tip.cut).toBe(true);
         }, 900_000);
 
-        it('блок 4: кандидата, которого программа отвергает, вершина и safe не принимают; следующий кандидат той же высоты его вытесняет', async () => {
+        it('блок 4: кандидата, которого программа отвергает, вершина и safe не принимают; следующий кандидат той же высоты его вытесняет; после обрезанного блока отрезок полный', async () => {
             await deposit('0x' + '44'.repeat(20), toNano('0.2'));
+            // Депозит Q и принудительная Q в одном отрезке. Блок 3 уже резал отрезок: этот не режется,
+            // и принудительная Q законно пропускается программой (зачисление — в конце блока).
+            await deposit(Q.address, toNano('1'));
+            await force(Q.sign([withdrawal(0, 50_000_000n)])[0]);
             const before = { safe: (await block('safe'))!.hash, finalized: (await block('finalized'))!.hash };
             // Подлог: номер зачисления с единицы. Reth такой блок принимает, программа — нет.
             const tamper = (request: BuildRequest) => ({
@@ -313,7 +437,7 @@ if (missing.length > 0) {
             });
             const bad = sequencer({ tamper });
             await bad.start();
-            await expect(bad.step()).rejects.toThrow(SequencerStop);
+            await expectStop(bad, 'блок 4: программа отвергла и исправленного кандидата (без транзакций пула)');
             const state = bad.snapshot;
             expect(state.rejections).toHaveLength(2);
             for (const rejection of state.rejections)
@@ -336,32 +460,159 @@ if (missing.length > 0) {
             expect(state.rejections.map((rejection) => rejection.hash)).not.toContain(checked.hash);
             expect((await block(4))!).toMatchObject({ hash: checked.hash, parentHash: (await block(3))!.hash });
             // Принудительная S, отложенная прошлым блоком, теперь включена: депозит S уже зачислен.
-            expect(report.forced).toEqual([{ queueIndex: 0, outcome: 'included' }]);
+            // Принудительная Q — пропущена: блок 3 резал отрезок, два блока подряд не режутся (H2).
+            expect(report.forced).toEqual([
+                { queueIndex: 0, outcome: 'included' },
+                { queueIndex: 3, outcome: 'skipped', reason: 'Invalid(LackOfFunds)' },
+            ]);
+            expect(checked).toMatchObject({ queueItems: 4, included: 1 });
+            expect(good.snapshot.tip.cut).toBeUndefined();
             expect((await block('safe'))!.hash).toBe(checked.hash);
         }, 900_000);
 
-        it('блок 5: транзакция из пула узла (с флагом) идёт после принудительных; повторный запуск ничего не дублирует', async () => {
-            const [transfer] = A.sign([
-                { nonce: 2, gas: 21_000, to: '0x' + '55'.repeat(20), value: (GWEI * 1000n).toString() },
+        it('блок 5: две одинаковые принудительные в отрезке — первая включена, вторая пропущена (H1); перезапуск узла во временной голове', async () => {
+            const [twice] = A.sign([withdrawal(2, 70_000_000n)]);
+            // Копию чужой принудительной ставит кто угодно за плату очереди.
+            await force(twice);
+            await force(twice);
+            const { snapshot, second } = await interruptAndRestartNode('tentative');
+            expect(snapshot.pending!.phase).toBe('tentative');
+            const { checked, report } = await blockAndBatch(second);
+            expect(checked).toMatchObject({ number: 5, hash: snapshot.pending!.payload.blockHash, queueItems: 2, included: 1 });
+            expect(report.forced).toEqual([
+                { queueIndex: 0, outcome: 'included' },
+                { queueIndex: 1, outcome: 'skipped', reason: 'Invalid(NonceTooLow)' },
             ]);
-            await node.rpc.eth('eth_sendRawTransaction', [transfer]);
+            expect((await block(5))!.transactions).toHaveLength(1);
+            expect(report.withdrawals).toEqual([{ leafIndex: 3, recipientHash, amount: '70000000' }]);
+        }, 900_000);
+
+        it('блок 6: отвергнут кандидат с пулом — вторая попытка без пула (T6); перезапуск узла после проверки', async () => {
+            await deposit('0x' + '66'.repeat(20), toNano('0.2'));
+            config = { ...config, includePool: true };
+            await sendToPool(P.sign([{ nonce: 0, gas: 21_000, to: '0x' + '55'.repeat(20), value: '1000' }])[0]);
+            // Подлог только на первой попытке: номер зачисления с единицы.
+            const tamper = (request: BuildRequest, attempt: number) =>
+                attempt !== 1
+                    ? request
+                    : {
+                          ...request,
+                          payloadAttributes: {
+                              ...request.payloadAttributes,
+                              withdrawals: request.payloadAttributes.withdrawals.map((credit) => ({ ...credit, index: '0x1' })),
+                          },
+                      };
+            const { snapshot, second } = await interruptAndRestartNode('checked', { tamper });
+            expect(snapshot.blocks[5]).toMatchObject({ number: 6, status: 'checked' });
+            expect(snapshot.rejections.filter((rejection) => rejection.number === 6).map((rejection) => rejection.attempt)).toEqual([1]);
+            expect(lines.some((line) => /^блок 6, попытка 1: кандидат 0x[0-9a-f]+ — .*из пула 1,/.test(line))).toBe(true);
+            expect(lines.some((line) => /^блок 6, попытка 2: кандидат 0x[0-9a-f]+ — .*из пула 0,/.test(line))).toBe(true);
+            // Узел перезапущен после проверки: блок 6 — safe, finalized — блок 5.
+            expect((await block('safe'))!.hash).toBe(snapshot.blocks[5].hash);
+            expect((await block('finalized'))!.hash).toBe(snapshot.blocks[4].hash);
+            expect(await second.step()).toEqual({ kind: 'accepted', number: 6, hash: snapshot.blocks[5].hash, alreadyAccepted: false });
+            await expectAccepted(second, snapshot.blocks[5]);
+            expect((await block(6))!.transactions).toHaveLength(0);
+            config = { ...config, includePool: false };
+        }, 900_000);
+
+        it('блок 7: подменённые ответы узла и отчёт хоста — остановка с точным текстом (T2, T4); перезапуск узла после пруфа', async () => {
+            await force(A.sign([withdrawal(3, 80_000_000n)])[0]);
+            await deposit('0x' + '77'.repeat(20), toNano('0.2'));
+            const stopWith = async (rpc: NodeRpc | undefined, text: string | RegExp) => {
+                const service = sequencer(undefined, rpc);
+                await service.start();
+                await expectStop(service, text);
+            };
+            // T4: ответ testing_buildBlockV1 — другое время, лишняя транзакция; newPayload → INVALID.
+            const shiftTime = tampered('testing_buildBlockV1', (envelope: { executionPayload: ExecutionPayload }) => ({
+                executionPayload: {
+                    ...envelope.executionPayload,
+                    timestamp: '0x' + (BigInt(envelope.executionPayload.timestamp) + 1n).toString(16),
+                },
+            }));
+            await stopWith(shiftTime, /^блок 7: узел собрал не то — время (\d+), а запрошено (\d+)$/);
+            const [extra] = P.sign([{ nonce: 1, gas: 21_000, to: '0x' + '55'.repeat(20), value: '1' }]);
+            const extraTx = tampered('testing_buildBlockV1', (envelope: { executionPayload: ExecutionPayload }) => ({
+                executionPayload: {
+                    ...envelope.executionPayload,
+                    transactions: [...envelope.executionPayload.transactions, extra],
+                },
+            }));
+            await stopWith(extraTx, 'блок 7: узел собрал не то — транзакция блока №1 не из запроса либо не на своём месте');
+            const invalid = tampered('engine_newPayloadV3', () => ({
+                status: 'INVALID',
+                latestValidHash: null,
+                validationError: 'подмена',
+            }));
+            await stopWith(
+                invalid,
+                'узел не принял собранный им же блок 7: {"status":"INVALID","latestValidHash":null,"validationError":"подмена"}',
+            );
+
+            // T2: данные блока и квитанции узла.
+            const mismatch = 'блок 7: расчёт сервиса не сошёлся с программой — ';
+            await stopWith(tampered('debug_getRawBlock', () => '0x00'), mismatch + 'данные батча — не RLP блока со слов узла');
+            const noBridgeLogs = tampered('eth_getBlockReceipts', (receipts: { logs: { address: string }[] }[]) =>
+                receipts.map((receipt) => ({
+                    ...receipt,
+                    logs: receipt.logs.filter((log) => log.address.toLowerCase() !== BRIDGE_ADDRESS),
+                })),
+            );
+            await stopWith(
+                noBridgeLogs,
+                /^блок 7: расчёт сервиса не сошёлся с программой — withdrawalsRoot: у программы 0x[0-9a-f]+, у сервиса 0x[0-9a-f]+; withdrawalsCount: у программы 0x5, у сервиса 0x4; фронтир дерева выводов после блока не тот; байты публичных значений не те$/,
+            );
+            // T2: отчёт хоста — слово, отметка очереди, узел фронтира, судьба принудительной.
+            const cases: [ReportTamper, string | RegExp][] = [
+                ['word', /^блок 7: расчёт сервиса не сошёлся с программой — blockTimestamp: у программы 0x[0-9a-f]+, у сервиса 0x[0-9a-f]+$/],
+                ['mark', /^блок 7: расчёт сервиса не сошёлся с программой — отметки очереди у программы (\d+)\.\.(\d+), у сервиса \1\.\.\d+$/],
+                ['frontier', mismatch + 'фронтир дерева выводов после блока не тот'],
+                ['forcedOutcome', mismatch + 'в блоке принудительных 1, а программа включила 0'],
+                [
+                    'forcedLength',
+                    mismatch + 'в отчёте программы принудительных 0, в отрезке 1; в блоке принудительных 1, а программа включила 0',
+                ],
+            ];
+            for (const [mode, text] of cases) {
+                wrapper.set(mode);
+                try {
+                    await stopWith(undefined, text);
+                } finally {
+                    wrapper.set('none');
+                }
+            }
+
+            // Честный прогон: пруф построен, узел перезапущен, батч отправлен после перезапуска.
+            const { snapshot, second } = await interruptAndRestartNode('proven');
+            expect(snapshot.blocks[6]).toMatchObject({ number: 7, status: 'proven' });
+            expect((await block('finalized'))!.hash).toBe(snapshot.blocks[5].hash);
+            expect(await second.step()).toEqual({ kind: 'accepted', number: 7, hash: snapshot.blocks[6].hash, alreadyAccepted: false });
+            const report = await expectAccepted(second, snapshot.blocks[6]);
+            expect(report.forced).toEqual([{ queueIndex: 0, outcome: 'included' }]);
+        }, 1_800_000);
+
+        it('блок 8: транзакции из пула узла (с флагом) идут после принудительных; повторный запуск ничего не дублирует', async () => {
+            const [transfer] = A.sign([
+                { nonce: 4, gas: 21_000, to: '0x' + '55'.repeat(20), value: (GWEI * 1000n).toString() },
+            ]);
+            await sendToPool(transfer);
+            await sendToPool(P.sign([{ nonce: 0, gas: 21_000, to: '0x' + '55'.repeat(20), value: '1000' }])[0]);
             config = { ...config, includePool: true };
             const service = sequencer();
             await service.start();
             const { checked } = await blockAndBatch(service);
-            expect(checked).toMatchObject({ number: 5, queueItems: 0, pool: 1 });
-            expect(
-                (await node.rpc.eth<{ transactions: string[] }>('eth_getBlockByNumber', ['0x5', false])).transactions,
-            ).toHaveLength(1);
+            expect(checked).toMatchObject({ number: 8, queueItems: 0, pool: 2 });
+            expect((await block(8))!.transactions).toHaveLength(2);
             // Новый экземпляр на том же каталоге: всё принято, собирать нечего.
             const again = sequencer();
             await again.start();
             expect(await again.step()).toEqual({ kind: 'idle' });
-            expect((await rollup.getRollupState()).batchIndex).toBe(5);
+            expect((await rollup.getRollupState()).batchIndex).toBe(8);
             const queue = await rollup.getDepositQueue();
             expect(queue.processed.count).toBe(queue.head.count);
             expect(again.snapshot.tip).toMatchObject({
-                number: 5,
+                number: 8,
                 hash: checked.hash,
                 queue: { count: Number(queue.head.count), hash: queue.head.hash },
             });
@@ -370,6 +621,8 @@ if (missing.length > 0) {
                 expect((await block(record.number))!.hash).toBe(record.hash);
                 expect(existsSync(path.join(record.dir, 'job.json'))).toBe(true);
             }
+            // Хост и rsp не остались жить после шагов: живой только узел.
+            expect(liveChildren()).toBe(1);
         }, 900_000);
     });
 }

@@ -31,12 +31,12 @@ const UNCHECKED: Record<string, string> = {
         'выход счёта EVM со словом состояния, заданным при развёртывании; в v2 его записывает только батч — ждёт пруфов v2',
 };
 
-/** Файлы с отложенными тестами (todo): только те, что ждут пруфов, — и каждый с причиной. */
+/** Файлы с отложенными тестами (todo): только те, что ждут пруфов или бинарников, — и каждый с причиной. */
 const PENDING: Record<string, string> = {
     'tests/RollupEvmRethProof.spec.ts': 'ждёт пруфов SP1 протокола v2 для блоков цепочки Reth (строятся только по команде пользователя)',
     'tests/ProgramBinding.spec.ts': 'todo только если фикстур пруфов игрушечного реестра нет вовсе; сейчас они есть, и тесты идут',
     'tests/SequencerReth.spec.ts':
-        'todo только без бинарников вне репозитория (reth v2.2.0, rsp, rollup-evm-host — PROVING.md): набор поднимает настоящий узел и зовёт хост программы',
+        'ждёт бинарников вне репозитория (reth v2.2.0, rsp, rollup-evm-host — PROVING.md), а не пруфов: todo только в ветке их отсутствия; набор поднимает настоящий узел и зовёт хост программы',
 };
 
 /**
@@ -99,6 +99,16 @@ describe('Смена протокола: что вправе оставатьс�
         expect(suite.match(/\.todo\(/g)).toHaveLength(1);
         expect(suite).toMatch(/mode === 'todo'\) \{[^}]*describe\(SUITE, \(\) => \{\s*it\.todo\(/);
         expect(suite).toMatch(/\} else \{[^}]*describe\(SUITE, \(\) => \{\s*it\([^]*?throw new Error\(`пруфы объявлены пруфами протокола v2, но негодны/);
+    });
+
+    it('набор сборщика на узле Reth ждёт (todo) только бинарников: todo один и стоит лишь в ветке их отсутствия', () => {
+        const suite = read('tests/SequencerReth.spec.ts');
+        expect(suite.match(/\.todo\(/g)).toHaveLength(1);
+        // Решение — по наличию файлов бинарников, а не по версии пруфов или чему-то ещё.
+        expect(suite).toMatch(/const missing = Object\.entries\(TOOLS\)\s*\.filter\(\(\[, file\]\) => !existsSync\(file\)\)/);
+        expect(suite).toMatch(/if \(missing\.length > 0\) \{\s*describe\(SUITE, \(\) => \{\s*it\.todo\(\s*`ждёт бинарников \$\{missing\.join/);
+        expect(suite).toMatch(/\} else \{\s*describe\(SUITE, \(\) => \{/);
+        expect(suite).not.toMatch(/proofSuiteMode|proofFixturesBlocker|PROOF_FIXTURES_PROTOCOL_VERSION/);
     });
 
     it('каждый скрипт протокола v1 первым делом отказывается стартовать', () => {
