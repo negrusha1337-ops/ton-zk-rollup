@@ -1,14 +1,7 @@
-import { appendFileSync, copyFileSync, mkdirSync, readFileSync } from 'fs';
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync } from 'fs';
 import path from 'path';
 import { EvmBatchReport } from '../wrappers/evmProofs';
-import {
-    anchorMismatches,
-    bridgeLeaves,
-    expectedPublicValues,
-    forcedFateMismatches,
-    LogEntry,
-    reportMismatches,
-} from './block/expected';
+import { collectWitness, crossCheck } from './block/verify';
 import {
     blockTimestamp,
     buildRequest,
@@ -19,7 +12,7 @@ import {
     forcedToDrop,
     PoolTransaction,
 } from './block/payload';
-import { chooseSegment, creditsOf } from './block/segment';
+import { chooseSegment, creditsOf, rebuildSegmentProblem } from './block/segment';
 import {
     blockInput,
     classifyForced,
@@ -29,13 +22,12 @@ import {
     ProgramKeys,
     ProgramTools,
     reportIdentityMismatches,
-    RollupWitness,
     runProgram,
-    ToolFailure,
+    withToolRetries,
 } from './program';
 import { FORCED_TX_GAS_CAP, GAS_LIMIT, ZERO_HASH } from './protocol';
 import { BatchProof, Prover, ProverJob } from './prover';
-import { QueuedItem, QueueSource } from './queue/types';
+import { MessageCursor, QueuedItem, QueueLagError, QueueMark, QueueSource, QueueWindow } from './queue/types';
 import { NodeRpc } from './rpc';
 import { checkGenesis } from './node';
 import {
@@ -44,6 +36,7 @@ import {
     deserialize,
     lockStateDir,
     Pending,
+    Rebuild,
     SequencerState,
     serialize,
     StateStore,
@@ -52,8 +45,9 @@ import {
 import { BatchSubmitter } from './submitter';
 
 // Сборщик блоков L2 как сервис (этап 2, шаг 1). Один шаг — одно продвижение:
-//   1. батч проверенного блока ещё не принят → пруф (интерфейс Prover) и отправка (BatchSubmitter),
-//      после приёма — финальность узла;
+//   1. батч проверенного блока ещё не принят → сначала контракт (принят ли), затем срок 0.3: не
+//      успеть — пересборка блока той же высоты; иначе пруф (интерфейс Prover) и отправка
+//      (BatchSubmitter), после приёма — финальность узла;
 //   2. иначе кандидат следующего блока: отрезок очереди L1 → форма принудительных (программа) →
 //      testing_buildBlockV1 → сверка ответа → engine_newPayloadV3 → временная голова →
 //      свидетель (rsp) → нативный расчёт программы (хост) → сверка 11 слов с собственным
@@ -70,12 +64,18 @@ import { BatchSubmitter } from './submitter';
 // после проверки (finalized — после приёма батча контрактом, PROTOCOL-V2.md, правка 0.3), батч
 // и задание пруверу появляются только у проверенного блока. RPC узла наружу не открыт.
 
-export type Phase = 'built' | 'inserted' | 'tentative' | 'checked' | 'proven';
+export type Phase = 'built' | 'inserted' | 'tentative' | 'checked' | 'proven' | 'submitted';
 
 /** fixtures/evm_batches/program.json — что записано о сборке программы (пишет только --vkeys). */
 export const DEFAULT_PROGRAM_KEYS = path.join(__dirname, '..', 'fixtures', 'evm_batches', 'program.json');
 /** Бюджет газа транзакций пула на блок по умолчанию (принцип 0.1: цена блока для прувера известна). */
 export const DEFAULT_POOL_GAS_BUDGET = 5_000_000n;
+/** Ожидаемое время пруфа батча по умолчанию, с: Groth16 блока EVM — 15 минут на ноутбуке. */
+export const DEFAULT_EXPECTED_PROOF_TIME = 1800;
+/** Запас до конца срока приёма перед отправкой по умолчанию, с. */
+export const DEFAULT_SUBMIT_MARGIN = 300;
+/** Сколько терпеть отставание источника сообщений очереди по умолчанию, с. */
+export const DEFAULT_QUEUE_LAG_LIMIT = 1800;
 
 /** Остановка сервиса: дальше без человека нельзя (текст — что случилось). */
 export class SequencerStop extends Error {}
@@ -106,8 +106,15 @@ export type SequencerConfig = {
     programKeysPath?: string;
     /** Кандидат старше этого (с от его времени) после перезапуска не продолжается; по умолчанию maxBlockAge / 4. */
     staleCandidateAge?: number;
-    /** Запас до конца срока приёма перед пруфом и перед отправкой, с; по умолчанию 300. */
+    /** Запас до конца срока приёма перед отправкой (и сверх времени пруфа — перед пруфом), с; по умолчанию 300. */
     submitMargin?: number;
+    /**
+     * Ожидаемое время пруфа батча, с; по умолчанию 1800. Перед пруфом блок, батч которого не
+     * успеть (время пруфа + запас), пересобирается. Время пруфа + запас обязаны быть меньше maxBlockAge.
+     */
+    expectedProofTime?: number;
+    /** Сколько терпеть отставание источника сообщений очереди (QueueLagError), с; по умолчанию 1800. */
+    queueLagLimit?: number;
     /** Наибольшее расхождение часов машины с временем L1 при старте, с; по умолчанию 60. */
     clockSkewLimit?: number;
     /** Бюджет газа транзакций пула на блок; по умолчанию DEFAULT_POOL_GAS_BUDGET. */
@@ -139,8 +146,13 @@ export type StepResult =
           queueItems: number;
           included: number;
           pool: number;
+          /** Блок пересобран: хеш прежнего блока той же высоты, батч которого контракт не примет. */
+          replaced?: string;
       }
-    | { kind: 'idle' };
+    /** Ждать: блок из будущего L1 либо батч мог уйти, а срок ещё не истёк. */
+    | { kind: 'waiting'; number: number; reason: string }
+    /** Собирать нечего. `unverifiedHead` — голова узла осталась на непроверенном кандидате. */
+    | { kind: 'idle'; unverifiedHead?: string };
 
 const hex = (value: bigint | number) => '0x' + BigInt(value).toString(16);
 type RpcBlock = { hash: string; number: string; timestamp: string };
@@ -208,6 +220,13 @@ export class Sequencer {
     }
 
     private async startLocked(): Promise<void> {
+        const proofTime = this.config.expectedProofTime ?? DEFAULT_EXPECTED_PROOF_TIME;
+        const margin = this.config.submitMargin ?? DEFAULT_SUBMIT_MARGIN;
+        if (proofTime + margin >= this.config.maxBlockAge)
+            throw new SequencerStop(
+                `время пруфа ${proofTime} с + запас ${margin} с не меньше maxBlockAge ${this.config.maxBlockAge} с: ` +
+                    'каждый блок пересобирался бы до пруфа; уменьшите expectedProofTime либо разверните контракт с большим maxBlockAge',
+            );
         await checkGenesis(this.deps.node, this.config.chainId);
         this.programKeys = loadProgramKeys(this.config.programKeysPath ?? DEFAULT_PROGRAM_KEYS);
         const identity = identityMismatches(await hostIdentity(this.config.tools), this.programKeys);
@@ -221,6 +240,7 @@ export class Sequencer {
                 `часы машины расходятся со временем L1 на ${skew} с (предел ${limit}): время блоков и срок приёма считались бы неверно`,
             );
         this.state = this.store.load(this.config.chainId);
+        this.state.rebuild ??= null;
         const { tip, accepted } = this.state;
         let status = (await this.fcu(tip.hash, tip.hash, accepted.hash)).payloadStatus.status;
         if (status !== 'VALID') {
@@ -257,20 +277,10 @@ export class Sequencer {
 
     // --- пруф и отправка ---
 
-    /**
-     * Успеть ли: контракт берёт батч, пока `время L1 ≤ время блока + maxBlockAge` (0.3), и позже
-     * негоден навсегда. Перед пруфом и перед отправкой — с запасом; не успеть — остановка.
-     */
-    private async assertInTime(number: number, report: EvmBatchReport, before: string): Promise<void> {
+    /** Окно приёма батча (0.3): контракт берёт его, пока `время блока ≤ время L1 ≤ время блока + maxBlockAge`. */
+    private window(report: EvmBatchReport): { timestamp: number; deadline: number } {
         const timestamp = Number(report.publicValues.blockTimestamp);
-        const l1 = await this.deps.l1Now();
-        const margin = this.config.submitMargin ?? 300;
-        const deadline = timestamp + this.config.maxBlockAge;
-        if (deadline < l1 + margin)
-            throw new SequencerStop(
-                `батч ${number} не успеть принять ${before}: время блока ${timestamp} + maxBlockAge ${this.config.maxBlockAge} = ${deadline}, ` +
-                    `а время L1 ${l1} + запас ${margin} = ${l1 + margin}; блок нужно пересобрать (пересборки ещё нет)`,
-            );
+        return { timestamp, deadline: timestamp + this.config.maxBlockAge };
     }
 
     private assertReportIdentity(report: EvmBatchReport): void {
@@ -279,30 +289,84 @@ export class Sequencer {
             throw new SequencerStop(`хост устарел: ${mismatches.join('; ')}; пересоберите хост и запустите сервис снова`);
     }
 
+    /** Принял ли контракт батч (до проверки срока: сервис мог упасть между приёмом и записью). Другим блоком — остановка. */
+    private async acceptedByContract(record: BlockRecord): Promise<boolean> {
+        const contract = await this.deps.submitter.contractState();
+        if (contract.batchIndex < record.number) return false;
+        if (contract.batchIndex === record.number && contract.stateRoot !== BigInt(record.hash))
+            throw new SequencerStop(
+                `контракт принял батч ${record.number} с другим блоком 0x${contract.stateRoot.toString(16).padStart(64, '0')}, а у сервиса ${record.hash}`,
+            );
+        return true;
+    }
+
     private async proveAndSubmit(record: BlockRecord): Promise<StepResult> {
         const job = JSON.parse(readFileSync(path.join(record.dir, 'job.json'), 'utf8')) as ProverJob;
         const report = JSON.parse(readFileSync(job.report, 'utf8')) as EvmBatchReport;
         this.assertReportIdentity(report);
+        const { timestamp, deadline } = this.window(report);
+        const margin = this.config.submitMargin ?? DEFAULT_SUBMIT_MARGIN;
+        // Время L1 — до вопроса контракту: «не принят» тогда верно и на этот момент L1.
+        let l1 = await this.deps.l1Now();
+        if (await this.acceptedByContract(record)) return this.markAccepted(record, true);
         let proof: BatchProof;
         if (record.status === 'checked') {
-            await this.assertInTime(record.number, report, 'до пруфа');
+            const proofTime = this.config.expectedProofTime ?? DEFAULT_EXPECTED_PROOF_TIME;
+            // Батч ещё никуда не уходил: не успеть с пруфом — пересборка сразу.
+            if (deadline < l1 + proofTime + margin)
+                return this.rebuild(
+                    record,
+                    job,
+                    `батч не успеть принять до пруфа: время блока ${timestamp} + maxBlockAge ${this.config.maxBlockAge} = ${deadline}, ` +
+                        `а время L1 ${l1} + время пруфа ${proofTime} + запас ${margin} = ${l1 + proofTime + margin}`,
+                );
             proof = await this.deps.prover.prove(job);
             writeAtomically(path.join(record.dir, 'proof.json'), serialize(proof));
             record.status = 'proven';
             this.save();
             this.fault('proven');
+            l1 = await this.deps.l1Now();
+            if (await this.acceptedByContract(record)) return this.markAccepted(record, true);
         } else {
             proof = deserialize<BatchProof>(readFileSync(path.join(record.dir, 'proof.json'), 'utf8'));
         }
-        await this.assertInTime(record.number, report, 'до отправки');
-        const outcome = await this.deps.submitter.submit({
-            number: record.number,
-            blockHash: record.hash,
-            report,
-            proof,
-        });
+        // Блок из будущего L1 (7329): контракт возьмёт его, когда L1 догонит. Ждать.
+        if (timestamp > l1) return this.waiting(record, `время блока ${timestamp} позже времени L1 ${l1}: ждём L1`);
+        if (deadline < l1 + margin) {
+            // Не уходил — пересобрать сразу. Мог уйти — только по истечении срока: до того он ещё
+            // может быть принят, и пересобранный блок разошёлся бы с контрактом.
+            if (!record.submitting || deadline < l1)
+                return this.rebuild(
+                    record,
+                    job,
+                    `батч не успеть принять до отправки: время блока ${timestamp} + maxBlockAge ${this.config.maxBlockAge} = ${deadline}, ` +
+                        `а время L1 ${l1} + запас ${margin} = ${l1 + margin}`,
+                );
+            return this.waiting(
+                record,
+                `батч мог уйти контракту, а срок ${deadline} ближе запаса ${margin} с (время L1 ${l1}): ждём приёма либо конца срока`,
+            );
+        }
+        if (!record.submitting) {
+            record.submitting = true;
+            this.save();
+        }
+        const outcome = await this.deps.submitter.submit({ number: record.number, blockHash: record.hash, report, proof });
         if (!outcome.accepted) throw new SequencerStop(`батч ${record.number} не принят: ${outcome.reason}`);
+        this.fault('submitted');
+        return this.markAccepted(record, outcome.alreadyAccepted);
+    }
+
+    private waiting(record: BlockRecord, reason: string): StepResult {
+        return this.log(`батч ${record.number}: ${reason}`), { kind: 'waiting', number: record.number, reason };
+    }
+
+    /** Батч принят контрактом: запись, finalized узла. */
+    private async markAccepted(record: BlockRecord, alreadyAccepted: boolean): Promise<StepResult> {
         record.status = 'accepted';
+        delete record.parent;
+        delete record.segment;
+        delete record.submitting;
         this.state.accepted = { number: record.number, hash: record.hash };
         const { tip } = this.state;
         const status = (await this.fcu(tip.hash, tip.hash, record.hash)).payloadStatus.status;
@@ -310,15 +374,53 @@ export class Sequencer {
             throw new SequencerStop(`узел не сдвинул финальность на блок ${record.number}: ${status}`);
         this.save();
         this.log(
-            `батч ${record.number} принят контрактом${outcome.alreadyAccepted ? ' (раньше)' : ''}; финальность — блок ${record.number}`,
+            `батч ${record.number} принят контрактом${alreadyAccepted ? ' (раньше)' : ''}; финальность — блок ${record.number}`,
         );
-        return { kind: 'accepted', number: record.number, hash: record.hash, alreadyAccepted: outcome.alreadyAccepted };
+        return { kind: 'accepted', number: record.number, hash: record.hash, alreadyAccepted };
+    }
+
+    /**
+     * Батч блока контракт не примет (0.3) — блок той же высоты заново: свежее время, тот же отрезок,
+     * пул заново. Условие — контракт его не принял (спрошено перед вызовом, после времени L1).
+     * Блок — последний и единственный непринятый (конвейера нет): родитель — принятый батч.
+     */
+    private async rebuild(record: BlockRecord, job: ProverJob, reason: string): Promise<StepResult> {
+        const last = this.state.blocks[this.state.blocks.length - 1];
+        if (last !== record || !record.parent || !record.segment || this.state.accepted.number !== record.number - 1)
+            throw new SequencerStop(
+                `батч ${record.number} нужно пересобрать (${reason}), но у сервиса нет записи о родителе и отрезке блока либо блок не последний`,
+            );
+        await this.deps.prover.cancel?.(job);
+        const { parent } = record;
+        this.state.rebuild = {
+            number: record.number,
+            segment: record.segment,
+            cut: this.state.tip.cut ?? false,
+            replaces: record.hash,
+            reason,
+        };
+        this.state.blocks.pop();
+        this.state.tip = parent;
+        this.state.pending = null;
+        this.save();
+        // Каталог прежнего блока — в сторону (после записи состояния: оно на него больше не ссылается).
+        const staleDir = `${record.dir}.stale-${record.hash.slice(2, 10)}`;
+        rmSync(staleDir, { recursive: true, force: true });
+        renameSync(record.dir, staleDir);
+        // safe узла — назад на родителя; голова та же (её reth назад не отдаёт), её вытеснит новый блок.
+        const status = (await this.fcu(record.hash, parent.hash, this.state.accepted.hash)).payloadStatus.status;
+        if (status !== 'VALID') throw new SequencerStop(`узел не отвёл safe с блока ${record.number}: ${status}`);
+        this.log(`блок ${record.number} (${record.hash}) пересобирается: ${reason}`);
+        const result = await this.nextBlock(true);
+        return result.kind === 'checked' ? { ...result, replaced: record.hash } : result;
     }
 
     // --- следующий блок ---
 
-    private async nextBlock(allowEmpty: boolean): Promise<StepResult> {
+    private async nextBlock(allowEmptyAsked: boolean): Promise<StepResult> {
         const number = this.state.tip.number + 1;
+        // Пересобираемый блок собирается и пустым: прежний той же высоты обязан быть вытеснен.
+        const allowEmpty = allowEmptyAsked || this.state.rebuild?.number === number;
         let attempt = 1;
         // Кандидат, отданный узлу до остановки, не собирается заново: проверка продолжается с его фазы.
         const resumed = this.state.pending;
@@ -343,11 +445,64 @@ export class Sequencer {
         for (; attempt <= 2; attempt++) {
             const withPool = this.config.includePool && attempt === 1;
             const pending = await this.buildCandidate(number, attempt, withPool, allowEmpty);
-            if (!pending) return { kind: 'idle' };
+            if (!pending) return this.idle();
             const result = await this.checkCandidate(pending);
             if (result) return result;
         }
         throw new SequencerStop(`блок ${number}: программа отвергла и исправленного кандидата (без транзакций пула)`);
+    }
+
+    /**
+     * Собирать нечего; голова узла может остаться на непроверенном кандидате — попытка вернуть её на
+     * вершину. Reth v2.2.0 на это отвечает VALID и не меняет НИЧЕГО (debug_setHead — пустышка;
+     * README): голову вытеснит следующий кандидат, safe и finalized уже на проверенном, шаг её называет.
+     */
+    private async idle(): Promise<StepResult> {
+        const { tip, accepted } = this.state;
+        const head = await this.deps.node.eth<RpcBlock | null>('eth_getBlockByNumber', ['latest', false]);
+        if (!head || head.hash === tip.hash) return { kind: 'idle' };
+        await this.fcu(tip.hash, tip.hash, accepted.hash);
+        const after = await this.deps.node.eth<RpcBlock | null>('eth_getBlockByNumber', ['latest', false]);
+        if (!after || after.hash === tip.hash) return { kind: 'idle' };
+        this.log(
+            `голова узла — непроверенный блок ${Number(after.number)} (${after.hash}): к вершине ${tip.number} узел её не возвращает; ` +
+                'вытеснит следующий кандидат той же высоты; наружу — только safe',
+        );
+        return { kind: 'idle', unverifiedHead: after.hash };
+    }
+
+    /** Окно очереди. Отставание источника (QueueLagError) терпится queueLagLimit с первого раза — и через перезапуск. */
+    private async readQueue(from: QueueMark, cursor: MessageCursor | null, max: number): Promise<QueueWindow> {
+        try {
+            const window = await this.deps.queue.read(from, cursor, max);
+            if (this.state.queueLagSince !== undefined) {
+                delete this.state.queueLagSince;
+                this.save();
+            }
+            return window;
+        } catch (error) {
+            if (!(error instanceof QueueLagError)) throw error;
+            const limit = this.config.queueLagLimit ?? DEFAULT_QUEUE_LAG_LIMIT;
+            const since = (this.state.queueLagSince ??= this.now());
+            this.save();
+            const lag = this.now() - since;
+            if (lag > limit)
+                throw new SequencerStop(
+                    `источник сообщений очереди L1 отстаёт ${lag} с (предел ${limit}): ${error.message}; ` +
+                        'индексатор стоит или потерял сообщение — нужен человек',
+                );
+            this.log(`очередь L1: ${error.message} — отстаёт ${lag} с из ${limit}, повтор следующим шагом`);
+            throw error;
+        }
+    }
+
+    /** Отрезок пересобираемого блока — прежний, сверенный с контрактом (`rebuildSegmentProblem`). */
+    private async rebuildSegment(rebuild: Rebuild): Promise<QueuedItem[]> {
+        const { tip } = this.state;
+        const window = await this.readQueue(tip.queue, tip.cursor, rebuild.segment.length);
+        const problem = rebuildSegmentProblem(window, tip.queue, rebuild.segment);
+        if (problem) throw new SequencerStop(`блок ${rebuild.number}: пересборка — ${problem}`);
+        return rebuild.segment;
     }
 
     /** Кандидат: отрезок, форма, сборка до совпадения с запросом. Сохраняется в фазе built. */
@@ -359,8 +514,13 @@ export class Sequencer {
     ): Promise<Pending | null> {
         const { tip } = this.state;
         const dir = this.store.candidateDir(number, attempt);
-        const window = await this.deps.queue.read(tip.queue, tip.cursor, this.config.maxBatchQueueItems);
-        const forcedWindow = window.items.filter(({ item }) => item.kind === 'forced');
+        const rebuild = this.state.rebuild?.number === number ? this.state.rebuild : null;
+        const fixed = rebuild ? await this.rebuildSegment(rebuild) : null;
+        const window = fixed
+            ? null
+            : await this.readQueue(tip.queue, tip.cursor, this.config.maxBatchQueueItems);
+        const items = fixed ?? window!.items;
+        const forcedWindow = items.filter(({ item }) => item.kind === 'forced');
         const verdicts = await this.tool(`блок ${number}: форма принудительных`, () =>
             classifyForced(
                 this.config.tools,
@@ -373,10 +533,12 @@ export class Sequencer {
         verdicts.forEach((verdict, index) => {
             if (verdict.form === 'valid') signers.set(forcedWindow[index].item.number, verdict.signer);
         });
-        const choice = chooseSegment(window.items, this.config.maxBatchQueueItems, signers, {
-            pending: window.head.count - tip.queue.count,
-            previousCut: tip.cut ?? false,
-        });
+        const choice = fixed
+            ? { items: fixed, cut: null, depositCut: rebuild!.cut }
+            : chooseSegment(items, this.config.maxBatchQueueItems, signers, {
+                  pending: window!.head.count - tip.queue.count,
+                  previousCut: tip.cut ?? false,
+              });
         if (choice.cut) this.log(`блок ${number}: отрезок до ${tip.queue.count + choice.items.length} — ${choice.cut}`);
         const segment = choice.items;
         // Принудительные, годные по форме, — кандидаты в блок; остальные программа пропустит.
@@ -525,28 +687,7 @@ export class Sequencer {
                 workDir: pending.dir,
             }),
         );
-        const accountProofs: RollupWitness['accountProofs'] = [];
-        for (const address of pending.signers) {
-            const proof = await this.deps.node.eth<{ accountProof: string[] }>('eth_getProof', [
-                address,
-                [],
-                hex(tip.number),
-            ]);
-            const code = await this.deps.node.eth<string>('eth_getCode', [address, hex(tip.number)]);
-            accountProofs.push({ address, accountProof: proof.accountProof, ...(code === '0x' ? {} : { code }) });
-        }
-        const witness: RollupWitness = {
-            prevDepositHash: '0x' + tip.queue.hash.toString(16).padStart(64, '0'),
-            queueProcessedFrom: tip.queue.count,
-            queue: pending.segment.map(({ item }) =>
-                item.kind === 'deposit'
-                    ? { deposit: { l2Recipient: item.l2Recipient, amount: item.amount.toString() } }
-                    : { forcedTransaction: '0x' + item.bytes.toString('hex') },
-            ),
-            withdrawalsFrontier: tip.tree.frontier.map((node) => '0x' + node.toString(16).padStart(64, '0')),
-            withdrawalsCount: tip.tree.count.toString(),
-            accountProofs,
-        };
+        const witness = await collectWitness(this.deps.node, pending, tip);
         const verdict = await this.tool(`блок ${pending.number}: программа (хост)`, () =>
             runProgram(this.config.tools, {
                 blockInput: input,
@@ -564,36 +705,7 @@ export class Sequencer {
         this.assertReportIdentity(report);
 
         // Собственный расчёт против программы.
-        const receipts = await this.deps.node.eth<{ logs: LogEntry[] }[]>('eth_getBlockReceipts', [
-            hex(pending.number),
-        ]);
-        const expected = expectedPublicValues({
-            chainId: this.config.chainId,
-            parentHash: tip.hash,
-            candidateHash: hash,
-            timestamp: Number(BigInt(pending.payload.timestamp)),
-            queueFrom: tip.queue,
-            segment: pending.segment,
-            treeBefore: tip.tree,
-            leaves: bridgeLeaves(receipts),
-            dataChunks: report.dataChunksHex.map((chunk) => Buffer.from(chunk, 'hex')),
-        });
-        // Несущие слова — первыми и отдельно: отчёт о другом блоке или от другой вершины.
-        const mismatches = [
-            ...anchorMismatches(report, tip.hash, hash),
-            ...reportMismatches(report, expected, tip.queue),
-        ];
-        const rawBlock = await this.deps.node.eth<string>('debug_getRawBlock', [hash]);
-        if (rawBlock.replace(/^0x/, '') !== report.dataChunksHex.join(''))
-            mismatches.push('данные батча — не RLP блока со слов узла');
-        // Судьба принудительных — по порядку (две одинаковые в отрезке законны).
-        mismatches.push(
-            ...forcedFateMismatches(
-                pending.segment,
-                report.forced,
-                pending.payload.transactions.slice(0, pending.forcedCount),
-            ),
-        );
+        const { expected, mismatches } = await crossCheck(this.deps.node, this.config.chainId, pending, tip, report);
         const segmentForced = pending.segment.filter(({ item }) => item.kind === 'forced');
         if (mismatches.length > 0) {
             reject(`расчёт сервиса не сошёлся с программой: ${mismatches.join('; ')}`);
@@ -606,8 +718,9 @@ export class Sequencer {
         const blockDir = this.store.blockDir(pending.number);
         mkdirSync(blockDir, { recursive: true });
         writeAtomically(path.join(blockDir, 'payload.json'), serialize(pending.payload));
-        copyFileSync(path.join(pending.dir, 'report.json'), path.join(blockDir, 'report.json'));
-        copyFileSync(path.join(pending.dir, 'batch.bin'), path.join(blockDir, 'batch.bin'));
+        // Как state.json: временный файл, fsync, переименование, fsync каталога.
+        writeAtomically(path.join(blockDir, 'report.json'), readFileSync(path.join(pending.dir, 'report.json')));
+        writeAtomically(path.join(blockDir, 'batch.bin'), readFileSync(path.join(pending.dir, 'batch.bin')));
         const job: ProverJob = {
             number: pending.number,
             blockHash: hash,
@@ -628,8 +741,16 @@ export class Sequencer {
             report: path.join(blockDir, 'report.json'),
             ...(pending.cut ? { cut: true } : {}),
         };
-        this.state.blocks.push({ number: pending.number, hash, status: 'checked', dir: blockDir });
+        this.state.blocks.push({
+            number: pending.number,
+            hash,
+            status: 'checked',
+            dir: blockDir,
+            parent: tip,
+            segment: pending.segment,
+        });
         this.state.pending = null;
+        this.state.rebuild = null;
         this.save();
         const status = (await this.fcu(hash, hash, accepted.hash)).payloadStatus.status;
         if (status !== 'VALID')
@@ -666,23 +787,9 @@ export class Sequencer {
         this.save();
     }
 
-    /**
-     * Запуск хоста или rsp с повтором: сбой инструмента (ToolFailure — убит, упал вне проверок
-     * программы, нет файла) — не отказ программы. Повторы кончились — остановка; кандидат остаётся
-     * в работе и после перезапуска продолжается с той же фазы.
-     */
-    private async tool<T>(what: string, call: () => Promise<T>): Promise<T> {
-        const retries = this.config.toolRetries ?? 2;
-        for (let attempt = 0; ; attempt++) {
-            try {
-                return await call();
-            } catch (error) {
-                if (!(error instanceof ToolFailure)) throw error;
-                if (attempt >= retries)
-                    throw new SequencerStop(`${what}: сбой инструмента после ${attempt + 1} попыток — ${error.message}`);
-                this.log(`${what}: сбой инструмента (${error.message}) — повтор`);
-            }
-        }
+    /** Запуск хоста или rsp с повтором после сбоя инструмента (`withToolRetries`). */
+    private tool<T>(what: string, call: () => Promise<T>): Promise<T> {
+        return withToolRetries(this.config.toolRetries ?? 2, what, call, (line) => this.log(line), (text) => new SequencerStop(text));
     }
 
     private async canonicalHash(number: number): Promise<string | null> {

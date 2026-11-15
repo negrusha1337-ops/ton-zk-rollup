@@ -1,4 +1,5 @@
-import { QueuedItem } from '../queue/types';
+import { QueuedItem, QueueMark, QueueWindow } from '../queue/types';
+import { serialize } from '../state';
 
 // Выбор отрезка очереди для блока и зачисления депозитов — чистые функции.
 //
@@ -99,4 +100,18 @@ export function chooseSegment(
         }
     }
     return full;
+}
+
+/**
+ * Отрезок пересобираемого блока (0.3) — прежний; он годен и теперь, если контракт обработал очередь
+ * ровно до отметки родителя (батч прежнего блока не принят, другой — тоже) и элементы окна — те же
+ * (они неизменны: хеш цепочки). Предел и голова от этого не нарушаются. null — годен, иначе — что не так.
+ */
+export function rebuildSegmentProblem(window: QueueWindow, parent: QueueMark, segment: QueuedItem[]): string | null {
+    if (window.processed.count !== parent.count || window.processed.hash !== parent.hash)
+        return `контракт обработал очередь до ${window.processed.count}, а родитель блока — до ${parent.count}`;
+    const same =
+        window.items.length === segment.length &&
+        window.items.every(({ item }, index) => serialize(item) === serialize(segment[index].item));
+    return same ? null : 'элементы очереди у контракта не те, что в прежнем отрезке';
 }

@@ -60,7 +60,7 @@ export function fakeNode(): FakeNode {
         return { hash, number: payload.blockNumber, timestamp: payload.timestamp, parentHash: payload.parentHash };
     };
     const numberOfTag = (tag: string): number => {
-        const named = (tags as Record<string, string>)[tag];
+        const named = (tags as Record<string, string>)[tag === 'latest' ? 'head' : tag];
         if (named) return named === GENESIS_HASH ? 0 : Number(BigInt(known.get(named)!.blockNumber));
         return Number(BigInt(tag));
     };
@@ -94,11 +94,13 @@ export function fakeNode(): FakeNode {
             if (state.headBlockHash !== GENESIS_HASH && !known.has(state.headBlockHash))
                 return { payloadStatus: { status: 'SYNCING' } };
             const number = state.headBlockHash === GENESIS_HASH ? 0 : Number(BigInt(known.get(state.headBlockHash)!.blockNumber));
-            // Как reth: к предку голова не откатывается.
-            if (number >= numberOfTag('head')) {
-                canonical.set(number, state.headBlockHash);
-                tags.head = state.headBlockHash;
-            }
+            // Как reth v2.2.0 (проверено): голова — предок нынешней → VALID и не меняется НИЧЕГО,
+            // ни голова, ни safe, ни finalized.
+            if (number < numberOfTag('head') && canonical.get(number) === state.headBlockHash)
+                return { payloadStatus: { status: 'VALID' } };
+            canonical.set(number, state.headBlockHash);
+            for (const [height] of [...canonical]) if (height > number) canonical.delete(height);
+            tags.head = state.headBlockHash;
             tags.safe = state.safeBlockHash;
             tags.finalized = state.finalizedBlockHash;
             return { payloadStatus: { status: 'VALID' } };

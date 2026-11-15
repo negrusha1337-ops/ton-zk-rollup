@@ -157,18 +157,23 @@ if (missing.length > 0) {
             );
             expect(result.transactions).toHaveTransaction({ to: rollup.address, success: true });
         };
-        /** Время L1 — не раньше времени блока: контракт берёт батч в окне [время блока, + maxBlockAge]. */
-        const submitter = (): BatchSubmitter => {
-            const inner = new SandboxSubmitter(rollup, owner.getSender(), (result) => feed.record(result));
-            return {
-                submit: async (batch) => {
-                    blockchain.now = Math.max(
-                        blockchain.now ?? 0,
-                        Number(batch.report.publicValues.blockTimestamp) + 1,
-                    );
-                    return inner.submit(batch);
-                },
-            };
+        /** Сдвиг часов машины и L1 вперёд, с (блок 9: время L1 уходит за окно maxBlockAge). */
+        let shift = 0;
+        const wallClock = () => Math.floor(Date.now() / 1000) + shift;
+        /** Время L1 идёт как часы машины: блок из будущего (время сборки — с запасом секунды) ждёт. */
+        const l1Now = async () => {
+            blockchain.now = Math.max(blockchain.now ?? 0, wallClock());
+            return blockchain.now;
+        };
+        const submitter = (): BatchSubmitter =>
+            new SandboxSubmitter(rollup, owner.getSender(), (result) => feed.record(result));
+        /** Шаг, пережидающий «блок из будущего L1» (время блока — max(родитель + 1, сейчас)). */
+        const settle = async (service: Sequencer) => {
+            for (let attempt = 0; ; attempt++) {
+                const result = await service.step();
+                if (result.kind !== 'waiting' || attempt > 20) return result;
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+            }
         };
         /** Новый экземпляр сервиса; прежние закрываются (каталог состояния — под блокировкой). */
         const sequencer = (faults?: SequencerDeps['faults'], rpc?: NodeRpc) => {
@@ -178,7 +183,7 @@ if (missing.length > 0) {
                 queue: new SandboxQueueSource(rollup, feed, constants),
                 prover: new MockProver(),
                 submitter: submitter(),
-                l1Now: async () => blockchain.now ?? Math.floor(Date.now() / 1000),
+                l1Now,
                 log: (line) => lines.push(line),
                 faults,
             });
@@ -253,7 +258,7 @@ if (missing.length > 0) {
                 safe: checked.hash,
                 finalized: finalizedBefore,
             });
-            const accepted = await service.step();
+            const accepted = await settle(service);
             expect(accepted).toEqual({
                 kind: 'accepted',
                 number: checked.number,
@@ -343,6 +348,9 @@ if (missing.length > 0) {
                 // Пределы и срок — у контракта, не копией.
                 maxBatchQueueItems: constants.maxBatchQueueItems,
                 maxBlockAge: (await rollup.getDeployment()).maxBlockAge,
+                // Пруф — заглушка; с наименьшим maxBlockAge (1800) время пруфа по умолчанию не помещается.
+                expectedProofTime: 600,
+                now: wallClock,
             };
         }, 300_000);
 
@@ -510,7 +518,7 @@ if (missing.length > 0) {
             // Узел перезапущен после проверки: блок 6 — safe, finalized — блок 5.
             expect((await block('safe'))!.hash).toBe(snapshot.blocks[5].hash);
             expect((await block('finalized'))!.hash).toBe(snapshot.blocks[4].hash);
-            expect(await second.step()).toEqual({ kind: 'accepted', number: 6, hash: snapshot.blocks[5].hash, alreadyAccepted: false });
+            expect(await settle(second)).toEqual({ kind: 'accepted', number: 6, hash: snapshot.blocks[5].hash, alreadyAccepted: false });
             await expectAccepted(second, snapshot.blocks[5]);
             expect((await block(6))!.transactions).toHaveLength(0);
             config = { ...config, includePool: false };
@@ -587,7 +595,7 @@ if (missing.length > 0) {
             const { snapshot, second } = await interruptAndRestartNode('proven');
             expect(snapshot.blocks[6]).toMatchObject({ number: 7, status: 'proven' });
             expect((await block('finalized'))!.hash).toBe(snapshot.blocks[5].hash);
-            expect(await second.step()).toEqual({ kind: 'accepted', number: 7, hash: snapshot.blocks[6].hash, alreadyAccepted: false });
+            expect(await settle(second)).toEqual({ kind: 'accepted', number: 7, hash: snapshot.blocks[6].hash, alreadyAccepted: false });
             const report = await expectAccepted(second, snapshot.blocks[6]);
             expect(report.forced).toEqual([{ queueIndex: 0, outcome: 'included' }]);
         }, 1_800_000);
@@ -622,6 +630,45 @@ if (missing.length > 0) {
                 expect(existsSync(path.join(record.dir, 'job.json'))).toBe(true);
             }
             // Хост и rsp не остались жить после шагов: живой только узел.
+            expect(liveChildren()).toBe(1);
+            config = { ...config, includePool: false };
+        }, 900_000);
+
+        it('блок 9: время L1 ушло за окно после проверки — блок пересобран (тот же отрезок, свежее время), safe — на соседа, контракт принимает новый', async () => {
+            await deposit('0x' + '99'.repeat(20), toNano('0.3'));
+            const service = sequencer();
+            await service.start();
+            const old = await service.step();
+            if (old.kind !== 'checked') throw new Error(`ожидался проверенный блок, а шаг дал ${old.kind}`);
+            const oldReport = reportOf(service, 9);
+            const finalized = (await block('finalized'))!.hash;
+            expect((await block('safe'))!.hash).toBe(old.hash);
+            // Часы машины и L1 — на maxBlockAge вперёд: батч блока 9 не успеть даже до пруфа.
+            shift = config.maxBlockAge;
+            const rebuilt = await service.step();
+            expect(rebuilt).toMatchObject({ kind: 'checked', number: 9, replaced: old.hash, queueItems: 1 });
+            if (rebuilt.kind !== 'checked') throw new Error('не пересобран');
+            expect(rebuilt.hash).not.toBe(old.hash);
+            expect(lines.some((line) => line.startsWith(`блок 9 (${old.hash}) пересобирается: батч не успеть принять до пруфа:`))).toBe(true);
+            // Узел: на высоте 9 — новый блок от того же родителя, safe — он же (сосед прежнего safe).
+            expect((await block(9))!).toMatchObject({ hash: rebuilt.hash, parentHash: (await block(8))!.hash });
+            expect({ safe: (await block('safe'))!.hash, finalized: (await block('finalized'))!.hash }).toEqual({
+                safe: rebuilt.hash,
+                finalized,
+            });
+            // Тот же отрезок очереди, свежее время; контракт до приёма — на батче 8.
+            const newReport = reportOf(service, 9);
+            expect([newReport.queueProcessedFrom, newReport.queueProcessedUpTo]).toEqual([
+                oldReport.queueProcessedFrom,
+                oldReport.queueProcessedUpTo,
+            ]);
+            expect(Number(newReport.publicValues.blockTimestamp)).toBeGreaterThanOrEqual(
+                Number(oldReport.publicValues.blockTimestamp) + config.maxBlockAge,
+            );
+            expect((await rollup.getRollupState()).batchIndex).toBe(8);
+            expect(service.snapshot.rebuild).toBeNull();
+            expect(await settle(service)).toEqual({ kind: 'accepted', number: 9, hash: rebuilt.hash, alreadyAccepted: false });
+            await expectAccepted(service, rebuilt);
             expect(liveChildren()).toBe(1);
         }, 900_000);
     });

@@ -274,3 +274,26 @@ export function reportIdentityMismatches(report: HostReport, keys: ProgramKeys):
         out.push(`отчёт хоста — от исходников ${report.sourcesSha256}, а в program.json ${keys.sourcesSha256}`);
     return out;
 }
+
+/**
+ * Запуск хоста или rsp с повтором: сбой инструмента (ToolFailure — убит, упал вне проверок
+ * программы, нет файла) — не отказ программы. Повторы кончились — исключение `stop(текст)`;
+ * кандидат остаётся в работе и после перезапуска продолжается с той же фазы.
+ */
+export async function withToolRetries<T>(
+    retries: number,
+    what: string,
+    call: () => Promise<T>,
+    log: (line: string) => void,
+    stop: (text: string) => Error,
+): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await call();
+        } catch (error) {
+            if (!(error instanceof ToolFailure)) throw error;
+            if (attempt >= retries) throw stop(`${what}: сбой инструмента после ${attempt + 1} попыток — ${error.message}`);
+            log(`${what}: сбой инструмента (${error.message}) — повтор`);
+        }
+    }
+}

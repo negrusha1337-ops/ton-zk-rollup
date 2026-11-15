@@ -23,6 +23,11 @@ export type BatchProof = { kind: 'mock' | 'groth16'; proof: Bn254Proof; hintsBoc
 
 export interface Prover {
     prove(job: ProverJob): Promise<BatchProof>;
+    /**
+     * Отменить задание: блок пересобирается, его батч контракт уже не примет. Прувер, у которого
+     * заданий в фоне нет, может не реализовывать.
+     */
+    cancel?(job: ProverJob): Promise<void>;
 }
 
 /** Заглушка пруфа, которую принимает двойник: «первое число пруфа равно 1». */

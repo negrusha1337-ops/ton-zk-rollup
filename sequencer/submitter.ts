@@ -14,8 +14,13 @@ export type Batch = { number: number; blockHash: string; report: EvmBatchReport;
 
 export type SubmitOutcome = { accepted: true; alreadyAccepted: boolean } | { accepted: false; reason: string };
 
+/** Что контракт знает о батчах: номер последнего принятого и его корень (хеш блока). */
+export type ContractBatchState = { batchIndex: number; stateRoot: bigint };
+
 export interface BatchSubmitter {
     submit(batch: Batch): Promise<SubmitOutcome>;
+    /** Состояние контракта сейчас: сервис спрашивает его ДО проверки срока и до пересборки. */
+    contractState(): Promise<ContractBatchState>;
 }
 
 /** Двойник контракта в Sandbox, открытый тестом, и то, что тесту нужно знать об отправках. */
@@ -62,6 +67,11 @@ export class SandboxSubmitter implements BatchSubmitter {
         private readonly sender: Sender,
         private readonly record: (result: { transactions: Transaction[] }) => void = () => {},
     ) {}
+
+    async contractState(): Promise<ContractBatchState> {
+        const { batchIndex, stateRoot } = await this.rollup.getRollupState();
+        return { batchIndex, stateRoot };
+    }
 
     async submit(batch: Batch): Promise<SubmitOutcome> {
         const state = await this.rollup.getRollupState();
