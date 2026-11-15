@@ -11,10 +11,19 @@
 // Номер элемента очереди — порядок успешных транзакций DepositTon и ForceTransaction контракта по
 // lt (так их нумерует сам контракт: неуспешная постановка элемента не создаёт). Сколько элементов
 // обработал батч — отметка queueProcessedUpTo из тела SubmitBatch минус отметка прежнего батча.
+//
+// Сверка выводов (круг 23, пункт 4; zk/sequencer-run-reconcile.cjs): листья дерева выводов (get-метод
+// rollupState) против подтверждений нуллификаторов и выплат, долги — get-методом owedPayout. Итог —
+// «сошлось» (код выхода 0) или «не сошлось» с причинами (код 2); файл отчёта пишется в обоих случаях.
+import { createRequire } from 'node:module';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Cell } from '@ton/core';
+import { Address, Cell } from '@ton/core';
+import { TonClient } from '@ton/ton';
+
+const require = createRequire(import.meta.url);
+const { exitCodeOf, owedKeysToRead, parseBody, reconcile } = require('./sequencer-run-reconcile.cjs');
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const API = 'https://testnet.toncenter.com/api/v3';
@@ -104,6 +113,7 @@ const rows = transactions.map((tx) => {
         totalFeesNano: Number(tx.total_fees),
         valueNano: String(tx.in_msg?.value ?? 0),
         roots: STEPS[tx.in_msg?.opcode] === 'submitBatch' ? submittedRoots(tx) : null,
+        body: parseBody(STEPS[tx.in_msg?.opcode ?? null], tx.in_msg?.message_content?.body),
         out: (tx.out_msgs ?? []).map((message) => ({ to: hashPart(message.destination), valueNano: String(message.value ?? 0) })),
     };
 });
@@ -151,6 +161,35 @@ const payouts = rows
 const failures = rows.filter((row) => !row.success).map((row) => ({ time: row.time, step: row.step, exitCode: row.exitCode, from: row.from, hash: row.hash }));
 const count = (step) => rows.filter((row) => row.step === step && row.success).length;
 
+// --- сверка выводов: get-методы контракта сейчас ---
+const client = new TonClient({ endpoint: 'https://testnet.toncenter.com/api/v2/jsonRPC', apiKey: process.env.TONCENTER_API_KEY || undefined });
+async function getMethod(name, args = []) {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            await pause(headers['X-API-Key'] ? 150 : 1100);
+            const answer = await client.runMethod(Address.parse(address), name, args);
+            return answer.stack;
+        } catch (error) {
+            if (attempt >= 5) {
+                console.error(`get-метод ${name} не исполнился: ${error.message}. Попробуй ещё раз через минуту.`);
+                process.exit(1);
+            }
+            await pause(2000 * (attempt + 1));
+        }
+    }
+}
+const rollupState = await getMethod('rollupState');
+rollupState.skip(3);
+const withdrawalsCount = rollupState.readBigNumber().toString();
+const owed = {};
+for (const key of owedKeysToRead(rows)) {
+    const stack = await getMethod('owedPayout', [{ type: 'int', value: BigInt(key) }]);
+    const recipient = stack.readAddressOpt();
+    const amount = stack.readBigNumber();
+    owed[key] = recipient ? amount.toString() : null;
+}
+const reconciliation = reconcile({ rows, withdrawalsCount, owed });
+
 const result = {
     source: 'Сгенерировано zk/sequencer-run-report.mjs из транзакций testnet; не редактировать вручную',
     network: 'testnet',
@@ -184,6 +223,7 @@ const result = {
     refunds: rows.filter((row) => row.step === 'cancelDeposit' && row.success).flatMap((row) => row.out.map((message) => ({ time: row.time, to: message.to, valueNano: message.valueNano }))),
     payouts: { count: payouts.length, totalNano: payouts.reduce((sum, payout) => sum + BigInt(payout.valueNano), 0n).toString(), list: payouts },
     frozen: count('activateEscapeHatch') > 0,
+    reconciliation,
     failures,
     items: delays,
 };
@@ -204,4 +244,12 @@ console.log(`Выводы (Withdraw): ${result.withdraws}; выплат ${payout
 if (result.refunds.length > 0) console.log(`Возвраты депозитов (CancelDeposit): ${result.refunds.length}`);
 for (const failure of failures) console.log(`  отказ ${failure.time}: ${failure.step}, код ${failure.exitCode}`);
 if (result.frozen) console.log('ВНИМАНИЕ: rollup заморожен (ActivateEscapeHatch)');
+const r = reconciliation;
+console.log(
+    `Сверка выводов: листьев ${r.leaves}, Withdraw ${r.withdrawRequests}, погашено ${r.claimed} (выплачено сразу ${r.paidOnClaim}, по PayOwed ${r.paidOwed}), ` +
+        `долгов сейчас ${r.owedNow} (${(Number(r.owedNano) / 1e9).toFixed(4)} TON), не погашено ${r.unclaimed}${r.exitClaims ? `, выходов ${r.exitClaims}` : ''}`,
+);
+for (const problem of r.problems) console.log(`  РАСХОЖДЕНИЕ: ${problem}`);
+console.log(`Итог сверки: ${r.verdict}`);
 console.log(`Записано: ${out.startsWith(ROOT + path.sep) ? path.relative(ROOT, out) : out}`);
+process.exit(exitCodeOf(reconciliation));
