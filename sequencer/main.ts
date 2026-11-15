@@ -1,19 +1,57 @@
+import path from 'path';
 import { Address } from '@ton/core';
+import { check, defaultTools, DEFAULT_RETH, DEFAULT_STATE_DIR, run, TestnetOptions } from './testnet';
 import { rateLimiter, TestnetQueueSource } from './queue/toncenter';
 import { QueueLagError, QueueMismatchError } from './queue/types';
 
-// Сборщик блоков из командной строки (ts-node). В этом шаге — только чтение очереди L1 контракта
-// в testnet: отправщика батчей и прувера для сети ещё нет, полный цикл идёт в Sandbox
-// (tests/SequencerReth.spec.ts). Ничего не отправляет и ключей не требует; ключ API toncenter —
-// из переменной окружения TONCENTER_API_KEY, если задан.
+// Сборщик блоков из командной строки (ts-node). Только testnet; ключ API toncenter — из
+// TONCENTER_API_KEY (по желанию), кошелёк секвенсора — WALLET_MNEMONIC и WALLET_VERSION.
 //
 //   npx ts-node sequencer/main.ts queue <адрес контракта> [--from=<номер>] [--max=<число>]
-//
-// Печатает отметки контракта и элементы очереди после отметки (по умолчанию — после
-// обработанного контрактом), каждый сверенный с хешем цепочки очереди. Расхождение — код 2,
-// отставание индексатора (сообщений ещё нет) — код 3.
+//       очередь L1 контракта, каждый элемент сверен с хешем цепочки; ничего не отправляет и ключей
+//       не требует. Расхождение — код 2, отставание индексатора — код 3;
+//   npx ts-node sequencer/main.ts check <адрес контракта> --fee-recipient=0x… [параметры]
+//       проверить всё (сеть, контракт, ключ, хост, прувер, кошелёк, время, узел) и ничего не слать;
+//   npx ts-node sequencer/main.ts run <адрес контракта> --fee-recipient=0x… [параметры]
+//       сервис: узел reth, очередь, LocalProver, TestnetSubmitter. Остановка, где нужен человек, — код 2.
+// Параметры check и run: --state-dir=<каталог> (.tools/sequencer), --proof-time=<с> (1800),
+// --poll=<с> (30), --http-port, --auth-port, --p2p-port (8645, 8651, 30403), --include-pool.
+// Подробности — sequencer/README.md, «Сервис против контракта в testnet».
 
-const usage = 'npx ts-node sequencer/main.ts queue <адрес контракта> [--from=<номер>] [--max=<число>]';
+const usage = 'npx ts-node sequencer/main.ts queue|check|run <адрес контракта> [параметры] (sequencer/README.md)';
+
+function serviceOptions(args: string[]): TestnetOptions {
+    const positional = args.filter((arg) => !arg.startsWith('--'));
+    if (positional.length !== 1) throw new Error(`ожидается один адрес контракта: ${usage}`);
+    const flags = new Map(args.filter((arg) => arg.startsWith('--')).map((arg) => {
+        const [name, value] = arg.slice(2).split('=', 2);
+        return [name, value ?? ''] as const;
+    }));
+    const known = ['fee-recipient', 'state-dir', 'proof-time', 'poll', 'http-port', 'auth-port', 'p2p-port', 'include-pool'];
+    for (const name of flags.keys()) if (!known.includes(name)) throw new Error(`непонятный параметр --${name}: ${usage}`);
+    const number = (name: string, fallback: number) => {
+        const value = flags.get(name);
+        if (value === undefined) return fallback;
+        if (!/^\d+$/.test(value)) throw new Error(`--${name} — целое число, получено «${value}»`);
+        return Number(value);
+    };
+    const feeRecipient = flags.get('fee-recipient') ?? '';
+    if (!/^0x[0-9a-fA-F]{40}$/.test(feeRecipient)) throw new Error('нужен --fee-recipient=0x… — адрес секвенсора на L2 (получатель чаевых)');
+    return {
+        rollup: Address.parse(positional[0]),
+        feeRecipient,
+        stateDir: path.resolve(flags.get('state-dir') || DEFAULT_STATE_DIR),
+        apiKey: process.env.TONCENTER_API_KEY || undefined,
+        reth: DEFAULT_RETH,
+        tools: defaultTools(),
+        ports: { http: number('http-port', 8645), auth: number('auth-port', 8651), p2p: number('p2p-port', 30403) },
+        expectedProofTime: number('proof-time', 1800),
+        includePool: flags.has('include-pool'),
+        pollSeconds: number('poll', 30),
+    };
+}
+
+const print = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
 
 async function queue(args: string[]) {
     const positional = args.filter((arg) => !arg.startsWith('--'));
@@ -62,6 +100,11 @@ async function queue(args: string[]) {
 async function main() {
     const [command, ...rest] = process.argv.slice(2);
     if (command === 'queue') return queue(rest);
+    if (command === 'check') {
+        if (!(await check(serviceOptions(rest), print))) process.exit(1);
+        return;
+    }
+    if (command === 'run') process.exit(await run(serviceOptions(rest), print));
     throw new Error(`команда не указана: ${usage}`);
 }
 

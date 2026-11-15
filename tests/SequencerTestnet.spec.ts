@@ -1,0 +1,263 @@
+import { mkdirSync, rmSync } from 'fs';
+import path from 'path';
+import { inspect } from 'util';
+import { randomBytes } from 'crypto';
+import { Blockchain, BlockchainSnapshot, SandboxContract, TreasuryContract } from '@ton/sandbox';
+import { toNano, Transaction } from '@ton/core';
+import { compile } from '@ton/blueprint';
+import { mnemonicNew } from '@ton/crypto';
+import '@ton/test-utils';
+import { Bn254Groth16Verifier } from '../wrappers/Bn254Groth16Verifier';
+import { loadEvmRollupKey, loadProvenRethBatch } from '../wrappers/evmProofs';
+import { Rollup, RollupOpcodes } from '../wrappers/Rollup';
+import { DEPLOY_VALUE, KEY_FINALIZE_VALUE, KEY_PART_VALUE } from '../wrappers/rollupValues';
+import { DEFAULT_CIRCUITS_DIR } from '../sequencer/proofImport';
+import { BatchProof, jobKeyOf, LocalProver, Prover } from '../sequencer/prover';
+import { Interrupted, Sequencer, SequencerConfig } from '../sequencer/service';
+import { Batch, TestnetSubmitter } from '../sequencer/submitter';
+import { assertTestnetEndpoint, SequencerWallet } from '../sequencer/ton';
+import { checkTestnet } from '../sequencer/testnet';
+import { fakeProveScript, rethJob } from './helpers/fakeProver';
+import { FAKE_CHAIN_ID, fakeNode, fakeQueue, fakeTools } from './helpers/fakeSequencerNode';
+import { blockOf, enqueueUpTo, reportOf } from './helpers/rethChain';
+import { readProtocolConstants, testConfig } from './helpers/rollupSetup';
+import { sandboxChain } from './helpers/sandboxChain';
+
+// Отправщик testnet (sequencer/submitter.ts, TestnetSubmitter) в Sandbox: настоящий контракт с
+// ключом программы EVM, настоящий кошелёк v4 секвенсора (мнемоника — новая на каждый запуск), сеть —
+// подставная (tests/helpers/sandboxChain.ts) с потерянными ответами, сообщениями в пути и отстающим
+// снимком. Батч — блок 1 цепочки Reth с пруфом SP1 (fixtures/sp1_evm_reth1). Сквозной шаг: сервис
+// на заглушках узла и хоста + LocalProver на заглушке сторожа + TestnetSubmitter → батч принят.
+// Чего здесь нет и что впервые исполнится только в testnet: toncenter (ответы, задержки, 429,
+// sync_utime за балансировщиком), sendFile, global_id сети, комиссии кошелька, время блоков L1.
+
+const BLOCK = blockOf(1);
+const WORK = path.join(__dirname, '..', '.tools', 'sequencer-test', 'testnet');
+const proven = loadProvenRethBatch(1);
+const groth16 = (): BatchProof => ({ kind: 'groth16', proof: proven.proof, hintsBoc: proven.hinted.hintsBoc, jobKey: jobKeyOf(rethJob(1)) });
+const batch = (): Batch => ({ number: 1, blockHash: BLOCK.hash, report: reportOf(1), proof: groth16() });
+
+describe('TestnetSubmitter в Sandbox: настоящий контракт, кошелёк по мнемонике, сбои сети', () => {
+    let blockchain: Blockchain;
+    let owner: SandboxContract<TreasuryContract>;
+    let rollup: SandboxContract<Rollup>;
+    let wallet: SequencerWallet;
+    let ready: BlockchainSnapshot;
+    let dir: string;
+    let net: ReturnType<typeof sandboxChain>;
+    let lines: string[];
+    const submitter = (options: { pollAttempts?: number } = {}) =>
+        new TestnetSubmitter({
+            chain: net.chain,
+            rollup: rollup.address,
+            wallet,
+            stateDir: path.join(dir, 'state'),
+            pollMs: 0,
+            pollAttempts: options.pollAttempts ?? 20,
+            log: (line) => lines.push(line),
+        });
+    const opsTo = (results: { transactions: Transaction[] }[]) =>
+        results.flatMap((result) =>
+            result.transactions.flatMap((transaction) => {
+                const message = transaction.inMessage;
+                if (!message || message.info.type !== 'internal' || !rollup.address.equals(message.info.dest)) return [];
+                const description = transaction.description;
+                const ok = description.type === 'generic' && description.computePhase.type === 'vm' && description.computePhase.success;
+                const body = message.body.beginParse();
+                return body.remainingBits >= 32 && ok ? [body.loadUint(32)] : [];
+            }),
+        );
+    const submits = () => opsTo(net.results).filter((op) => op === RollupOpcodes.submitBatch).length;
+    const chunks = reportOf(1).dataChunksHex.length;
+
+    beforeAll(async () => {
+        const code = await compile('Rollup');
+        const nullifierCode = await compile('RollupNullifier');
+        const constants = await readProtocolConstants(code, nullifierCode);
+        const key = loadEvmRollupKey();
+        wallet = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: (await mnemonicNew()).join(' '), WALLET_VERSION: 'v4' });
+        blockchain = await Blockchain.create();
+        blockchain.now = BLOCK.timestamp;
+        owner = await blockchain.treasury('owner');
+        const user = await blockchain.treasury('user');
+        rollup = blockchain.openContract(
+            Rollup.createFromConfig(
+                testConfig(constants, { owner: owner.address, sequencer: wallet.address, nullifierCode, chainId: FAKE_CHAIN_ID, escapeTimeout: 3600 * 12 }),
+                code,
+            ),
+        );
+        await rollup.sendDeploy(owner.getSender(), DEPLOY_VALUE);
+        for (const { slot, part } of Bn254Groth16Verifier.keyParts(key.upload))
+            await rollup.sendUploadKeyPart(owner.getSender(), { slot, part, value: KEY_PART_VALUE });
+        await rollup.sendFinalizeKey(owner.getSender(), { key: key.upload, value: KEY_FINALIZE_VALUE });
+        expect(await rollup.getKeyHash()).toBe(key.keyHash);
+        await enqueueUpTo({ blockchain, rollup, sequencer: owner, user }, BLOCK.headAtBatch);
+        // Кошелёк секвенсора пополнен, но не развёрнут: первое сообщение несёт его init.
+        await owner.send({ to: wallet.address, value: toNano('3'), bounce: false });
+        blockchain.now = BLOCK.timestamp + 60;
+        ready = blockchain.snapshot();
+    }, 300_000);
+    beforeEach(async () => {
+        await blockchain.loadFrom(ready);
+        dir = path.join(WORK, randomBytes(4).toString('hex'));
+        mkdirSync(dir, { recursive: true });
+        net = sandboxChain(blockchain);
+        lines = [];
+    });
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    it('честный батч: данные порциями и SubmitBatch с пруфом — принят; повтор ничего не шлёт', async () => {
+        expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: false });
+        expect((await rollup.getRollupState()).stateRoot).toBe(BigInt(BLOCK.hash));
+        expect(opsTo(net.results)).toEqual([...Array(chunks).fill(RollupOpcodes.publishData), RollupOpcodes.submitBatch]);
+        expect(net.attempts).toHaveLength(chunks + 1);
+        expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: true });
+        expect(net.attempts).toHaveLength(chunks + 1);
+        expect(await submitter().contractState()).toEqual({ batchIndex: 1, stateRoot: BigInt(BLOCK.hash), utime: BLOCK.timestamp + 60 });
+    }, 120_000);
+
+    it('сбой между отправкой и записью: ответ потерян — повтор без дубля; сообщение в пути — ждать, не слать', async () => {
+        net.control.fault = { kind: 'loseAck' };
+        net.control.which = (index) => index === chunks + 1;
+        await expect(submitter().submit(batch())).rejects.toThrow('сеть не ответила (сообщение дошло)');
+        net.control.fault = null;
+        expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: true });
+        expect(submits()).toBe(1);
+        expect(net.attempts).toHaveLength(chunks + 1);
+
+        await blockchain.loadFrom(ready);
+        rmSync(path.join(dir, 'state'), { recursive: true, force: true });
+        net = sandboxChain(blockchain);
+        net.control.fault = { kind: 'hold', releaseAfter: 8 };
+        net.control.which = (index) => index === chunks + 1;
+        await expect(submitter({ pollAttempts: 3 }).submit(batch())).rejects.toThrow(/^не дождался: кошелёк принял сообщение «батч 1»/);
+        // «Перезапуск»: сообщение ещё в пути — новое не шлётся, пока кошелёк его не примет.
+        expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: true });
+        expect(submits()).toBe(1);
+        expect(net.attempts).toHaveLength(chunks + 1);
+    }, 120_000);
+
+    it('сообщение не дошло: повтор — только после конца его срока (время L1 позже validUntil при прежнем seqno)', async () => {
+        net.control.fault = { kind: 'drop' };
+        net.control.which = (index) => index === chunks + 1;
+        await expect(submitter().submit(batch())).rejects.toThrow('сеть не ответила (сообщение не дошло)');
+        net.control.fault = null;
+        net.control.tick = 30; // время L1 идёт с каждым чтением: срок сообщения (120 с) истечёт
+        expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: false });
+        expect(submits()).toBe(1);
+        expect(net.attempts).toHaveLength(chunks + 2);
+        expect(lines.some((line) => /сообщение «батч 1» \(seqno \d+\) не принято кошельком до срока \d+: не дошло/.test(line))).toBe(true);
+    }, 120_000);
+
+    it('кошелёк, сеть и ключ: чужой секвенсор — отказ; ключ не печатается; не testnet — отказ', async () => {
+        const stranger = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: (await mnemonicNew()).join(' '), WALLET_VERSION: 'v5r1' });
+        const other = new TestnetSubmitter({ chain: net.chain, rollup: rollup.address, wallet: stranger, stateDir: dir });
+        await expect(other.deployment()).rejects.toThrow(/^секвенсор контракта — .*, а кошелёк из WALLET_MNEMONIC — .*: батчи от него контракт не примет$/);
+        expect(await submitter().deployment()).toEqual({ chainId: FAKE_CHAIN_ID, maxBlockAge: (await rollup.getDeployment()).maxBlockAge });
+        const words = (await mnemonicNew()).join(' ');
+        const shown = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: words, WALLET_VERSION: 'v4' });
+        for (const text of [inspect(shown), JSON.stringify(shown), String(shown)]) for (const word of words.split(' ')) expect(text).not.toContain(` ${word} `);
+        expect(inspect(shown)).toBe(`SequencerWallet(${shown.address.toString({ testOnly: true })}, v4)`);
+        await expect(SequencerWallet.fromEnv({ WALLET_MNEMONIC: 'тайное слово', WALLET_VERSION: 'v4' })).rejects.toThrow(
+            new Error('кошелёк секвенсора: WALLET_MNEMONIC не разбирается как мнемоника TON'),
+        );
+        await expect(SequencerWallet.fromEnv({ WALLET_MNEMONIC: words, WALLET_VERSION: 'v3r2' })).rejects.toThrow('WALLET_VERSION=v3r2 не поддерживается');
+        await expect(SequencerWallet.fromEnv({})).rejects.toThrow('нужны переменные окружения WALLET_MNEMONIC и WALLET_VERSION');
+        expect(() => assertTestnetEndpoint('https://toncenter.com/api/v2/jsonRPC')).toThrow(
+            'адрес API toncenter.com: секвенсор работает только с testnet.toncenter.com (стенд без аудита)',
+        );
+        expect(() => assertTestnetEndpoint('https://testnet.toncenter.com/api/v2/jsonRPC')).not.toThrow();
+    }, 60_000);
+
+    describe('сервис целиком: узел и хост — заглушки, прувер — LocalProver на заглушке сторожа, отправщик — testnet', () => {
+        const circuits = require('fs').existsSync(path.join(DEFAULT_CIRCUITS_DIR, 'Groth16Verifier.sol'));
+        const service = (prover: Prover, faults?: { stopAfter?: 'built' }) => {
+            const tools = fakeTools(path.join(dir, 'tools'));
+            const config: SequencerConfig = {
+                chainId: FAKE_CHAIN_ID,
+                feeRecipient: '0x' + '5e'.repeat(20),
+                stateDir: path.join(dir, 'state'),
+                rpcUrl: 'http://127.0.0.1:1',
+                genesisPath: path.join(dir, 'genesis.json'),
+                includePool: false,
+                tools: tools.tools,
+                maxBatchQueueItems: 32,
+                maxBlockAge: 1800,
+                expectedProofTime: 600,
+                now: () => blockchain.now!,
+            };
+            return new Sequencer(config, {
+                node: nodeRpc,
+                queue: fakeQueue(),
+                prover,
+                submitter: submitter(),
+                l1Now: async () => blockchain.now!,
+                log: (line) => lines.push(line),
+                faults,
+            });
+        };
+        let nodeRpc: ReturnType<typeof fakeNode>['rpc'];
+        beforeEach(() => (nodeRpc = fakeNode().rpc));
+
+        (circuits ? it : it.skip)('блок 1: проверен, пруф (импорт и сверка), батч принят настоящим контрактом в Sandbox; check проходит', async () => {
+            const fake = fakeProveScript(path.join(dir, 'fake'));
+            fake.behave({ proofOf: 1 }); // вход батча сервиса — blocks/1/batch.bin
+            blockchain.now = BLOCK.timestamp;
+            const prover = new LocalProver({ dir: path.join(dir, 'state', 'proofs'), script: fake.script });
+            const instance = service(prover);
+            await instance.start();
+            try {
+                expect(await instance.step()).toMatchObject({ kind: 'checked', number: 1, hash: BLOCK.hash });
+                blockchain.now = BLOCK.timestamp + 60;
+                expect(await instance.step()).toEqual({ kind: 'accepted', number: 1, hash: BLOCK.hash, alreadyAccepted: false });
+            } finally {
+                instance.close();
+            }
+            expect(await rollup.getRollupState()).toMatchObject({ batchIndex: 1, stateRoot: BigInt(BLOCK.hash) });
+            expect(submits()).toBe(1);
+            // Режим check на том же контракте: всё сходится, ничего не отправлено.
+            const sent = net.attempts.length;
+            const checkNow = (overrides = {}) =>
+                checkTestnet({ chain: net.chain, rollup: rollup.address, wallet, now: () => blockchain.now!, maxBlockAge: 1800, expectedProofTime: 600, ...overrides });
+            expect((await checkNow()).problems).toEqual([]);
+            // Пруф по умолчанию (1800 с) в срок 1800 с не помещается; сеть не testnet; чужой кошелёк.
+            expect((await checkNow({ expectedProofTime: 1800 })).problems).toEqual([expect.stringMatching(/^время проверки кандидата 300 с \+ время пруфа 1800 с/)]);
+            net.control.globalId = -239;
+            const stranger = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: (await mnemonicNew()).join(' '), WALLET_VERSION: 'v4' });
+            expect((await checkNow({ wallet: stranger })).problems).toEqual([
+                'сеть с global_id -239 — не testnet (-3)',
+                expect.stringMatching(/^секвенсор контракта .*, а кошелёк — /),
+                'на кошельке 0 TON, нужно не меньше 0.2 TON',
+            ]);
+            expect(net.attempts).toHaveLength(sent);
+        }, 180_000);
+
+        it('А1 через отправщик testnet: батч мог уйти, а снимок контракта отстал — waiting; снимок догнал — пересборка', async () => {
+            const prover: Prover = { prove: async () => groth16() };
+            blockchain.now = BLOCK.timestamp;
+            const first = service(prover);
+            await first.start();
+            await first.step();
+            blockchain.now = BLOCK.timestamp + 60;
+            net.control.fault = { kind: 'drop' };
+            await expect(first.step()).rejects.toThrow('сеть не ответила (сообщение не дошло)');
+            first.close();
+            net.control.fault = null;
+            const deadline = BLOCK.timestamp + 1800;
+            const stale = await net.snapshot(rollup.address);
+            net.control.lag.set(rollup.address.toRawString(), { ...stale, utime: deadline - 10 });
+            blockchain.now = deadline + 500;
+            const second = service(prover);
+            await second.start();
+            expect(await second.step()).toMatchObject({ kind: 'waiting', number: 1 });
+            second.close();
+            net.control.lag.clear();
+            const third = service(prover, { stopAfter: 'built' });
+            await third.start();
+            await expect(third.step()).rejects.toThrow(Interrupted);
+            expect(third.snapshot.rebuild).toMatchObject({ number: 1, replaces: BLOCK.hash });
+            third.close();
+            expect(submits()).toBe(0);
+        }, 120_000);
+    });
+});
