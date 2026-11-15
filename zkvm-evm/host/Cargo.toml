@@ -13,6 +13,7 @@ serde_json.workspace = true
 bincode.workspace = true
 alloy-primitives = { workspace = true, features = ["serde"] }
 rsp-client-executor.workspace = true
+revm.workspace = true
 sp1-sdk.workspace = true
 clap = { version = "4.5.7", features = ["derive"] }
 sha2 = "0.10"

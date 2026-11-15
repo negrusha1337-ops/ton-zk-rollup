@@ -6,10 +6,16 @@
 //!   rollup-evm-host --batch-input batch.bin --execute         # готовый вход батча (фикстура)
 //!   rollup-evm-host --batch-input batch.bin --prove --proof-out proof.json
 //!
-//! Вход блока готовит штатный `rsp --cache-dir` (он ходит в узел EVM за блоком и доказательствами
-//! состояния). Хост добавляет свидетель rollup'а (очередь L1, прежние выводы, порции данных),
-//! считает публичные значения нативно и, с `--execute`, исполняет гостевую программу в zkVM
-//! БЕЗ пруфа и сверяет её публичные значения с нативными.
+//! Вход блока готовит штатный `rsp --cache-dir` (он берёт у узла EVM блок и свидетель состояния).
+//! Хост добавляет свидетель rollup'а (отрезок очереди L1 с принудительными транзакциями, фронтир
+//! и счётчик дерева выводов, порции данных), дополняет свидетель состояния доказательствами
+//! счетов отправителей принудительных транзакций (`eth_getProof` на родителе — их кладёт в файл
+//! свидетеля тот, кто ходит в узел), считает публичные значения нативно и, с `--execute`,
+//! исполняет гостевую программу в zkVM БЕЗ пруфа и сверяет её публичные значения с нативными.
+//!
+//! Зачем дополнение. Свидетель узла раскрывает только то, что трогал блок. Принудительную
+//! транзакцию, которую программа пропускает (nonce, баланс, отправителя нет), блок не содержит,
+//! а счёт её отправителя программа обязана прочитать: без раскрытого пути батч недоказуем.
 //!
 //! Работа прувера — только через `host/prove-guarded.sh` и только по отдельной команде:
 //!   `--compressed` — пробный СЖАТЫЙ пруф (STARK без обёртки в Groth16): замер времени и памяти,
@@ -22,10 +28,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{keccak256, Address, Bytes, B256};
 use clap::Parser;
+use revm::state::Bytecode;
 use rollup_evm::{
-    apply_evm_batch, block_data_chunks, Deposit, EvmBatchInput, PublicValues, QueueItem, WithdrawalLeaf,
+    block_data_chunks,
+    forced::decode_forced_transaction,
+    process_evm_batch,
+    reveal::{account_path_is_revealed, reveal_account_nodes},
+    BatchOutcome, Deposit, EvmBatchInput, ForcedOutcome, PublicValues, QueueItem, FORCED_TX_GAS_CAP,
+    WITHDRAWAL_TREE_DEPTH,
 };
 use rsp_client_executor::io::EthClientExecutorInput;
 use serde::{Deserialize, Serialize};
@@ -59,7 +71,8 @@ struct Args {
     /// Идентификатор rollup'а: первое слово публичных значений (с --block-input).
     #[arg(long, conflicts_with = "batch_input")]
     chain_id: Option<u64>,
-    /// JSON со свидетелем rollup'а: очередь L1 и прежние выводы. Без него — пустые.
+    /// JSON со свидетелем rollup'а: отрезок очереди L1, фронтир и счётчик дерева выводов,
+    /// доказательства счетов отправителей. Без него — пустая очередь и пустое дерево.
     #[arg(long, requires = "block_input")]
     witness: Option<PathBuf>,
     /// Готовый вход батча (bincode), записанный раньше через --write-input.
@@ -80,21 +93,45 @@ struct Args {
     /// Записать вход батча (bincode) — фикстура для тестов.
     #[arg(long)]
     write_input: Option<PathBuf>,
-    /// Записать итог (JSON): восемь слов, данные батча и, с --execute, число циклов.
+    /// Записать итог (JSON): одиннадцать слов, данные батча, судьба принудительных транзакций,
+    /// выводы, фронтир дерева после блока и, с --execute, число циклов.
     #[arg(long)]
     report: Option<PathBuf>,
 }
 
-/// Свидетель rollup'а: то, что в настоящей системе секвенсор берёт у контракта на TON.
+/// Свидетель rollup'а: то, что в настоящей системе секвенсор берёт у контракта на TON и у
+/// своего узла L2.
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WitnessFile {
+    /// Хеш очереди L1 в прежней отметке (`processedHash` контракта).
     #[serde(default)]
     prev_deposit_hash: B256,
+    /// Прежняя отметка очереди (`processedCount` контракта): номер последнего обработанного
+    /// элемента. Программе не нужна — идёт в отчёт, чтобы батч знал, какую отметку заявить.
     #[serde(default)]
-    deposits: Vec<DepositEntry>,
+    queue_processed_from: u64,
+    /// Отрезок очереди, который обрабатывает блок, по порядку.
     #[serde(default)]
-    prior_withdrawals: Vec<WithdrawalEntry>,
+    queue: Vec<QueueEntry>,
+    /// Фронтир дерева выводов до блока: 32 хеша. Пусто — дерево без листьев.
+    #[serde(default)]
+    withdrawals_frontier: Vec<B256>,
+    /// Число листьев дерева выводов до блока, десятичной строкой.
+    #[serde(default)]
+    withdrawals_count: Option<String>,
+    /// Доказательства счетов (`eth_getProof` на состоянии РОДИТЕЛЯ) отправителей принудительных
+    /// транзакций отрезка; `code` — байткод счёта, если он у счёта есть.
+    #[serde(default)]
+    account_proofs: Vec<AccountProofEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+enum QueueEntry {
+    Deposit(DepositEntry),
+    /// Байты из очереди как есть.
+    ForcedTransaction(Bytes),
 }
 
 #[derive(Deserialize)]
@@ -107,10 +144,11 @@ struct DepositEntry {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct WithdrawalEntry {
-    recipient_hash: B256,
-    /// Сумма в нанотонах, десятичной строкой.
-    amount: String,
+struct AccountProofEntry {
+    address: Address,
+    account_proof: Vec<Bytes>,
+    #[serde(default)]
+    code: Option<Bytes>,
 }
 
 /// Ключ программы и то, из чего он получен. Пишется режимом --vkeys.
@@ -175,7 +213,28 @@ fn words(values: &PublicValues) -> serde_json::Value {
         "withdrawalsRoot": hex(&values.withdrawals_root),
         "prevDepositHash": hex(&values.prev_deposit_hash),
         "newDepositHash": hex(&values.new_deposit_hash),
+        "prevWithdrawalsCount": values.prev_withdrawals_count.to_string(),
+        "withdrawalsCount": values.withdrawals_count.to_string(),
+        "blockTimestamp": values.block_timestamp.to_string(),
     })
+}
+
+/// Судьба принудительных транзакций отрезка — для отчёта: место в отрезке (с нуля) и исход.
+fn forced_report(queue_items: &[QueueItem], outcome: &BatchOutcome) -> Vec<serde_json::Value> {
+    let positions = queue_items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| matches!(item, QueueItem::ForcedTransaction(_)))
+        .map(|(position, _)| position);
+    positions
+        .zip(&outcome.forced)
+        .map(|(position, forced)| match forced {
+            ForcedOutcome::Included => serde_json::json!({ "queueIndex": position, "outcome": "included" }),
+            ForcedOutcome::Skipped(reason) => {
+                serde_json::json!({ "queueIndex": position, "outcome": "skipped", "reason": format!("{reason:?}") })
+            }
+        })
+        .collect()
 }
 
 /// Бинарник обязан быть собран из тех исходников, что лежат на диске: иначе ELF внутри него —
@@ -244,14 +303,61 @@ fn assert_matches_program_keys(vkey: &str) {
     }
 }
 
-/// Вход батча: готовый (--batch-input) или собранный из входа блока RSP и свидетеля.
-fn load_input(args: &Args) -> EvmBatchInput {
+/// Дополняет свидетель состояния доказательствами счетов из файла свидетеля и проверяет, что
+/// путь к счёту отправителя каждой годной по форме принудительной транзакции раскрыт.
+fn supplement_state(
+    block: &mut EthClientExecutorInput,
+    chain_id: u64,
+    witness: &WitnessFile,
+    queue: &[QueueItem],
+) -> Vec<serde_json::Value> {
+    let mut supplemented = Vec::new();
+    for entry in &witness.account_proofs {
+        let revealed = reveal_account_nodes(&mut block.parent_state, &entry.account_proof)
+            .unwrap_or_else(|error| panic!("доказательство счёта {}: {error}", entry.address));
+        let found = account_path_is_revealed(&block.parent_state, keccak256(entry.address));
+        assert!(found, "доказательство счёта {} не от состояния родителя этого блока", entry.address);
+        println!("Свидетель дополнен счётом {}: раскрыто узлов {revealed}", entry.address);
+        supplemented.push(serde_json::json!({ "address": entry.address, "revealedNodes": revealed }));
+        if let Some(code) = &entry.code {
+            let code = Bytecode::new_raw(code.clone());
+            let hash = code.hash_slow();
+            if !block.bytecodes.iter().any(|known| known.hash_slow() == hash) {
+                block.bytecodes.push(code);
+            }
+        }
+    }
+    for item in queue {
+        let QueueItem::ForcedTransaction(bytes) = item else { continue };
+        let Ok(transaction) = decode_forced_transaction(bytes, chain_id, FORCED_TX_GAS_CAP) else { continue };
+        let sender = transaction.signer();
+        if !account_path_is_revealed(&block.parent_state, keccak256(sender)) {
+            eprintln!(
+                "В свидетеле нет пути к счёту отправителя принудительной транзакции {sender}.\n\
+                 Добавьте в файл свидетеля accountProofs: eth_getProof этого счёта на блоке-родителе."
+            );
+            std::process::exit(2);
+        }
+    }
+    supplemented
+}
+
+/// Что известно о батче помимо входа программы: прежняя отметка очереди и чем дополнен свидетель.
+struct Extra {
+    queue_processed_from: Option<u64>,
+    supplemented: Vec<serde_json::Value>,
+}
+
+/// Вход батча и сведения для отчёта: готовый (--batch-input) или собранный
+/// из входа блока RSP и свидетеля.
+fn load_input(args: &Args) -> (EvmBatchInput, Extra) {
     if let Some(path) = &args.batch_input {
-        return bincode::deserialize(&fs::read(path).expect("файл входа батча не читается"))
+        let input = bincode::deserialize(&fs::read(path).expect("файл входа батча не читается"))
             .expect("вход батча не разобран");
+        return (input, Extra { queue_processed_from: None, supplemented: Vec::new() });
     }
     let path = args.block_input.as_ref().expect("нужен --block-input или --batch-input");
-    let block: EthClientExecutorInput =
+    let mut block: EthClientExecutorInput =
         bincode::deserialize(&fs::read(path).expect("файл входа блока не читается"))
             .expect("вход блока не разобран: ожидается файл кэша RSP");
     let witness: WitnessFile = match &args.witness {
@@ -259,24 +365,39 @@ fn load_input(args: &Args) -> EvmBatchInput {
             .expect("свидетель не разобран"),
         None => WitnessFile::default(),
     };
-    EvmBatchInput {
-        chain_id: args.chain_id.expect("с --block-input нужен --chain-id"),
+    let chain_id = args.chain_id.expect("с --block-input нужен --chain-id");
+    let queue_items: Vec<QueueItem> = witness
+        .queue
+        .iter()
+        .map(|entry| match entry {
+            QueueEntry::Deposit(deposit) => QueueItem::Deposit(Deposit {
+                l2_recipient: deposit.l2_recipient.into_array(),
+                amount: amount(&deposit.amount),
+            }),
+            QueueEntry::ForcedTransaction(bytes) => QueueItem::ForcedTransaction(bytes.to_vec()),
+        })
+        .collect();
+    let mut withdrawals_frontier = [[0u8; 32]; WITHDRAWAL_TREE_DEPTH];
+    if !witness.withdrawals_frontier.is_empty() {
+        assert_eq!(witness.withdrawals_frontier.len(), WITHDRAWAL_TREE_DEPTH, "во фронтире дерева выводов не 32 хеша");
+        for (slot, node) in withdrawals_frontier.iter_mut().zip(&witness.withdrawals_frontier) {
+            *slot = node.0;
+        }
+    }
+    let withdrawals_count = witness.withdrawals_count.as_deref().map_or(0, |text| {
+        text.parse().unwrap_or_else(|_| panic!("счётчик выводов «{text}» — не целое число"))
+    });
+    let supplemented = supplement_state(&mut block, chain_id, &witness, &queue_items);
+    let input = EvmBatchInput {
+        chain_id,
         data_chunks: block_data_chunks(&block.current_block),
         block,
         prev_deposit_hash: witness.prev_deposit_hash.0,
-        queue_items: witness
-            .deposits
-            .iter()
-            .map(|entry| {
-                QueueItem::Deposit(Deposit { l2_recipient: entry.l2_recipient.into_array(), amount: amount(&entry.amount) })
-            })
-            .collect(),
-        prior_withdrawals: witness
-            .prior_withdrawals
-            .iter()
-            .map(|entry| WithdrawalLeaf { recipient_hash: entry.recipient_hash.0, amount: amount(&entry.amount) })
-            .collect(),
-    }
+        queue_items,
+        withdrawals_frontier,
+        withdrawals_count,
+    };
+    (input, Extra { queue_processed_from: Some(witness.queue_processed_from), supplemented })
 }
 
 fn main() {
@@ -291,7 +412,10 @@ fn main() {
         return write_program_keys();
     }
 
-    let input = load_input(&args);
+    let (input, extra) = load_input(&args);
+    let queue_processed_from = extra.queue_processed_from;
+    let queue_items = input.queue_items.clone();
+    let withdrawals_before = input.withdrawals_count;
     let data_chunks_hex: Vec<String> = input.data_chunks.iter().map(|chunk| plain_hex(chunk)).collect();
     let data_bytes: usize = input.data_chunks.iter().map(Vec::len).sum();
     let transactions = input.block.current_block.body.transactions.len();
@@ -299,12 +423,17 @@ fn main() {
     let encoded = bincode::serialize(&input).expect("вход батча не сериализуется");
 
     // Сначала проверка, потом запись: фикстура отвергнутого батча не появляется.
-    let native = apply_evm_batch(input).expect("нативный расчёт отверг батч");
+    let outcome = process_evm_batch(input).expect("нативный расчёт отверг батч");
+    let native = outcome.values.clone();
     if let Some(path) = &args.write_input {
         fs::write(path, &encoded).expect("вход батча не записан");
         println!("Вход батча: {} ({} байт)", path.display(), encoded.len());
     }
-    println!("Блок {block_number}: транзакций {transactions}, данных батча {data_bytes} байт");
+    println!(
+        "Блок {block_number}: транзакций {transactions}, элементов очереди {}, выводов {}, данных батча {data_bytes} байт",
+        queue_items.len(),
+        outcome.withdrawals.len()
+    );
     println!("{}", serde_json::to_string_pretty(&words(&native)).unwrap());
 
     let mut cycles = None;
@@ -377,6 +506,21 @@ fn main() {
             "dataChunksHex": data_chunks_hex,
             "publicValues": words(&native),
             "publicValuesBytes": hex(&native.to_bytes()),
+            // Отметки очереди L1: батч заявляет контракту queueProcessedUpTo.
+            "queueProcessedFrom": queue_processed_from,
+            "queueProcessedUpTo": queue_processed_from.map(|from| from + queue_items.len() as u64),
+            "queueItems": queue_items.len(),
+            // Счета, которыми дополнен свидетель узла (eth_getProof на родителе), и сколько узлов
+            // каждый раскрыл: ноль — путь уже был в свидетеле.
+            "supplementedAccounts": extra.supplemented,
+            "forced": forced_report(&queue_items, &outcome),
+            // Выводы блока: листья дерева с номерами. Фронтир после блока — вход следующего батча.
+            "withdrawals": outcome.withdrawals.iter().enumerate().map(|(index, leaf)| serde_json::json!({
+                "leafIndex": withdrawals_before + index as u64,
+                "recipientHash": hex(&leaf.recipient_hash),
+                "amount": leaf.amount.to_string(),
+            })).collect::<Vec<_>>(),
+            "withdrawalsFrontierAfter": outcome.withdrawals_frontier.iter().map(|node| hex(node)).collect::<Vec<_>>(),
             "zkvmCycles": cycles,
             "programElfSha256": format!("0x{}", elf_sha256()),
             "proofMode": if args.compressed { Some("compressed") } else if args.prove { Some("groth16") } else { None },

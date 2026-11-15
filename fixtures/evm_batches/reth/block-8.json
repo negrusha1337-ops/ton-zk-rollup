@@ -1,0 +1,249 @@
+{
+  "blockNumber": 8,
+  "dataBytes": 583,
+  "dataChunksHex": [
+    "f90244f9023ea05fd51796d9dcbc3499c5caf304330feb5daa3dfd56aa2e64656692c31ea8664ea01dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d4934794ecdbe28642180bd2ccf79ba5d6521a4e6ca1ee2ea0a21af962d865c9e571a6257d093ac54517307258fc759288dec85d995b39bc6ca056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421b901000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000080088401c9c38080846af93e8e80a000000000000000000000000000000000000000000000000000000000000000008800000000000000008414c34f2fa056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b4218080a00000000000000000000000000000000000000000000000000000000000000000c0c0c0"
+  ],
+  "forced": [
+    {
+      "outcome": "skipped",
+      "queueIndex": 0,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 1,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 2,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 3,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 4,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 5,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 6,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 7,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 8,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 9,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 10,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 11,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 12,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 13,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 14,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 15,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 16,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 17,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 18,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 19,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 20,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 21,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 22,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 23,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 24,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 25,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 26,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 27,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 28,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 29,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 30,
+      "reason": "Invalid(NonceTooHigh)"
+    },
+    {
+      "outcome": "skipped",
+      "queueIndex": 31,
+      "reason": "Invalid(NonceTooHigh)"
+    }
+  ],
+  "programElfSha256": "0x8a44c176827cb8635df875bc9371da9209eece6dfe43e906b48bd4efcd2d8913",
+  "programVKey": null,
+  "proofMode": null,
+  "proofSeconds": null,
+  "publicValues": {
+    "batchHash": "0xd179f0ca3f46cade19dfd88ebadbcc39eeb1ef538b41b46d0fccaea0e47a0dc8",
+    "blockTimestamp": "1794719374",
+    "chainId": "362107787851",
+    "newDepositHash": "0x60f1d7a91abcecc35fb7dec832994c2b870cf44b74b80d33792f4fbc058c8838",
+    "newStateRoot": "0x04476a02eeed3eed973fb5665c8e2ef7bf9e550b3b42e8f2c3e467b13272641a",
+    "prevDepositHash": "0xe078fd151b31bed4f34910c7d06a2af50a6edf6c617fa253bf878f777d008f0d",
+    "prevStateRoot": "0x5fd51796d9dcbc3499c5caf304330feb5daa3dfd56aa2e64656692c31ea8664e",
+    "prevWithdrawalsCount": "37",
+    "prevWithdrawalsRoot": "0xccf5476a5c47f5097b1e959d74794a1212a7dde4353c1aa3401ce7e3e4244241",
+    "withdrawalsCount": "37",
+    "withdrawalsRoot": "0xccf5476a5c47f5097b1e959d74794a1212a7dde4353c1aa3401ce7e3e4244241"
+  },
+  "publicValuesBytes": "0x000000000000000000000000000000000000000000000000000000544f4e5a4b5fd51796d9dcbc3499c5caf304330feb5daa3dfd56aa2e64656692c31ea8664e04476a02eeed3eed973fb5665c8e2ef7bf9e550b3b42e8f2c3e467b13272641ad179f0ca3f46cade19dfd88ebadbcc39eeb1ef538b41b46d0fccaea0e47a0dc8ccf5476a5c47f5097b1e959d74794a1212a7dde4353c1aa3401ce7e3e4244241ccf5476a5c47f5097b1e959d74794a1212a7dde4353c1aa3401ce7e3e4244241e078fd151b31bed4f34910c7d06a2af50a6edf6c617fa253bf878f777d008f0d60f1d7a91abcecc35fb7dec832994c2b870cf44b74b80d33792f4fbc058c883800000000000000000000000000000000000000000000000000000000000000250000000000000000000000000000000000000000000000000000000000000025000000000000000000000000000000000000000000000000000000006af93e8e",
+  "queueItems": 32,
+  "queueProcessedFrom": 61,
+  "queueProcessedUpTo": 93,
+  "supplementedAccounts": [
+    {
+      "address": "0x047276d3b76a01c6f869f5544d44cf0ee1b41ad9",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0xe70a5db07b47ff247c0261f2927bc027e13c879b",
+      "revealedNodes": 1
+    },
+    {
+      "address": "0xa6781c54b30e94df134887437d7793fe4b599870",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0xdd116e0f1ea267c76ca31a617ad626ef43f259d4",
+      "revealedNodes": 0
+    },
+    {
+      "address": "0xa09845bb3f753011af1b8f4c2fd596d9af9bf837",
+      "revealedNodes": 0
+    }
+  ],
+  "transactions": 0,
+  "withdrawals": [],
+  "withdrawalsFrontierAfter": [
+    "0x8bd0f01adc002fcc0c9df60dd6ae142fd0018f2deb38f18f17c76c387444ba90",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x151e8a9ea046efda6260885f99c1dc56c01cd7b267296e0140ae53edc1fd1187",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0xe3fbf190774fbd4e8de46ecb5124ce0a54f54ad1f63bc235550278448248c617",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "0x0000000000000000000000000000000000000000000000000000000000000000"
+  ],
+  "zkvmCycles": 10001675
+}
