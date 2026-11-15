@@ -1,34 +1,25 @@
 import { Blockchain, BlockchainSnapshot, SandboxContract, TreasuryContract } from '@ton/sandbox';
-import { beginCell, Cell, contractAddress, toNano } from '@ton/core';
+import { beginCell, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
-import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
 import { BASE_DEPOSIT_FEE, Rollup, RollupConfig, RollupErrors, RollupOpcodes } from '../wrappers/Rollup';
 import { depositHash, forcedTransactionCell, sha256Int } from '../wrappers/rollupMath';
 import { withGasPrice } from './helpers/gasPrice';
-import { finalizeDummyKeys } from './helpers/rollupSetup';
+import { finalizeDummyKeys, mockProof, ProtocolConstants, readProtocolConstants, testConfig } from './helpers/rollupSetup';
 
 // Плата за место в очереди L1 растёт с длиной очереди (находка К-4, REVIEW.md).
 //
-// Всё, что стоит в окне очереди (между отметками «цель» и «поставлено»), обязан обработать
-// батч после следующего. Раньше окно можно было раздуть депозитами по 0,01 TON комиссии и
-// сделать батч недоказуемым в срок — остановить rollup за копейки. Жёсткий предел окна был
-// бы хуже: заполнив его, можно вытеснять чужие принудительные транзакции. Поэтому предела
-// нет, а плата удваивается на каждые 64 элемента окна: место есть всегда, но раздувать
-// очередь экспоненциально дорого.
-const GENESIS_ROOT = sha256Int(1n);
+// Необработанный хвост очереди (между отметками «обработано» и «поставлено») секвенсор обязан
+// разобрать раньше, чем самый старый элемент провисит срок заморозки. Хвост можно было бы
+// раздуть депозитами по 0,01 TON комиссии — остановить rollup за копейки. Жёсткий предел был
+// бы хуже: заполнив его, можно вытеснять чужие принудительные транзакции. Поэтому плата
+// удваивается на каждые 64 необработанных элемента: место есть всегда, но раздувать очередь
+// экспоненциально дорого. В протоколе v2 окно — именно необработанный хвост: плату снижает
+// только обработка очереди, а не сам факт принятого батча.
 const CHAIN_ID = 4242n;
+const START = 1_800_000_000;
 const L2_RECIPIENT = 0x1234567890abcdef1234567890abcdef12345678n;
 const BASE_FORCE_FEE = toNano('0.05');
-const mockProof: Bn254Proof = {
-    a: [1n, 0n],
-    b: [
-        [0n, 0n],
-        [0n, 0n],
-    ],
-    c: [0n, 0n],
-};
-
 describe('Rollup: плата за место в очереди L1', () => {
     let blockchain: Blockchain;
     let owner: SandboxContract<TreasuryContract>;
@@ -39,6 +30,7 @@ describe('Rollup: плата за место в очереди L1', () => {
     let step: number;
     let config: RollupConfig;
     let code: Cell;
+    let constants: ProtocolConstants;
 
     const deposit = (value = toNano('1'), maxFee?: bigint) =>
         rollup.sendDeposit(user.getSender(), { l2Recipient: L2_RECIPIENT, value, maxFee });
@@ -47,11 +39,18 @@ describe('Rollup: плата за место в очереди L1', () => {
             l2Transaction: forcedTransactionCell(Buffer.alloc(110, 7)),
             value,
         });
-    const submit = (newStateRoot: bigint) =>
+    /** Батч, обработавший очередь до элемента `upTo`. */
+    const submit = (newStateRoot: bigint, upTo: number) =>
         rollup.sendSubmitBatch(sequencer.getSender(), {
-            proof: mockProof,
+            proof: mockProof(),
             hints: beginCell().endCell(),
-            roots: { newStateRoot, withdrawalsRoot: 0n },
+            roots: {
+                newStateRoot,
+                withdrawalsRoot: 0n,
+                withdrawalsCount: 0n,
+                queueProcessedUpTo: BigInt(upTo),
+                blockTimestamp: BigInt(START),
+            },
             value: toNano('0.2'),
         });
     /** Ставит в очередь `count` депозитов, каждый — с комиссией, действующей на его момент. */
@@ -65,18 +64,20 @@ describe('Rollup: плата за место в очереди L1', () => {
 
     beforeAll(async () => {
         blockchain = await Blockchain.create();
+        blockchain.now = START;
         owner = await blockchain.treasury('owner');
         sequencer = await blockchain.treasury('sequencer');
         user = await blockchain.treasury('user');
-        config = {
+        code = await compile('RollupMock');
+        const nullifierCode = await compile('RollupNullifier');
+        constants = await readProtocolConstants(code, nullifierCode);
+        config = testConfig(constants, {
             owner: owner.address,
             sequencer: sequencer.address,
-            nullifierCode: await compile('RollupNullifier'),
-            genesisStateRoot: GENESIS_ROOT,
+            nullifierCode,
             chainId: CHAIN_ID,
             escapeTimeout: 3600,
-        };
-        code = await compile('RollupMock');
+        });
         rollup = blockchain.openContract(Rollup.createFromConfig(config, code));
         await rollup.sendDeploy(owner.getSender(), toNano('5'));
         await finalizeDummyKeys(rollup, owner);
@@ -90,7 +91,7 @@ describe('Rollup: плата за место в очереди L1', () => {
         await blockchain.loadFrom(ready);
     });
 
-    it('пока окно короче шага, плата базовая; на шаге — удваивается', async () => {
+    it('пока необработанных элементов меньше шага, плата базовая; на шаге — удваивается', async () => {
         expect(step).toBe(64);
         // До шага все депозиты снимка прошли по базовой комиссии: в очереди ровно `step`
         // элементов, и хеш очереди — как у депозитов с суммой «значение − 0,01 TON».
@@ -209,22 +210,65 @@ describe('Rollup: плата за место в очереди L1', () => {
         expect((await force(forceTransactionFee)).transactions).toHaveTransaction({ to: rollup.address, success: true });
     });
 
-    it('после принятого батча окно начинается заново, а всё поставленное становится обязательным', async () => {
-        const queued = (await rollup.getDepositQueue()).head;
-        expect((await submit(sha256Int(2n))).transactions).toHaveTransaction({ to: rollup.address, success: true });
-        // Цель сдвинулась на «поставлено»: следующий батч обязан обработать все элементы окна…
-        const queue = await rollup.getDepositQueue();
-        expect(queue.target).toEqual(queued);
-        expect(queue.processed.count).toBe(0n);
-        // …а новое окно пусто, и плата снова базовая — для всех, включая того, кого вытесняли ценой.
+    it('плату снижает только обработка очереди: батч, не тронувший её, ничего не меняет', async () => {
+        const doubled = {
+            depositFee: 2n * BASE_DEPOSIT_FEE,
+            forceTransactionFee: 2n * BASE_FORCE_FEE,
+            pending: step,
+            step,
+        };
+        // Батч принят, но очередь он не обработал: необработанных столько же, плата прежняя.
+        expect((await submit(sha256Int(2n), 0)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+        expect((await rollup.getRollupState()).batchIndex).toBe(1);
+        expect(await rollup.getQueueFees()).toEqual(doubled);
+        expect((await deposit(toNano('1'))).transactions).toHaveTransaction({
+            to: rollup.address,
+            success: false,
+            exitCode: RollupErrors.queueFeeAboveLimit,
+        });
+
+        // Обработан один элемент: необработанных на один меньше шага, плата снова базовая — для
+        // всех, включая того, кого вытесняли ценой.
+        expect((await submit(sha256Int(3n), 1)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+        expect(await rollup.getQueueFees()).toEqual({
+            depositFee: BASE_DEPOSIT_FEE,
+            forceTransactionFee: BASE_FORCE_FEE,
+            pending: step - 1,
+            step,
+        });
+        expect((await deposit(toNano('1'))).transactions).toHaveTransaction({ to: rollup.address, success: true });
+        // Этот депозит вернул длину хвоста к шагу: плата опять удвоена.
+        expect(await rollup.getQueueFees()).toEqual(doubled);
+        expect((await force(BASE_FORCE_FEE)).transactions).toHaveTransaction({
+            to: rollup.address,
+            success: false,
+            exitCode: RollupErrors.notEnoughValue,
+        });
+    });
+
+    it('окно считается от отметки processed: очередь разбирается батчами, плата падает вместе с хвостом', async () => {
+        await fill(step); // необработанных 2 × шаг: плата учетверена
+        expect((await rollup.getQueueFees()).depositFee).toBe(4n * BASE_DEPOSIT_FEE);
+        const perBatch = constants.maxBatchQueueItems;
+        let processed = 0;
+        let root = 2n;
+        const pendingAfter = async () => (await rollup.getQueueFees()).pending;
+        while (processed < 2 * step) {
+            processed = Math.min(processed + perBatch, 2 * step);
+            expect((await submit(sha256Int(root++), processed)).transactions).toHaveTransaction({
+                to: rollup.address,
+                success: true,
+            });
+            const pending = 2 * step - processed;
+            expect(await pendingAfter()).toBe(pending);
+            expect((await rollup.getQueueFees()).depositFee).toBe(BASE_DEPOSIT_FEE << BigInt(Math.floor(pending / step)));
+        }
         expect(await rollup.getQueueFees()).toEqual({
             depositFee: BASE_DEPOSIT_FEE,
             forceTransactionFee: BASE_FORCE_FEE,
             pending: 0,
             step,
         });
-        expect((await deposit(toNano('1'))).transactions).toHaveTransaction({ to: rollup.address, success: true });
-        expect((await force(BASE_FORCE_FEE)).transactions).toHaveTransaction({ to: rollup.address, success: true });
     });
 
     it('депозит старого формата, без поля maxFee, не принимается', async () => {
@@ -259,34 +303,25 @@ describe('Rollup: плата за место в очереди L1', () => {
     });
 
     it('плата растёт все сорок удвоений и на этом останавливается', async () => {
-        // Предел удвоений нельзя ни занизить (плата застыла бы, и раздувать окно снова стало бы
-        // дёшево), ни убрать (сдвиг переполнил бы сумму). Окна такой длины депозитами не
+        // Предел удвоений нельзя ни занизить (плата застыла бы, и раздувать очередь снова стало бы
+        // дёшево), ни убрать (сдвиг переполнил бы сумму). Хвоста такой длины депозитами не
         // набрать, поэтому контракт развёртывается с очередью, уже стоящей на нужной отметке.
         const withWindow = async (pending: bigint) => {
-            const canonical = Rollup.createFromConfig({ ...config, genesisStateRoot: GENESIS_ROOT + pending }, code);
-            const root = canonical.init!.data.beginParse();
-            const rootBits = root.loadBits(root.remainingBits);
-            const [keys, nullifier, state] = [root.loadRef(), root.loadRef(), root.loadRef()];
-            const stateSlice = state.beginParse();
-            const stateHead = stateSlice.loadBits(256 + 256 + 64);
-            stateSlice.loadRef(); // прежняя очередь: все отметки нулевые
-            const queue = beginCell()
-                .storeUint(pending, 64) // поставлено
-                .storeUint(1, 256)
-                .storeUint(0, 64) // цель
-                .storeUint(0, 256)
-                .storeUint(0, 64) // обработано
-                .storeUint(0, 256)
-                .endCell();
-            const data = beginCell()
-                .storeBits(rootBits)
-                .storeRef(keys)
-                .storeRef(nullifier)
-                .storeRef(beginCell().storeBits(stateHead).storeRef(queue).storeSlice(stateSlice).endCell())
-                .endCell();
-            const init = { code, data };
-            const contract = blockchain.openContract(new Rollup(contractAddress(0, init), init));
+            // Очередь подложена прямо в начальные данные; обработано тоже не ноль — окно считается
+            // как разность отметок, а не как длина очереди.
+            const processed = 5n;
+            const contract = blockchain.openContract(
+                Rollup.createPlanted(
+                    config,
+                    {
+                        batchIndex: pending, // чтобы у каждого контракта был свой адрес
+                        queue: { head: { count: processed + pending, hash: 1n }, processed: { count: processed, hash: 2n } },
+                    },
+                    code,
+                ),
+            );
             await contract.sendDeploy(owner.getSender(), toNano('1'));
+            expect((await contract.getQueueFees()).pending).toBe(Number(pending));
             return contract.getQueueFees();
         };
         const stepSize = BigInt(step);

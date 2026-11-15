@@ -2,13 +2,12 @@ import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Address, beginCell, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
-import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
-import { Rollup, RollupErrors } from '../wrappers/Rollup';
+import { BASE_DEPOSIT_FEE, Rollup, RollupErrors } from '../wrappers/Rollup';
 import { forcedTransactionCell, merkleProofCell, sha256Int, withdrawalTree } from '../wrappers/rollupMath';
 import { FORCE_TRANSACTION_VALUE } from '../wrappers/rollupValues';
 import { computePhaseOf } from './helpers/gas';
 import { withGasPrice } from './helpers/gasPrice';
-import { finalizeDummyKeys } from './helpers/rollupSetup';
+import { finalizeDummyKeys, mockProof, readProtocolConstants, testConfig } from './helpers/rollupSetup';
 
 // Пороги монет и цена газа сети (находки К-2 второго круга и 3-К2 третьего, REVIEW.md).
 //
@@ -18,17 +17,9 @@ import { finalizeDummyKeys } from './helpers/rollupSetup';
 //   • комиссии, оставшиеся в монетах (депозит 0,01 TON, принудительная транзакция 0,05 TON),
 //     не начинают оплачивать газ из денег пользователей: когда комиссия перестаёт покрывать
 //     газ шага, контракт отклоняет депозит, а не принимает его в убыток.
-const GENESIS_ROOT = sha256Int(1n);
+const START = 1_800_000_000;
 const CHAIN_ID = 4242n;
 const L2_RECIPIENT = 0x1234567890abcdef1234567890abcdef12345678n;
-const mockProof: Bn254Proof = {
-    a: [1n, 0n],
-    b: [
-        [0n, 0n],
-        [0n, 0n],
-    ],
-    c: [0n, 0n],
-};
 describe('Rollup: пороги монет следуют за ценой газа сети', () => {
     let blockchain: Blockchain;
     let owner: SandboxContract<TreasuryContract>;
@@ -58,40 +49,52 @@ describe('Rollup: пороги монет следуют за ценой газ�
 
     beforeEach(async () => {
         blockchain = await Blockchain.create();
+        blockchain.now = START;
         baseConfig = blockchain.config;
         owner = await blockchain.treasury('owner');
         sequencer = await blockchain.treasury('sequencer');
         user = await blockchain.treasury('user');
+        const code = await compile('RollupMock');
+        const nullifierCode = await compile('RollupNullifier');
         rollup = blockchain.openContract(
             Rollup.createFromConfig(
-                {
+                testConfig(await readProtocolConstants(code, nullifierCode), {
                     owner: owner.address,
                     sequencer: sequencer.address,
-                    nullifierCode: await compile('RollupNullifier'),
-                    genesisStateRoot: GENESIS_ROOT,
+                    nullifierCode,
                     chainId: CHAIN_ID,
                     escapeTimeout: 3600,
-                },
-                await compile('RollupMock'),
+                }),
+                code,
             ),
         );
         await rollup.sendDeploy(owner.getSender(), toNano('5'));
         await finalizeDummyKeys(rollup, owner);
         await rollup.sendSubmitBatch(sequencer.getSender(), {
-            proof: mockProof,
+            proof: mockProof(),
             hints: beginCell().endCell(),
-            roots: { newStateRoot: sha256Int(2n), withdrawalsRoot: tree.root },
+            roots: {
+                newStateRoot: sha256Int(2n),
+                withdrawalsRoot: tree.root,
+                withdrawalsCount: 1n,
+                queueProcessedUpTo: 0n,
+                blockTimestamp: BigInt(START),
+            },
             value: toNano('0.2'),
         });
     });
 
     it('при цене газа в 10 раз выше минимум вывода вырос, и его хватает на всю цепочку', async () => {
         const before = await rollup.getMinimumValues();
+        const exitBefore = await rollup.getEvmExitBudget();
         blockchain.setConfig(withGasPrice(baseConfig, 10n));
         const after = await rollup.getMinimumValues();
+        // Минимум выхода счёта EVM тоже задан в газе и растёт вместе с ценой; сам запас газа — нет.
+        const exitAfter = await rollup.getEvmExitBudget();
+        expect(exitAfter.stepGas).toBe(exitBefore.stepGas);
+        expect(exitAfter.minValue).toBeGreaterThan(exitBefore.minValue * 9n);
         // Газовая часть порога выросла вдесятеро; плата за пересылку (другие параметры сети) — нет.
         expect(after.withdraw).toBeGreaterThan(before.withdraw * 5n);
-        expect(after.forceExit).toBeGreaterThan(before.forceExit * 9n);
 
         // Прежнего минимума теперь мало — отказ до пометки.
         expect((await withdraw(before.withdraw)).transactions).toHaveTransaction({
@@ -111,13 +114,19 @@ describe('Rollup: пороги монет следуют за ценой газ�
         expect(await queued()).toBe(1n);
 
         // Граница — там, где стоимость газа шага с запасом (get-метод queueBudgets) сравнивается
-        // с комиссией 0,01 TON. При нынешней цене газа это множитель 6: ×5 депозит ещё
-        // проходит, ×7 — уже нет. Так запас шага закреплён тестом с обеих сторон.
-        blockchain.setConfig(withGasPrice(baseConfig, 5n));
+        // с комиссией 0,01 TON. И запас, и цену газа тест берёт у контракта: наибольший
+        // множитель цены, при котором комиссия ещё покрывает газ шага, депозит проходит, на
+        // единицу больший — уже нет. Так запас шага закреплён тестом с обеих сторон.
+        const { depositStepGas } = await rollup.getQueueBudgets();
+        const payout = await rollup.getPayoutBudgets();
+        const stepCost = (BigInt(depositStepGas) * payout.payoutStepValue) / BigInt(payout.payoutStepGas);
+        const lastAffordable = BASE_DEPOSIT_FEE / stepCost;
+        expect(lastAffordable).toBeGreaterThanOrEqual(2n);
+        blockchain.setConfig(withGasPrice(baseConfig, lastAffordable));
         expect((await deposit()).transactions).toHaveTransaction({ to: rollup.address, success: true });
         expect(await queued()).toBe(2n);
 
-        blockchain.setConfig(withGasPrice(baseConfig, 7n));
+        blockchain.setConfig(withGasPrice(baseConfig, lastAffordable + 1n));
         const rejected = await deposit();
         expect(rejected.transactions).toHaveTransaction({
             to: rollup.address,
@@ -182,13 +191,14 @@ describe('Rollup: пороги монет следуют за ценой газ�
         expect((await rollup.getEscapeState()).oldestPendingAt).toBeGreaterThan(0);
     });
 
-    it('шаги очереди укладываются в запасы газа и при длинном словаре квитанций', async () => {
+    it('шаги очереди укладываются в запасы газа и при длинном словаре очереди', async () => {
         // Запасы газа шагов — у контракта (queueBudgets). Газ депозита растёт с глубиной
-        // словаря квитанций: меряем его после нескольких сотен необработанных депозитов.
+        // словаря очереди: меряем его после нескольких сотен необработанных депозитов. Замер
+        // на словаре, заполненном до предела, — tests/RollupQueue.spec.ts.
         const budgets = await rollup.getQueueBudgets();
         let worst = 0;
         for (let index = 0; index < 300; index++) {
-            // Комиссия растёт с длиной окна очереди: вноситель соглашается на любую до 0,5 TON.
+            // Комиссия растёт с длиной необработанного хвоста: вноситель соглашается на любую до 0,5 TON.
             const result = await rollup.sendDeposit(user.getSender(), {
                 l2Recipient: L2_RECIPIENT,
                 value: toNano('1'),

@@ -1,0 +1,15 @@
+{
+  "source": "Измерено в @ton/sandbox тестом tests/RollupQueue.spec.ts на двойнике (contracts/rollup_mock.tolk); не редактировать вручную",
+  "note": "Шаги очереди L1 протокола v2 на словаре очереди, заполненном до предела: в словаре maxTrackedItems − 1 записей, постановка убирает две прежние и добавляет одну. depositFullQueue — депозит; forceTransactionFullQueue — принудительная транзакция из maxForcedTxCells ячеек по 127 байт; forceTransactionOneCell — она же из одной ячейки на пустой очереди. mockSubmitBatchAtHead и mockSubmitBatchMidQueue — батч ДВОЙНИКА (без проверки пруфа) с отметкой на голове очереди и в её середине на том же словаре: разница — цена поиска записи в словаре, которую настоящий батч заплатит сверх проверки пруфа. pruneFiftyEntries — уборка 50 записей одним сообщением. Запасы шагов (depositStepGas, forceTransactionStepGas) — из get-метода queueBudgets.",
+  "maxTrackedItems": 8192,
+  "maxForcedTxCells": 64,
+  "maxBatchQueueItems": 32,
+  "depositStepGas": 40000,
+  "forceTransactionStepGas": 110000,
+  "depositFullQueue": 24848,
+  "forceTransactionFullQueue": 83037,
+  "mockSubmitBatchMidQueue": 10574,
+  "mockSubmitBatchAtHead": 8806,
+  "pruneFiftyEntries": 343754,
+  "forceTransactionOneCell": 8832
+}

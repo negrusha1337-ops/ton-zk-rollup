@@ -1,3 +1,11 @@
+// @ts-nocheck
+// НАБОР ПРОТОКОЛА v1. Написан под обёртки и пруфы прежнего протокола (дайджест из восьми слов,
+// сообщения ForceExit и SetExitKey); с контрактом протокола v2 несовместим. Не удалён и не
+// подогнан: пока пруфы в fixtures/ не перестроены под v2 (wrappers/protocolVersion.ts), набор
+// помечает себя todo через describeWithProofFixtures и не типизируется. Перенос на v2 — вместе
+// с шагом программы и пруфов (PROTOCOL-V2.md, раздел 11); прежняя версия целиком — тег protocol-v1.
+import { describeWithProofFixtures } from './helpers/protocolGate';
+import { proofFixturesBlocker } from '../wrappers/protocolVersion';
 import { Blockchain, BlockchainSnapshot, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Address, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
@@ -46,8 +54,9 @@ const TX_GAS_LIMIT = 1_000_000;
 // поэтому вывод здесь не проверяется (REVIEW.md, находки 6-А, 6-Б, 9-А).
 const SUITE = 'Rollup: пруф SP1 блока EVM';
 const status = evmProofStatus();
-if (status.current) {
-    describe(SUITE, suite);
+if (proofFixturesBlocker() !== null || status.current) {
+    // Сначала — общая проверка версии протокола: пруфы прежнего протокола дают один todo.
+    describeWithProofFixtures(SUITE, suite);
 } else {
     // Пруфа для нынешней программы нет (или он от прежней версии): набор ждёт его, а не падает
     // и не проходит молча. Пруфы строятся только по команде пользователя.

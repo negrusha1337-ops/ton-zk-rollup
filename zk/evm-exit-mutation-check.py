@@ -2,8 +2,10 @@
 """Проверка тестов аварийного выхода EVM мутациями контракта.
 
     python3 zk/evm-exit-mutation-check.py
+    python3 zk/evm-exit-mutation-check.py --only <часть названия мутации>   # выборочно, без отчёта
 
-Убирает по одной защите из contracts/rollup/evm_exit.tolk и запускает из набора
+Убирает по одной защите из contracts/rollup/evm_exit.tolk (а для чтения «змейки» — из общего
+contracts/rollup/bytes.tolk) и запускает из набора
 tests/RollupEvmExit.spec.ts два теста: тот, что обязан эту мутацию убить, и контрольный,
 который контракта не касается. Контрольный падает, только если мутант не собрался (сборка
 идёт в общем beforeAll) — так «не собралась» не выдаётся за «убита». Мутация убита, если
@@ -25,6 +27,10 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "contracts/rollup/evm_exit.tolk"
 BACKUP = SOURCE.with_suffix(".tolk.orig")
+# Чтение «змейки» ячеек — общий файл (им же читаются принудительные транзакции). Мутации из
+# списка BYTES_MUTATIONS правят его; признаком «идёт проверка мутациями» остаётся копия SOURCE.
+BYTES_SOURCE = ROOT / "contracts/rollup/bytes.tolk"
+BYTES_BACKUP = BYTES_SOURCE.with_suffix(".tolk.orig")
 REPORT = ROOT / "bench/evm-exit-mutation-report.txt"
 CONTROL = "упаковщик отказывается от строки с хвостом после списка RLP"
 
@@ -32,7 +38,7 @@ POSITIVE = "счёт выходит по заголовку, доказател�
 CONSENT = "val consent = evmExitConsent(storage.chainId, state.stateRoot, recipientHash);"
 REJECTS = "получатель вне basechain, негодная подпись и нехватка монет отклоняются"
 
-# (название, что заменить, на что, тест, который обязан упасть)
+# (название, что заменить, на что, тест, который обязан упасть[, файл — по умолчанию SOURCE])
 MUTATIONS = [
     # --- условия выхода ---
     ("заморозка не проверяется",
@@ -74,15 +80,23 @@ MUTATIONS = [
      "изменённый узел доказательства не подходит"),
 
     # --- раскладка по ячейкам и чтение ---
-    ("строка не обязана состоять из целых байтов",
-     "    assert (bits % 8 == 0) throw EvmExitErrors.BadEncoding;\n", "",
-     "лишний бит: строка не из целых байтов"),
-    ("число ячеек строки не ограничено",
-     "    assert (parts.size() <= EVM_MAX_PARTS) throw EvmExitErrors.BadEncoding;\n", "",
+    ("предел ячеек строки — не двенадцать, а двести",
+     "    val parts = byteParts(step.node, EVM_MAX_PARTS, EvmExitErrors.BadEncoding);",
+     "    val parts = byteParts(step.node, 200, EvmExitErrors.BadEncoding);",
      "узел в двенадцати ячейках принимается, в тринадцати — нет"),
+    ("строка не обязана состоять из целых байтов",
+     "    assert (bits % 8 == 0) throw errorCode;\n", "",
+     "лишний бит: строка не из целых байтов", BYTES_SOURCE),
+    ("число ячеек строки не ограничено",
+     "    assert (parts.size() <= maxParts) throw errorCode;\n", "",
+     "узел в двенадцати ячейках принимается, в тринадцати — нет", BYTES_SOURCE),
     ("у ячейки строки может быть больше одной ссылки",
-     "    assert (refs <= 1) throw EvmExitErrors.BadEncoding;\n", "",
-     "две ссылки у ячейки узла: продолжение неоднозначно"),
+     "    assert (refs <= 1) throw errorCode;\n", "",
+     "две ссылки у ячейки узла: продолжение неоднозначно", BYTES_SOURCE),
+    ("экзотическая ячейка читается как обычная: вместо ссылки на библиотеку — её содержимое",
+     "    var (s, isExotic) = current.beginParseSpecial();\n    assert (!isExotic) throw errorCode;\n",
+     "    var s = current.beginParse();\n",
+     "экзотическая ячейка в заголовке или в узле отвергается: байты обязаны лежать в сообщении", BYTES_SOURCE),
     ("чтение за концом строки не проверяется",
      "    assert (self.next < self.parts.size()) throw EvmExitErrors.BadNode;\n", "",
      "ветка из двух элементов"),
@@ -221,32 +235,58 @@ def run_tests(names):
     return result.returncode, passed, failed
 
 
+def source_of(mutation):
+    return mutation[4] if len(mutation) > 4 else SOURCE
+
+
+BACKUPS = {SOURCE: BACKUP, BYTES_SOURCE: BYTES_BACKUP}
+
+
+def restore_interrupted() -> bool:
+    """Возвращает исходники, оставшиеся от прерванного запуска. False — нужна ручная разборка."""
+    for source, backup in BACKUPS.items():
+        if not backup.exists():
+            continue
+        # Копию возвращаем, только если в исходнике лежит она же или она с одной из мутаций
+        # этого файла: иначе там чьи-то правки, и затирать их нельзя.
+        saved, current = backup.read_text(), source.read_text()
+        mutants = [saved.replace(m[1], m[2]) for m in MUTATIONS if source_of(m) == source]
+        if current != saved and current not in mutants:
+            print(f"Найдена копия {backup.name}, но исходник — не она и не она с мутацией: разберись вручную.")
+            return False
+        print(f"Найдена копия {source.name} от прерванного запуска — возвращаю её.")
+        source.write_text(saved)
+        backup.unlink()
+    return True
+
+
 def main() -> int:
-    if BACKUP.exists():
-        # Копия осталась от прерванного запуска. Возвращаем её, только если в исходнике лежит
-        # она же или она с одной из мутаций: иначе там чьи-то правки, и затирать их нельзя.
-        saved, current = BACKUP.read_text(), SOURCE.read_text()
-        if current != saved and all(current != saved.replace(old, new) for _, old, new, _ in MUTATIONS):
-            print(f"Найдена копия {BACKUP.name}, но исходник — не она и не она с мутацией: разберись вручную.")
-            return 2
-        print("Найдена копия исходника от прерванного запуска — возвращаю её.")
-        SOURCE.write_text(saved)
-        BACKUP.unlink()
-    original = SOURCE.read_text()
-    code, _, failed = run_tests(None)
-    if code != 0:
-        print("Тесты падают и без мутаций:", *sorted(failed), sep="\n  ")
+    only = sys.argv[2] if len(sys.argv) > 2 and sys.argv[1] == "--only" else None
+    if not restore_interrupted():
         return 2
+    originals = {source: source.read_text() for source in BACKUPS}
+    selected = [m for m in MUTATIONS if only is None or only in m[0]]
+    if only is None:
+        code, _, failed = run_tests(None)
+        if code != 0:
+            print("Тесты падают и без мутаций:", *sorted(failed), sep="\n  ")
+            return 2
     lines, bad = [], 0
-    BACKUP.write_text(original)
+    # Копии обоих файлов лежат рядом весь прогон: копия SOURCE — ещё и признак «идёт проверка
+    # мутациями», по которому тесты не пишут замеры в bench.
+    for source, backup in BACKUPS.items():
+        backup.write_text(originals[source])
     try:
-        for name, old, new, expected in MUTATIONS:
+        for mutation in selected:
+            name, old, new, expected = mutation[:4]
+            source = source_of(mutation)
+            original = originals[source]
             if original.count(old) != 1:
                 verdict = f"НЕ ПРИМЕНЕНА (образец найден {original.count(old)} раз)"
             else:
-                SOURCE.write_text(original.replace(old, new))
+                source.write_text(original.replace(old, new))
                 _, passed, failed = run_tests([expected, CONTROL])
-                SOURCE.write_text(original)
+                source.write_text(original)
                 if CONTROL not in passed:
                     verdict = "НЕ СОБРАЛАСЬ"
                 elif expected in failed:
@@ -261,13 +301,17 @@ def main() -> int:
             print(line, flush=True)
             lines.append(line)
     finally:
-        SOURCE.write_text(original)
-        BACKUP.unlink()
+        for source, backup in BACKUPS.items():
+            source.write_text(originals[source])
+            backup.unlink()
+    summary = f"Мутаций: {len(selected)}, не убито ожидаемым тестом: {bad}"
+    if only is not None:
+        print("\n" + summary + " (выборочный прогон: отчёт не записан)")
+        return 1 if bad else 0
     code, _, failed = run_tests(None)
     if code != 0:
         print("После возврата исходника тесты падают — результатам верить нельзя.")
         return 2
-    summary = f"Мутаций: {len(MUTATIONS)}, не убито ожидаемым тестом: {bad}"
     print("\n" + summary)
     REPORT.write_text(
         f"Проверка тестов аварийного выхода EVM мутациями контракта, {datetime.date.today().isoformat()}\n"
