@@ -6,6 +6,8 @@
 //!       [--write-input batch.bin] [--report report.json]
 //!   rollup-evm-host --batch-input batch.bin --execute         # готовый вход батча (фикстура)
 //!   rollup-evm-host --batch-input batch.bin --prove --proof-out proof.json
+//!   rollup-evm-host --elf program.elf --batch-input batch.bin --prove-compressed --proof-out compressed.bin
+//!   rollup-evm-host --elf program.elf --batch-input batch.bin --wrap-groth16 compressed.bin --proof-out proof.json
 //!   rollup-evm-host --classify-forced items.json --chain-id <chainId> --report verdicts.json
 //!   rollup-evm-host --identity                               # хеши ELF и исходников этой сборки (JSON)
 //!
@@ -40,12 +42,20 @@
 //! транзакцию, которую программа пропускает (nonce, баланс, отправителя нет), блок не содержит,
 //! а счёт её отправителя программа обязана прочитать: без раскрытого пути батч недоказуем.
 //!
-//! Работа прувера — только через `host/prove-guarded.sh` и только по отдельной команде:
+//! Работа прувера — только по отдельной команде: на маке через `host/prove-guarded.sh`, на
+//! арендованном сервере через `host/remote/measure.sh`. Режимы — `proving.rs`:
 //!   `--compressed` — пробный СЖАТЫЙ пруф (STARK без обёртки в Groth16): замер времени и памяти,
 //!       контракт такой пруф не принимает;
 //!   `--prove` — пруф Groth16 для контракта на TON (нужна сборка с `--features native-gnark`).
 //!       Нонс SP1 фиксирован нулём: так его ждёт ключ контракта. Перед пруфом хост сверяет, что
-//!       собран из нынешних исходников и что program.json описывает именно эту сборку.
+//!       собран из нынешних исходников и что program.json описывает именно эту сборку;
+//!   `--prove-compressed` и `--wrap-groth16 <сжатый пруф>` — тот же пруф в два шага (сжатый на
+//!       GPU, обёртка Groth16 на процессоре), когда видеопамяти на обёртку не хватает.
+//!
+//! `--elf <файл>` — ELF программы из файла вместо вшитого (`program.rs`): на сервере программу не
+//! пересобирают. Файл принимается, только если его sha256 и ключ, выведенный SDK, — те, что в
+//! program.json; сверка — до любой работы. Прувер на GPU — `SP1_PROVER=cuda` и сборка с
+//! `--features cuda`.
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -63,18 +73,20 @@ use rollup_evm::{
     WITHDRAWAL_TREE_DEPTH,
 };
 use rsp_client_executor::io::EthClientExecutorInput;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Deserialize;
 use sp1_sdk::{
-    blocking::{ProveRequest, Prover, ProverClient},
+    blocking::{Prover, ProverClient},
     include_elf, Elf, HashableKey, ProvingKey, SP1Stdin,
 };
 
+mod program;
+mod proving;
 mod sources;
+mod wrap;
+
+use program::{plain_hex, Program, ProgramKeys};
 
 const EVM_ELF: Elf = include_elf!("rollup-evm-program");
-/// Нонс пруфа — пятый публичный вход верификатора SP1. В ключе контракта он свёрнут как ноль.
-const PROOF_NONCE: [u32; 4] = [0; 4];
 /// Хеш исходников программы на момент сборки этого бинарника (build.rs).
 const BUILT_FROM_SOURCES: &str = env!("ROLLUP_EVM_SOURCES_SHA256");
 /// Хеш исходников хоста на момент сборки.
@@ -86,16 +98,16 @@ const HOST_CARGO: &str = env!("ROLLUP_EVM_CARGO");
 #[derive(Parser)]
 struct Args {
     /// Посчитать ключ программы и записать fixtures/evm_batches/program.json.
-    #[arg(long, conflicts_with_all = ["block_input", "batch_input", "execute", "compressed", "prove"])]
+    #[arg(long, conflicts_with_all = ["block_input", "batch_input", "execute", "compressed", "prove", "elf"])]
     vkeys: bool,
     /// Напечатать JSON: хеш ELF программы и хеши исходников (на момент сборки и на диске).
-    #[arg(long, conflicts_with_all = ["vkeys", "block_input", "batch_input", "execute", "compressed", "prove", "classify_forced"])]
+    #[arg(long, conflicts_with_all = ["vkeys", "block_input", "batch_input", "execute", "compressed", "prove", "classify_forced", "elf"])]
     identity: bool,
     /// Проверить форму принудительных транзакций: JSON-массив байтов (hex). Ответ — в --report.
     #[arg(
         long,
         requires_all = ["chain_id", "report"],
-        conflicts_with_all = ["vkeys", "block_input", "batch_input", "execute", "compressed", "prove", "write_input"]
+        conflicts_with_all = ["vkeys", "block_input", "batch_input", "execute", "compressed", "prove", "write_input", "elf"]
     )]
     classify_forced: Option<PathBuf>,
     /// Вход блока в формате кэша RSP: <cache-dir>/input/<chainId>/<номер блока>.bin
@@ -119,14 +131,25 @@ struct Args {
     /// Исполнить гостевую программу в zkVM (без пруфа) и сверить с нативным расчётом.
     #[arg(long)]
     execute: bool,
+    /// ELF программы из файла вместо вшитого: принимается, только если его sha256 и ключ — из
+    /// program.json. Для сервера, где программу не пересобирают.
+    #[arg(long)]
+    elf: Option<PathBuf>,
     /// Построить и проверить сжатый пруф (без Groth16): замер времени и памяти. Тяжёлая работа.
-    #[arg(long, conflicts_with_all = ["execute", "prove"])]
+    #[arg(long, conflicts_with_all = ["execute", "prove", "prove_compressed", "wrap_groth16"])]
     compressed: bool,
     /// Построить пруф Groth16 для контракта и записать его в --proof-out. Тяжёлая работа.
-    #[arg(long, conflicts_with = "execute", requires = "proof_out")]
+    #[arg(long, conflicts_with_all = ["execute", "prove_compressed", "wrap_groth16"], requires = "proof_out")]
     prove: bool,
-    /// Куда записать пруф Groth16 (JSON в формате zk/import-sp1-fixture.mjs).
-    #[arg(long, requires = "prove")]
+    /// Построить сжатый пруф и записать его в --proof-out (bincode SDK) — шаг 1 из двух.
+    #[arg(long, conflicts_with_all = ["execute", "wrap_groth16"], requires = "proof_out")]
+    prove_compressed: bool,
+    /// Обернуть сжатый пруф из файла в Groth16 на процессоре → --proof-out (как у --prove) — шаг 2.
+    #[arg(long, conflicts_with = "execute", requires = "proof_out")]
+    wrap_groth16: Option<PathBuf>,
+    /// Куда записать пруф: JSON для zk/import-sp1-fixture.mjs (--prove, --wrap-groth16) либо
+    /// сжатый пруф (--prove-compressed).
+    #[arg(long)]
     proof_out: Option<PathBuf>,
     /// Записать вход батча (bincode) — фикстура для тестов. Пишется после нативной проверки и,
     /// с --execute, после сверки с zkVM.
@@ -191,34 +214,6 @@ struct AccountProofEntry {
     code: Option<Bytes>,
 }
 
-/// Ключ программы и то, из чего он получен. Пишется режимом --vkeys.
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProgramKeys {
-    source: String,
-    note: String,
-    sp1_version: String,
-    guest_rustc: String,
-    cargo: String,
-    /// Хеш исходников программы: host/src/sources.rs, повтор — zk/evm-binding.mjs.
-    sources_sha256: String,
-    #[serde(rename = "programVKey")]
-    program_vkey: String,
-    program_elf_sha256: String,
-}
-
-/// Файл пруфа Groth16 — тот же формат, что пишет zkvm/script: его читает zk/import-sp1-fixture.mjs.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProofFixture {
-    subject: String,
-    vkey: String,
-    public_values: String,
-    proof: String,
-    sources_sha256: String,
-    elf_sha256: String,
-}
-
 fn repository() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -235,12 +230,8 @@ fn hex(bytes: &[u8]) -> String {
     format!("0x{}", plain_hex(bytes))
 }
 
-fn plain_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn elf_sha256() -> String {
-    plain_hex(&Sha256::digest(&EVM_ELF[..]))
+    program::sha256_hex(&EVM_ELF)
 }
 
 fn words(values: &PublicValues) -> serde_json::Value {
@@ -333,27 +324,6 @@ fn write_program_keys() {
     println!("Ключ программы батча EVM: {}", keys.program_vkey);
     println!("Хеш исходников:           {}", keys.sources_sha256);
     println!("Записано: fixtures/evm_batches/program.json");
-}
-
-/// program.json обязан описывать именно эту сборку: иначе ключ контракта выведен для другого ELF.
-fn assert_matches_program_keys(vkey: &str) {
-    let recorded: ProgramKeys = serde_json::from_str(
-        &fs::read_to_string(program_keys_file()).expect("нет fixtures/evm_batches/program.json: сначала --vkeys"),
-    )
-    .expect("program.json не разобран");
-    for (name, recorded, actual) in [
-        ("sourcesSha256", recorded.sources_sha256, BUILT_FROM_SOURCES.to_string()),
-        ("programElfSha256", recorded.program_elf_sha256, elf_sha256()),
-        ("programVKey", recorded.program_vkey, vkey.to_string()),
-    ] {
-        if recorded != actual {
-            eprintln!(
-                "program.json не соответствует этой сборке: {name}\n  в файле:  {recorded}\n  в сборке: {actual}\n\
-                 Запустите rollup-evm-host --vkeys и выведите ключ контракта заново."
-            );
-            std::process::exit(2);
-        }
-    }
 }
 
 /// Дополняет свидетель состояния доказательствами счетов из файла свидетеля и проверяет, что
@@ -519,6 +489,17 @@ fn checked_queue_mark(
     "previous report"
 }
 
+/// Режим пруфа из аргументов (clap уже исключил сочетания).
+fn proof_mode(args: &Args) -> Option<proving::Mode<'_>> {
+    match (&args.wrap_groth16, args.compressed, args.prove, args.prove_compressed) {
+        (Some(path), ..) => Some(proving::Mode::WrapGroth16(path)),
+        (None, true, ..) => Some(proving::Mode::Compressed),
+        (None, _, true, _) => Some(proving::Mode::Groth16),
+        (None, _, _, true) => Some(proving::Mode::ProveCompressed),
+        _ => None,
+    }
+}
+
 /// Вход батча и сведения для отчёта: готовый (--batch-input) или собранный
 /// из входа блока RSP и свидетеля.
 fn load_input(args: &Args) -> (EvmBatchInput, Extra) {
@@ -595,6 +576,16 @@ fn main() {
         let chain_id = args.chain_id.expect("clap требует --chain-id");
         return classify_forced(items, chain_id, args.report.as_ref().expect("clap требует --report"));
     }
+    let mode = proof_mode(&args);
+    if args.proof_out.is_some() && !matches!(mode, Some(proving::Mode::Groth16 | proving::Mode::ProveCompressed | proving::Mode::WrapGroth16(_))) {
+        refuse("--proof-out — только с --prove, --prove-compressed или --wrap-groth16".into());
+    }
+    // ELF — до любой работы со входом: файловый сверяется с program.json по sha256 и по ключу.
+    let program = match &args.elf {
+        Some(path) => Program::from_file(path, &program_keys_file()),
+        None => Program::embedded(EVM_ELF),
+    };
+    program::assert_vkey_from_file(&program, &program_keys_file());
 
     let (input, extra) = load_input(&args);
     let queue_processed_from = extra.queue_processed_from;
@@ -621,7 +612,7 @@ fn main() {
         let mut stdin = SP1Stdin::new();
         stdin.write_vec(encoded.clone());
         let client = ProverClient::from_env();
-        let (output, report) = client.execute(EVM_ELF, stdin).run().expect("исполнение в zkVM не удалось");
+        let (output, report) = client.execute(program.elf.clone(), stdin).run().expect("исполнение в zkVM не удалось");
         assert_eq!(output.as_slice(), native.to_bytes().as_slice(), "zkVM и нативный запуск разошлись");
         println!("Публичные значения zkVM совпали с нативным расчётом.");
         println!("Циклов zkVM: {}", report.total_instruction_count());
@@ -635,55 +626,21 @@ fn main() {
         println!("Вход батча: {} ({} байт)", path.display(), encoded.len());
     }
 
-    let mut proof_seconds = None;
-    let mut vkey = None;
-    if args.compressed || args.prove {
-        // Прувер берётся из окружения. С SP1_PROVER=mock «пруф» — пустышка, а его проверка всегда
-        // успешна: в режимах пруфа допустим только настоящий процессорный прувер.
-        let prover = std::env::var("SP1_PROVER").unwrap_or_else(|_| "cpu".into());
-        if prover != "cpu" {
-            eprintln!("Режимы пруфа работают только с SP1_PROVER=cpu (сейчас «{prover}»).");
-            std::process::exit(2);
-        }
+    let proved = mode.map(|mode| {
         assert_binary_is_fresh();
-        let mut stdin = SP1Stdin::new();
-        stdin.write_vec(encoded.clone());
-        let client = ProverClient::from_env();
-        let pk = client.setup(EVM_ELF.clone()).expect("не удалось подготовить ключ программы");
-        let program_vkey = pk.verifying_key().bytes32().to_string();
-        println!("Ключ программы: {program_vkey}");
-        let started = std::time::Instant::now();
-        if args.compressed {
-            let proof = client.prove(&pk, stdin).compressed().run().expect("не удалось построить сжатый пруф");
-            assert_eq!(proof.public_values.as_slice(), native.to_bytes().as_slice(), "пруф и нативный запуск разошлись");
-            client.verify(&proof, pk.verifying_key(), None).expect("сжатый пруф не прошёл локальную проверку");
-            println!("Сжатый пруф построен и проверен за {:.0} с.", started.elapsed().as_secs_f64());
-        } else {
-            assert_matches_program_keys(&program_vkey);
-            let proof = client
-                .prove(&pk, stdin)
-                .groth16()
-                .with_proof_nonce(PROOF_NONCE)
-                .run()
-                .expect("не удалось построить пруф");
-            assert_eq!(proof.public_values.as_slice(), native.to_bytes().as_slice(), "пруф и нативный запуск разошлись");
-            client.verify(&proof, pk.verifying_key(), None).expect("пруф не прошёл локальную проверку");
-            println!("Пруф Groth16 построен и проверен за {:.0} с.", started.elapsed().as_secs_f64());
-            let fixture = ProofFixture {
-                subject: format!("EVM batch: block {block_number}"),
-                vkey: program_vkey.clone(),
-                public_values: hex(proof.public_values.as_slice()),
-                proof: hex(&proof.bytes()),
-                sources_sha256: BUILT_FROM_SOURCES.to_string(),
-                elf_sha256: elf_sha256(),
-            };
-            let file = args.proof_out.as_ref().expect("с --prove нужен --proof-out");
-            fs::write(file, serde_json::to_string_pretty(&fixture).expect("JSON") + "\n").expect("пруф не записан");
-            println!("Пруф записан: {}", file.display());
-        }
-        proof_seconds = Some(started.elapsed().as_secs_f64());
-        vkey = Some(program_vkey);
-    }
+        let keys_file = program_keys_file();
+        let native_bytes = native.to_bytes();
+        let job = proving::Job {
+            program: &program,
+            keys_file: &keys_file,
+            built_from_sources: BUILT_FROM_SOURCES,
+            encoded_input: &encoded,
+            native_public_values: &native_bytes,
+            block_number,
+            proof_out: args.proof_out.as_deref(),
+        };
+        proving::run(mode, &job)
+    });
 
     if let Some(path) = &args.report {
         let report = serde_json::json!({
@@ -712,11 +669,15 @@ fn main() {
             })).collect::<Vec<_>>(),
             "withdrawalsFrontierAfter": outcome.withdrawals_frontier.iter().map(|node| hex(node)).collect::<Vec<_>>(),
             "zkvmCycles": cycles,
-            "programElfSha256": format!("0x{}", elf_sha256()),
+            "programElfSha256": format!("0x{}", program.sha256),
+            // ELF из файла (--elf) либо вшитый при сборке (null).
+            "programElfFile": program.file,
             "sourcesSha256": BUILT_FROM_SOURCES,
-            "proofMode": if args.compressed { Some("compressed") } else if args.prove { Some("groth16") } else { None },
-            "proofSeconds": proof_seconds,
-            "programVKey": vkey,
+            "proofMode": mode.map(|mode| mode.name()),
+            "prover": proved.as_ref().map(|outcome| outcome.prover.clone()),
+            "setupSeconds": proved.as_ref().map(|outcome| outcome.setup_seconds),
+            "proofSeconds": proved.as_ref().map(|outcome| outcome.proof_seconds),
+            "programVKey": proved.as_ref().map(|outcome| outcome.vkey.clone()),
         });
         write_atomically(path, (serde_json::to_string_pretty(&report).unwrap() + "\n").as_bytes(), "отчёт");
     }

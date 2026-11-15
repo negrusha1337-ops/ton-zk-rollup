@@ -17,10 +17,27 @@ revm.workspace = true
 sp1-sdk.workspace = true
 clap = { version = "4.5.7", features = ["derive"] }
 sha2 = "0.10"
+# Обёртка сжатого пруфа в Groth16 на процессоре (--wrap-groth16, src/wrap.rs): этапы контроллера
+# SP1, которых SDK наружу не выводит. Версии — ровно те, что у sp1-sdk (Cargo.lock); в
+# рабочее пространство не выносятся: zkvm-evm/Cargo.toml входит в хеш исходников программы.
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+sp1-prover = "=6.10.0"
+sp1-hypercube = "=6.10.0"
+sp1-primitives = "=6.10.0"
+sp1-recursion-circuit = "=6.10.0"
+sp1-recursion-compiler = "=6.10.0"
+sp1-recursion-executor = "=6.10.0"
+sp1-recursion-gnark-ffi = "=6.10.0"
+slop-algebra = "=6.10.0"
+slop-bn254 = "=6.10.0"
 
 [features]
 # Обёртка Groth16 нативным gnark вместо Docker-образа. Нужен установленный Go (PROVING.md).
 native-gnark = ["sp1-sdk/native-gnark"]
+# Прувер на GPU (SP1_PROVER=cuda): SDK запускает сервер sp1-gpu-server и сам скачивает его из
+# релиза succinctlabs/sp1 v6.10.0 в ~/.sp1/bin. Только Linux x86_64 с CUDA 12 (host/remote/README.md).
+cuda = ["sp1-sdk/cuda"]
 
 [build-dependencies]
 sp1-build.workspace = true
