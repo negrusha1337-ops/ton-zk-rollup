@@ -1,11 +1,11 @@
 import { Blockchain, BlockchainSnapshot, SandboxContract, TreasuryContract } from '@ton/sandbox';
-import { Address, beginCell, Cell, toNano } from '@ton/core';
+import { Address, beginCell, Cell, Dictionary, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
 import { readFileSync } from 'fs';
 import path from 'path';
 import { keccak_256 } from '@noble/hashes/sha3';
-import { Bn254Groth16Verifier, Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
+import { Bn254Groth16Verifier } from '../wrappers/Bn254Groth16Verifier';
 import {
     EVM_MAX_CELLS,
     evmBytesCell,
@@ -31,10 +31,17 @@ import {
 } from '../wrappers/rollupValues';
 import { saveGasReport } from './helpers/benchResults';
 import { computePhaseOf } from './helpers/gas';
-import { finalizeDummyKeys } from './helpers/rollupSetup';
+import { plantStateRoot, ProtocolConstants, readProtocolConstants, testConfig } from './helpers/rollupSetup';
 
 // Аварийный выход счёта EVM без пруфа zkVM (contracts/rollup/evm_exit.tolk) на настоящем
 // контракте: он сам проверяет заголовок блока, доказательство счёта и подпись владельца.
+//
+// Слово состояния контракта в этих тестах — хеш заголовка из фикстуры. Настоящий контракт
+// меняет его только батчем с верным пруфом, а начинает работу только с генезиса протокола,
+// поэтому контракт развёртывается канонически (генезис, настоящий ключ, FinalizeKey), а слово
+// состояния затем подменяется прямо в хранилище песочницы (plantStateRoot). Сам выход от того,
+// как слово состояния туда попало, не зависит. Ключ — из fixtures/evm_batches (он построен под
+// прежний протокол, но выходу ключ не нужен вовсе: важно лишь, что он настоящего размера).
 //
 // Основная фикстура — fixtures/evm_exit/exit.json: настоящие заголовок блока, eth_getProof и
 // подпись от узла anvil (zk/gen-evm-exit-fixture.mjs). Там же собранные случаи: формы дерева,
@@ -75,16 +82,6 @@ const START = 1_800_000_000;
 const TX_GAS_LIMIT = 1_000_000;
 /** 1 нанотон = 1 gwei — единица протокола; её подмену в контракте ловит мутация «баланс не делится». */
 const WEI_PER_NANOTON = 1_000_000_000n;
-/** Заглушка пруфа для двойника: «первое число пруфа равно 1». */
-const MOCK_PROOF: Bn254Proof = {
-    a: [1n, 0n],
-    b: [
-        [0n, 0n],
-        [0n, 0n],
-    ],
-    c: [0n, 0n],
-};
-
 describe('Rollup: аварийный выход счёта EVM без пруфа', () => {
     const chainId = BigInt(fixture.chainId);
     const key = loadEvmRollupKey();
@@ -96,8 +93,8 @@ describe('Rollup: аварийный выход счёта EVM без пруфа
     const gas: Record<string, number> = {};
 
     let code: Cell;
-    let mockCode: Cell;
     let nullifierCode: Cell;
+    let constants: ProtocolConstants;
     let blockchain: Blockchain;
     let owner: SandboxContract<TreasuryContract>;
     let user: SandboxContract<TreasuryContract>;
@@ -112,36 +109,31 @@ describe('Rollup: аварийный выход счёта EVM без пруфа
         rollup: SandboxContract<Rollup>;
     };
 
-    /** Разворачивает контракт, чьё слово состояния — `blockHash`: настоящий с ключом программы EVM либо двойник. */
-    const deploy = async (blockHash: Buffer, mock = false) => {
+    /** Разворачивает настоящий контракт с ключом программы EVM и ставит ему слово состояния `blockHash`. */
+    const deploy = async (blockHash: Buffer) => {
         blockchain = await Blockchain.create();
         blockchain.now = START;
         owner = await blockchain.treasury('owner');
         user = await blockchain.treasury('user');
         rollup = blockchain.openContract(
             Rollup.createFromConfig(
-                {
+                testConfig(constants, {
                     owner: owner.address,
                     sequencer: owner.address,
                     nullifierCode,
-                    genesisStateRoot: BigInt('0x' + blockHash.toString('hex')),
                     chainId,
                     escapeTimeout: TIMEOUT,
-                },
-                mock ? mockCode : code,
+                }),
+                code,
             ),
         );
         await rollup.sendDeploy(owner.getSender(), DEPLOY_VALUE);
-        if (mock) {
-            await finalizeDummyKeys(rollup, owner);
-            return;
-        }
         for (const { slot, part } of Bn254Groth16Verifier.keyParts(key.upload)) {
             await rollup.sendUploadKeyPart(owner.getSender(), { slot, part, value: KEY_PART_VALUE });
         }
-        await rollup.sendSetExitKey(owner.getSender(), { ic0: key.exitIc0, value: KEY_FINALIZE_VALUE });
         await rollup.sendFinalizeKey(owner.getSender(), { key: key.upload, value: KEY_FINALIZE_VALUE });
         expect(await rollup.getKeyHash()).toBe(key.keyHash);
+        await plantStateRoot(blockchain, rollup.address, BigInt('0x' + blockHash.toString('hex')));
     };
     /**
      * Депозит, который никто не обработал, и заморозка после срока. Депозит же даёт контракту
@@ -207,8 +199,8 @@ describe('Rollup: аварийный выход счёта EVM без пруфа
 
     beforeAll(async () => {
         code = await compile('Rollup');
-        mockCode = await compile('RollupMock');
         nullifierCode = await compile('RollupNullifier');
+        constants = await readProtocolConstants(code, nullifierCode);
         await deploy(bytes(fixture.blockHash));
         budget = await rollup.getEvmExitBudget();
         exitValue = (budget.minValue * 11n) / 10n;
@@ -287,20 +279,25 @@ describe('Rollup: аварийный выход счёта EVM без пруфа
         paid(await exit({ signature }), recipient, amount);
     });
 
-    it('счёт, вышедший по доказательству, не выйдет ещё раз по пруфу zkVM: нуллификатор общий', async () => {
-        // Двойник: проверка пруфа ForceExit заменена заглушкой, всё остальное — тот же код.
-        await deploy(bytes(fixture.blockHash), true);
-        await freeze();
+    it('экзотическая ячейка в заголовке или в узле отвергается: байты обязаны лежать в сообщении', async () => {
+        // «Змейку» читает общий код (contracts/rollup/bytes.tolk), тот же, что у принудительных
+        // транзакций: ячейки читаются через XCTOS. Ссылку на библиотеку обычное чтение молча
+        // заменило бы её содержимым — библиотека зарегистрирована, и без проверки выход ПРОШЁЛ бы.
+        const libraryReferenceTo = (content: Cell) => {
+            const libraries = Dictionary.empty(Dictionary.Keys.BigUint(256), Dictionary.Values.Cell());
+            libraries.set(BigInt('0x' + content.hash().toString('hex')), content);
+            blockchain.libs = beginCell().storeDictDirect(libraries).endCell();
+            return beginCell().storeUint(2, 8).storeBuffer(content.hash()).endCell({ exotic: true });
+        };
+        rejected(await exit({ headerCell: libraryReferenceTo(evmHeaderCell(header)) }), EvmExitErrors.badEncoding);
+        const last = nodes.length - 1;
+        rejected(
+            await exit({ steps: stepsWith(last, libraryReferenceTo(evmNodeCell(nodes[last]))) }),
+            EvmExitErrors.badEncoding,
+        );
+        blockchain.libs = undefined;
+        // Те же ячейки обычными — выход проходит.
         paid(await exit(), recipient, amount);
-        const nullifier = await rollup.getExitNullifierAddress(account);
-        const again = await rollup.sendForceExit(user.getSender(), {
-            proof: MOCK_PROOF,
-            hints: beginCell().endCell(),
-            claim: { l2Account: account, amount, recipient },
-            value: (await rollup.getMinimumValues()).forceExit,
-        });
-        expect(again.transactions).toHaveTransaction({ to: nullifier, success: false, exitCode: NullifierErrors.alreadyClaimed });
-        expect(again.transactions).not.toHaveTransaction({ from: rollup.address, to: recipient });
     });
 
     it('до заморозки выхода нет', async () => {

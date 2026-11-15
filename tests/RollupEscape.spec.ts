@@ -2,33 +2,26 @@ import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Address, beginCell, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
-import { finalizeDummyKeys } from './helpers/rollupSetup';
-import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
-import { ExitClaim, NullifierErrors, Rollup, RollupErrors } from '../wrappers/Rollup';
-import { merkleProofCell, sha256Int, withdrawalTree } from '../wrappers/rollupMath';
+import { finalizeDummyKeys, mockProof, ProtocolConstants, readProtocolConstants, testConfig } from './helpers/rollupSetup';
+import { Rollup, RollupErrors } from '../wrappers/Rollup';
+import { forcedTransactionCell, merkleProofCell, sha256Int, withdrawalTree } from '../wrappers/rollupMath';
+import { FORCE_TRANSACTION_VALUE } from '../wrappers/rollupValues';
 
-// Аварийный выход на тестовом двойнике (contracts/rollup_mock.tolk): проверка пруфа
-// заменена заглушкой «первое число пруфа равно 1». Настоящий пруф выхода —
-// в tests/RollupZkvmProof.spec.ts.
-const GENESIS_ROOT = sha256Int(1n);
+// Аварийный режим на тестовом двойнике (contracts/rollup_mock.tolk), протокол v2: заморозка по
+// возрасту самого старого необработанного элемента очереди L1, возврат необработанных
+// депозитов. Выхода с баланса L2 по пруфу zkVM в v2 нет; выход счёта EVM по доказательству —
+// tests/RollupEvmExit.spec.ts.
 const CHAIN_ID = 4242n;
 const TIMEOUT = 3600;
 const DEPOSIT_FEE = toNano('0.01');
 const START = 1_800_000_000;
-const mockProof = (valid: boolean): Bn254Proof => ({
-    a: [valid ? 1n : 2n, 0n],
-    b: [
-        [0n, 0n],
-        [0n, 0n],
-    ],
-    c: [0n, 0n],
-});
 const NO_HINTS = beginCell().endCell();
 const L2_RECIPIENT = 0x1234567890abcdef1234567890abcdef12345678n;
 
-describe('Rollup: аварийный выход на тестовом двойнике', () => {
+describe('Rollup: аварийный режим на тестовом двойнике', () => {
     let code: Cell;
     let nullifierCode: Cell;
+    let constants: ProtocolConstants;
     let blockchain: Blockchain;
     let owner: SandboxContract<TreasuryContract>;
     let sequencer: SandboxContract<TreasuryContract>;
@@ -36,30 +29,47 @@ describe('Rollup: аварийный выход на тестовом двойн
     let stranger: SandboxContract<TreasuryContract>;
     let rollup: SandboxContract<Rollup>;
 
-    const submit = (newStateRoot: bigint, withdrawalsRoot = 0n) =>
+    /** Батч, обработавший очередь до элемента `upTo` (по умолчанию — до головы). */
+    const submit = async (newStateRoot: bigint, upTo?: number, withdrawals: { root: bigint; count: bigint } = { root: 0n, count: 0n }) =>
         rollup.sendSubmitBatch(sequencer.getSender(), {
-            proof: mockProof(true),
+            proof: mockProof(),
             hints: NO_HINTS,
-            roots: { newStateRoot, withdrawalsRoot },
+            roots: {
+                newStateRoot,
+                withdrawalsRoot: withdrawals.root,
+                withdrawalsCount: withdrawals.count,
+                queueProcessedUpTo: upTo === undefined ? (await rollup.getDepositQueue()).head.count : BigInt(upTo),
+                blockTimestamp: BigInt(blockchain.now!),
+            },
             value: toNano('0.2'),
         });
     const deposit = (from = user, value = toNano('1')) =>
         rollup.sendDeposit(from.getSender(), { l2Recipient: L2_RECIPIENT, value });
     const activate = () => rollup.sendActivateEscapeHatch(stranger.getSender(), toNano('0.05'));
-    const forceExit = (claim: ExitClaim, valid = true, value = toNano('0.3')) =>
-        rollup.sendForceExit(stranger.getSender(), { proof: mockProof(valid), hints: NO_HINTS, claim, value });
+    const cancel = (depositIndex: number, from = user) =>
+        rollup.sendCancelDeposit(from.getSender(), { depositIndex, value: toNano('0.05') });
+    const oldestPendingAt = async () => (await rollup.getEscapeState()).oldestPendingAt;
+    const notDue = async () =>
+        expect((await activate()).transactions).toHaveTransaction({
+            to: rollup.address,
+            success: false,
+            exitCode: RollupErrors.escapeNotDue,
+        });
+    const freezes = async () => {
+        expect((await activate()).transactions).toHaveTransaction({ to: rollup.address, success: true });
+        expect((await rollup.getEscapeState()).frozen).toBe(true);
+    };
     /** Депозит ждёт дольше срока — rollup замораживается. */
     const freeze = async () => {
         await deposit();
         blockchain.now = START + TIMEOUT + 1;
-        const result = await activate();
-        expect(result.transactions).toHaveTransaction({ to: rollup.address, success: true });
-        expect((await rollup.getEscapeState()).frozen).toBe(true);
+        await freezes();
     };
 
     beforeAll(async () => {
         code = await compile('RollupMock');
         nullifierCode = await compile('RollupNullifier');
+        constants = await readProtocolConstants(code, nullifierCode);
     });
 
     beforeEach(async () => {
@@ -71,14 +81,13 @@ describe('Rollup: аварийный выход на тестовом двойн
         stranger = await blockchain.treasury('stranger');
         rollup = blockchain.openContract(
             Rollup.createFromConfig(
-                {
+                testConfig(constants, {
                     owner: owner.address,
                     sequencer: sequencer.address,
                     nullifierCode,
-                    genesisStateRoot: GENESIS_ROOT,
                     chainId: CHAIN_ID,
                     escapeTimeout: TIMEOUT,
-                },
+                }),
                 code,
             ),
         );
@@ -87,75 +96,100 @@ describe('Rollup: аварийный выход на тестовом двойн
     });
 
     describe('заморозка', () => {
-        it('без необработанных депозитов заморозить нельзя, сколько бы ни прошло времени', async () => {
+        it('без необработанных элементов заморозить нельзя, сколько бы ни прошло времени', async () => {
             expect(await rollup.getEscapeState()).toEqual({ frozen: false, oldestPendingAt: 0, timeout: TIMEOUT });
             blockchain.now = START + 100 * TIMEOUT;
-            const result = await activate();
-            expect(result.transactions).toHaveTransaction({
-                to: rollup.address,
-                success: false,
-                exitCode: RollupErrors.escapeNotDue,
-            });
+            await notDue();
         });
 
-        it('срок считается от самого старого необработанного депозита', async () => {
+        it('срок считается от самого старого необработанного элемента', async () => {
             await deposit();
             blockchain.now = START + 100;
             await deposit(); // второй депозит срок не сдвигает
-            expect((await rollup.getEscapeState()).oldestPendingAt).toBe(START);
+            expect(await oldestPendingAt()).toBe(START);
 
             blockchain.now = START + TIMEOUT;
-            expect((await activate()).transactions).toHaveTransaction({
-                to: rollup.address,
-                success: false,
-                exitCode: RollupErrors.escapeNotDue,
-            });
+            await notDue();
             blockchain.now = START + TIMEOUT + 1;
-            expect((await activate()).transactions).toHaveTransaction({ to: rollup.address, success: true });
-            expect((await rollup.getEscapeState()).frozen).toBe(true);
+            await freezes();
         });
 
-        it('работающий секвенсор заморозку не вызывает: батчи обнуляют срок', async () => {
+        it('работающий секвенсор заморозку не вызывает: батч, обработавший очередь, обнуляет срок', async () => {
             await deposit();
-            // Батч 1 фиксирует депозит как цель, батч 2 его обрабатывает.
             blockchain.now = START + 10;
-            await submit(sha256Int(2n));
-            expect((await rollup.getEscapeState()).oldestPendingAt).toBe(START);
-            blockchain.now = START + 20;
-            await submit(sha256Int(3n));
-            expect((await rollup.getEscapeState()).oldestPendingAt).toBe(0);
+            await submit(sha256Int(2n)); // ближайший же батч обрабатывает депозит
+            expect(await oldestPendingAt()).toBe(0);
 
             blockchain.now = START + 100 * TIMEOUT;
-            expect((await activate()).transactions).toHaveTransaction({
-                to: rollup.address,
-                success: false,
-                exitCode: RollupErrors.escapeNotDue,
-            });
+            await notDue();
+        });
+
+        it('батч, не тронувший очередь, срок не сбрасывает', async () => {
+            // Секвенсор выпускает батчи, но очередь не обрабатывает: это и есть цензура.
+            await deposit();
+            blockchain.now = START + 10;
+            expect((await submit(sha256Int(2n), 0)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+            blockchain.now = START + 20;
+            expect((await submit(sha256Int(3n), 0)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+            expect((await rollup.getRollupState()).batchIndex).toBe(2);
+            expect(await oldestPendingAt()).toBe(START);
+            blockchain.now = START + TIMEOUT + 1;
+            await freezes();
+        });
+
+        it('после частичной обработки срок идёт от первого из оставшихся', async () => {
+            // Три элемента встали в разное время; батч обработал только первый. Самый старый
+            // необработанный теперь — второй: срок считается от его постановки, не раньше и не позже.
+            await deposit(); // 1 — START
+            blockchain.now = START + 100;
+            await rollup.sendForceTransaction(user.getSender(), {
+                l2Transaction: forcedTransactionCell(Buffer.alloc(40, 7)),
+                value: FORCE_TRANSACTION_VALUE,
+            }); // 2 — START + 100
+            blockchain.now = START + 200;
+            await deposit(); // 3 — START + 200
+            blockchain.now = START + 300;
+            await submit(sha256Int(2n), 1);
+            expect(await oldestPendingAt()).toBe(START + 100);
+
+            // От первого элемента срок уже вышел бы — но он обработан.
+            blockchain.now = START + TIMEOUT + 1;
+            await notDue();
+            blockchain.now = START + 100 + TIMEOUT;
+            await notDue();
+            blockchain.now = START + 100 + TIMEOUT + 1;
+            await freezes();
+        });
+
+        it('возраст самого старого необработанного элемента — на всех переходах очереди', async () => {
+            expect(await oldestPendingAt()).toBe(0); // очередь пуста
+            blockchain.now = START + 5;
+            await deposit(); // 1
+            expect(await oldestPendingAt()).toBe(START + 5);
+            blockchain.now = START + 6;
+            await deposit(); // 2
+            blockchain.now = START + 7;
+            await deposit(); // 3
+            expect(await oldestPendingAt()).toBe(START + 5);
+            await submit(sha256Int(2n), 2); // обработаны 1 и 2
+            expect(await oldestPendingAt()).toBe(START + 7);
+            await submit(sha256Int(3n), 2); // пустой отрезок: ничего не меняется
+            expect(await oldestPendingAt()).toBe(START + 7);
+            await submit(sha256Int(4n), 3); // очередь обработана целиком
+            expect(await oldestPendingAt()).toBe(0);
+            blockchain.now = START + 50;
+            await deposit(); // 4: срок начинается заново, с него
+            expect(await oldestPendingAt()).toBe(START + 50);
         });
 
         it('депозит после долгого простоя не даёт заморозить сразу', async () => {
             // Rollup месяц без активности — это не отказ секвенсора. Срок начинается с депозита.
             blockchain.now = START + 30 * 24 * 3600;
             await deposit();
-            expect((await activate()).transactions).toHaveTransaction({
-                to: rollup.address,
-                success: false,
-                exitCode: RollupErrors.escapeNotDue,
-            });
+            await notDue();
         });
 
-        it('если секвенсор взял депозит в цель и пропал, срок идёт от этого депозита', async () => {
-            await deposit();
-            blockchain.now = START + 10;
-            await submit(sha256Int(2n)); // депозит стал обязательным для батча 2, но батча 2 нет
-            blockchain.now = START + 20;
-            await deposit(); // ещё один, уже за целью
-            expect((await rollup.getEscapeState()).oldestPendingAt).toBe(START);
-            blockchain.now = START + TIMEOUT + 1;
-            expect((await activate()).transactions).toHaveTransaction({ to: rollup.address, success: true });
-        });
-
-        it('после заморозки батчи, данные и депозиты не принимаются; депозит возвращается', async () => {
+        it('после заморозки батчи, данные и депозиты не принимаются', async () => {
             await freeze();
             expect((await submit(sha256Int(2n))).transactions).toHaveTransaction({
                 to: rollup.address,
@@ -195,8 +229,7 @@ describe('Rollup: аварийный выход на тестовом двойн
     describe('возврат необработанных депозитов', () => {
         it('до заморозки депозит вернуть нельзя', async () => {
             await deposit();
-            const result = await rollup.sendCancelDeposit(user.getSender(), { depositIndex: 1, value: toNano('0.05') });
-            expect(result.transactions).toHaveTransaction({
+            expect((await cancel(1)).transactions).toHaveTransaction({
                 to: rollup.address,
                 success: false,
                 exitCode: RollupErrors.rollupNotFrozen,
@@ -210,14 +243,12 @@ describe('Rollup: аварийный выход на тестовом двойн
             expect(receipt?.depositor.equals(user.address)).toBe(true);
             expect(receipt?.amount).toBe(amount);
 
-            const refund = await rollup.sendCancelDeposit(stranger.getSender(), {
-                depositIndex: 1,
-                value: toNano('0.05'),
-            });
+            const refund = await cancel(1, stranger);
             expect(refund.transactions).toHaveTransaction({ from: rollup.address, to: user.address, value: amount });
             expect(await rollup.getDepositReceipt(1)).toBeNull();
+            expect(await rollup.getQueueItem(1)).toBeNull();
 
-            const again = await rollup.sendCancelDeposit(user.getSender(), { depositIndex: 1, value: toNano('0.05') });
+            const again = await cancel(1);
             expect(again.transactions).toHaveTransaction({
                 to: rollup.address,
                 success: false,
@@ -226,45 +257,67 @@ describe('Rollup: аварийный выход на тестовом двойн
             expect(again.transactions).not.toHaveTransaction({ from: rollup.address, to: user.address, value: amount });
         });
 
+        it('после частичной обработки возвращаются только депозиты за отметкой processed', async () => {
+            await deposit(); // 1
+            await deposit(stranger); // 2
+            await deposit(); // 3
+            blockchain.now = START + 10;
+            await submit(sha256Int(2n), 2); // обработаны 1 и 2; депозит 3 ждёт
+            blockchain.now = START + TIMEOUT + 1;
+            await freezes();
+
+            // Обработанные уже зачислены на L2: и первый, и тот, что стоит ровно на отметке.
+            for (const index of [1, 2]) {
+                expect((await cancel(index)).transactions).toHaveTransaction({
+                    to: rollup.address,
+                    success: false,
+                    exitCode: RollupErrors.depositAlreadyProcessed,
+                });
+                expect(await rollup.getDepositReceipt(index)).not.toBeNull();
+            }
+            const pending = await cancel(3, stranger);
+            expect(pending.transactions).toHaveTransaction({
+                from: rollup.address,
+                to: user.address,
+                value: toNano('1') - DEPOSIT_FEE,
+            });
+            // Номера, которого в очереди не было, тоже не вернуть.
+            expect((await cancel(4)).transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: RollupErrors.noSuchDeposit,
+            });
+        });
+
         it('обработанный депозит вернуть нельзя: он уже на L2', async () => {
             await deposit(); // депозит 1
             blockchain.now = START + 10;
-            await submit(sha256Int(2n));
-            blockchain.now = START + 20;
-            await submit(sha256Int(3n)); // депозит 1 обработан
+            await submit(sha256Int(2n)); // депозит 1 обработан
             blockchain.now = START + 30;
             await deposit(stranger); // депозит 2 — так и не обработан
             blockchain.now = START + 30 + TIMEOUT + 1;
-            await activate();
+            await freezes();
 
-            const processed = await rollup.sendCancelDeposit(user.getSender(), {
-                depositIndex: 1,
-                value: toNano('0.05'),
-            });
-            expect(processed.transactions).toHaveTransaction({
+            expect((await cancel(1)).transactions).toHaveTransaction({
                 to: rollup.address,
                 success: false,
                 exitCode: RollupErrors.depositAlreadyProcessed,
             });
-            const pending = await rollup.sendCancelDeposit(user.getSender(), {
-                depositIndex: 2,
-                value: toNano('0.05'),
-            });
-            expect(pending.transactions).toHaveTransaction({
+            expect((await cancel(2)).transactions).toHaveTransaction({
                 from: rollup.address,
                 to: stranger.address,
                 value: toNano('1') - DEPOSIT_FEE,
             });
         });
 
-        it('квитанции обработанных депозитов убираются, необработанных — нет', async () => {
+        it('уборка после заморозки не мешает возврату: записи необработанных депозитов остаются', async () => {
             await deposit();
             await deposit();
             blockchain.now = START + 10;
-            await submit(sha256Int(2n));
-            blockchain.now = START + 20;
-            await submit(sha256Int(3n)); // депозиты 1 и 2 обработаны
+            await submit(sha256Int(2n)); // депозиты 1 и 2 обработаны
             await deposit(); // депозит 3 ждёт
+            blockchain.now = START + 10 + TIMEOUT + 1;
+            await freezes();
             const prune = await rollup.sendPruneDepositReceipts(stranger.getSender(), {
                 count: 10,
                 value: toNano('0.05'),
@@ -273,91 +326,16 @@ describe('Rollup: аварийный выход на тестовом двойн
             expect(await rollup.getDepositReceipt(1)).toBeNull();
             expect(await rollup.getDepositReceipt(2)).toBeNull();
             expect(await rollup.getDepositReceipt(3)).not.toBeNull();
+            expect((await cancel(3)).transactions).toHaveTransaction({
+                from: rollup.address,
+                to: user.address,
+                value: toNano('1') - DEPOSIT_FEE,
+            });
         });
     });
 
-    describe('выход с баланса L2', () => {
-        const recipient = new Address(0, Buffer.alloc(32, 0xe1));
-        const claim: ExitClaim = { l2Account: L2_RECIPIENT, amount: toNano('0.4'), recipient };
-
-        it('до заморозки выйти нельзя', async () => {
-            await deposit();
-            expect((await forceExit(claim)).transactions).toHaveTransaction({
-                to: rollup.address,
-                success: false,
-                exitCode: RollupErrors.rollupNotFrozen,
-            });
-        });
-
-        it('выплачивает баланс получателю из заявки и только один раз на счёт', async () => {
-            await freeze();
-            const first = await forceExit(claim);
-            expect(first.transactions).toHaveTransaction({ from: rollup.address, to: recipient, value: claim.amount });
-            expect((await blockchain.getContract(recipient)).balance).toBe(claim.amount);
-
-            // Повтор — даже с другой суммой и другим получателем: счёт уже вышел.
-            const other = new Address(0, Buffer.alloc(32, 0xe2));
-            const again = await forceExit({ ...claim, amount: toNano('0.1'), recipient: other });
-            expect(again.transactions).toHaveTransaction({
-                to: await rollup.getExitNullifierAddress(claim.l2Account),
-                success: false,
-                exitCode: NullifierErrors.alreadyClaimed,
-            });
-            expect(again.transactions).not.toHaveTransaction({ from: rollup.address, to: other });
-            expect((await blockchain.getContract(recipient)).balance).toBe(claim.amount);
-        });
-
-        it('получатель аварийного выхода — только в basechain', async () => {
-            // Пруф привязан к хешу адреса; адрес masterchain с тем же хешем дал бы тот же
-            // публичный вход, а выплата ушла бы по другому адресу.
-            await freeze();
-            const masterchain = new Address(-1, claim.recipient.hash);
-            expect(await rollup.getExpectedExitInput({ ...claim, recipient: masterchain })).toBe(
-                await rollup.getExpectedExitInput(claim),
-            );
-            expect((await forceExit({ ...claim, recipient: masterchain })).transactions).toHaveTransaction({
-                to: rollup.address,
-                success: false,
-                exitCode: RollupErrors.wrongRecipient,
-            });
-            expect((await blockchain.getContract(masterchain)).balance).toBe(0n);
-            const nullifier = await rollup.getExitNullifierAddress(claim.l2Account);
-            expect((await blockchain.getContract(nullifier)).accountState?.type ?? 'uninit').toBe('uninit');
-        });
-
-        it('неверный пруф, нулевая сумма и нехватка монет отклоняются', async () => {
-            await freeze();
-            expect((await forceExit(claim, false)).transactions).toHaveTransaction({
-                to: rollup.address,
-                success: false,
-                exitCode: RollupErrors.wrongProof,
-            });
-            expect((await forceExit({ ...claim, amount: 0n })).transactions).toHaveTransaction({
-                to: rollup.address,
-                success: false,
-                exitCode: RollupErrors.nothingToExit,
-            });
-            const { forceExit: minimum } = await rollup.getMinimumValues();
-            expect((await forceExit(claim, true, minimum - 1n)).transactions).toHaveTransaction({
-                to: rollup.address,
-                success: false,
-                exitCode: RollupErrors.notEnoughValue,
-            });
-            expect((await blockchain.getContract(recipient)).balance).toBe(0n);
-        });
-
-        it('публичный вход выхода привязан к счёту, сумме, получателю и состоянию', async () => {
-            const base = await rollup.getExpectedExitInput(claim);
-            expect(await rollup.getExpectedExitInput({ ...claim, amount: claim.amount + 1n })).not.toBe(base);
-            expect(await rollup.getExpectedExitInput({ ...claim, l2Account: claim.l2Account + 1n })).not.toBe(base);
-            expect(
-                await rollup.getExpectedExitInput({ ...claim, recipient: new Address(0, Buffer.alloc(32, 0xe2)) }),
-            ).not.toBe(base);
-            await submit(sha256Int(2n));
-            expect(await rollup.getExpectedExitInput(claim)).not.toBe(base);
-        });
-
-        it('обычный вывод по принятому батчу работает и после заморозки, выход ему не мешает', async () => {
+    describe('выводы после заморозки', () => {
+        it('обычный вывод по принятому батчу работает и после заморозки', async () => {
             const leaf = {
                 leafIndex: 0,
                 recipientHash: BigInt('0x' + Buffer.alloc(32, 0xa1).toString('hex')),
@@ -366,12 +344,10 @@ describe('Rollup: аварийный выход на тестовом двойн
             const tree = withdrawalTree([leaf]);
             await deposit();
             blockchain.now = START + 10;
-            await submit(sha256Int(2n), tree.root);
-            blockchain.now = START + 10 + TIMEOUT + 1;
-            await activate();
+            await submit(sha256Int(2n), 0, { root: tree.root, count: 1n });
+            blockchain.now = START + TIMEOUT + 1;
+            await freezes();
 
-            // Номер листа 0 и счёт L2 гасятся разными нуллификаторами.
-            await forceExit(claim);
             const withdrawRecipient = new Address(0, Buffer.alloc(32, 0xa1));
             const withdraw = await rollup.sendWithdraw(user.getSender(), {
                 leafIndex: 0,

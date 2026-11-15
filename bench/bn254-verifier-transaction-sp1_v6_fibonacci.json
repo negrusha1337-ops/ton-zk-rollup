@@ -1,11 +1,11 @@
 {
   "source": "Измерено в @ton/sandbox тестом tests/Bn254Verifier.spec.ts; не редактировать вручную",
   "note": "Полная транзакция: internal-сообщение с пруфом (sp1_v6_fibonacci) и подсказками, проверка и запись состояния",
-  "gasUsed": 943702,
+  "gasUsed": 943242,
   "gasLimit": 1000000,
   "messageCells": 222,
   "messageBits": 222604,
-  "codeCells": 160,
+  "codeCells": 161,
   "keyCells": 3909,
   "uploadGasTotal": 150417,
   "parts": 23,

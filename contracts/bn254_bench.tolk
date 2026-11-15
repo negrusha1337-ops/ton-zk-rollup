@@ -6,7 +6,8 @@ import "bn254/fp6"
 import "bn254/fp12"
 import "bn254/pairing"
 import "bn254/groth16"
-import "bn254/hinted"
+// Копия проверки с отметками газа по стадиям: рабочий hinted.tolk их не содержит.
+import "bn254/hinted_profiled"
 
 contract Bn254Bench {
   description: "Stage 0+: software BN254 pairing in TVM, test bench"

@@ -1,3 +1,9 @@
+// @ts-nocheck
+// СКРИПТ ПРОТОКОЛА v1, см. тег protocol-v1. С контрактом протокола v2 несовместим: приём батча EVM по пруфу fixtures/sp1_evm_batch2 с дайджестом из восьми слов.
+// Не удалён и не подогнан: отказывается стартовать (assertProtocolV1Script в начале run) и не
+// типизируется, пока пруфы в fixtures/ не перестроены под v2 (wrappers/protocolVersion.ts).
+// Перенос на v2 — вместе с шагом программы и пруфов (PROTOCOL-V2.md, раздел 11).
+import { assertProtocolV1Script } from '../wrappers/protocolVersion';
 import { Cell, fromNano, toNano } from '@ton/core';
 import { compile, NetworkProvider, sleep } from '@ton/blueprint';
 import { Bn254Groth16Verifier } from '../wrappers/Bn254Groth16Verifier';
@@ -51,6 +57,7 @@ async function waitFor(description: string, check: () => Promise<boolean>) {
 }
 
 export async function run(provider: NetworkProvider) {
+    assertProtocolV1Script('runEvmBatchTestnet');
     const ui = provider.ui();
     assertTestnetWithMnemonic(provider);
     const sender = provider.sender();

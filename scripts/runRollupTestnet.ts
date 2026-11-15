@@ -1,3 +1,9 @@
+// @ts-nocheck
+// СКРИПТ ПРОТОКОЛА v1, см. тег protocol-v1. С контрактом протокола v2 несовместим: прогон игрушечного реестра: пруфы fixtures/sp1_rollup_*, выход по пруфу (ForceExit) и ключ выхода (SetExitKey), которых в протоколе v2 нет.
+// Не удалён и не подогнан: отказывается стартовать (assertProtocolV1Script в начале run) и не
+// типизируется, пока пруфы в fixtures/ не перестроены под v2 (wrappers/protocolVersion.ts).
+// Перенос на v2 — вместе с шагом программы и пруфов (PROTOCOL-V2.md, раздел 11).
+import { assertProtocolV1Script } from '../wrappers/protocolVersion';
 import { Address, Cell, fromNano, toNano } from '@ton/core';
 import { compile, NetworkProvider, sleep } from '@ton/blueprint';
 import { Bn254Groth16Verifier } from '../wrappers/Bn254Groth16Verifier';
@@ -99,6 +105,7 @@ async function waitFor(description: string, check: () => Promise<boolean>) {
 }
 
 export async function run(provider: NetworkProvider, args: string[]) {
+    assertProtocolV1Script('runRollupTestnet');
     const ui = provider.ui();
     assertTestnetWithMnemonic(provider);
     const escapeOnly = args.includes('escape');

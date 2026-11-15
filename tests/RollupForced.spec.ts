@@ -1,58 +1,83 @@
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
-import { beginCell, Cell, toNano } from '@ton/core';
+import { beginCell, Cell, Dictionary, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
-import { finalizeDummyKeys } from './helpers/rollupSetup';
-import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
+import { finalizeDummyKeys, mockProof, ProtocolConstants, readProtocolConstants, testConfig } from './helpers/rollupSetup';
 import { Rollup, RollupErrors } from '../wrappers/Rollup';
-import { depositHash, forcedTransactionCell, forcedTransactionHash, sha256Int } from '../wrappers/rollupMath';
+import {
+    byteSnake,
+    depositHash,
+    forcedTransactionCell,
+    forcedTransactionHash,
+    forcedTransactionKeccak,
+    MAX_FORCED_TX_CELLS,
+    sha256Int,
+} from '../wrappers/rollupMath';
 import { FORCE_TRANSACTION_VALUE } from '../wrappers/rollupValues';
 import { computePhaseOf } from './helpers/gas';
 
-// Принудительные транзакции L2 на тестовом двойнике (contracts/rollup_mock.tolk):
-// постановка в очередь L1, форма ячейки, плата и связь с аварийным выходом. Исполнение
-// самой транзакции — дело программы zkVM (zkvm/lib, тесты на Rust) и сквозных тестов с
-// настоящими пруфами (tests/RollupZkvmProof.spec.ts).
-const GENESIS_ROOT = sha256Int(1n);
+// Принудительные транзакции L2 на тестовом двойнике (contracts/rollup_mock.tolk), протокол v2:
+// байты подписанной транзакции EVM приходят «змейкой» ячеек, в очередь L1 идёт keccak-256 этих
+// байтов. Контракт проверяет только форму «змейки»; что транзакция — корректный вывод через
+// мост, решает программа zkVM (негодную она пропустит).
 const CHAIN_ID = 4242n;
 const TIMEOUT = 3600;
 const START = 1_800_000_000;
 const DEPOSIT_FEE = toNano('0.01');
 const L2_RECIPIENT = 0x1234567890abcdef1234567890abcdef12345678n;
-const mockProof: Bn254Proof = {
-    a: [1n, 0n],
-    b: [
-        [0n, 0n],
-        [0n, 0n],
-    ],
-    c: [0n, 0n],
-};
 const NO_HINTS = beginCell().endCell();
-/** Байты «транзакции»: контракт их не разбирает, важна только форма ячейки. */
-const transactionBytes = (fill: number, length = 110) => Buffer.alloc(length, fill);
+/** Байты «транзакции»: контракт их не разбирает. Все байты разные, чтобы порядок был виден в хеше. */
+const transactionBytes = (seed: number, length = 110) =>
+    Buffer.from(Array.from({ length }, (_, index) => (index * 31 + seed) & 255));
 
 describe('Rollup: принудительные транзакции L2 на тестовом двойнике', () => {
     let code: Cell;
     let nullifierCode: Cell;
+    let constants: ProtocolConstants;
     let blockchain: Blockchain;
     let owner: SandboxContract<TreasuryContract>;
     let sequencer: SandboxContract<TreasuryContract>;
     let user: SandboxContract<TreasuryContract>;
     let rollup: SandboxContract<Rollup>;
 
-    const force = (l2Transaction: Cell, value = FORCE_TRANSACTION_VALUE) =>
+    const forceCell = (l2Transaction: Cell, value = FORCE_TRANSACTION_VALUE) =>
         rollup.sendForceTransaction(user.getSender(), { l2Transaction, value });
-    const submit = (newStateRoot: bigint) =>
+    const force = (bytes: Buffer, pieces?: number[]) => forceCell(forcedTransactionCell(bytes, pieces));
+    const submit = (newStateRoot: bigint, queueProcessedUpTo: number) =>
         rollup.sendSubmitBatch(sequencer.getSender(), {
-            proof: mockProof,
+            proof: mockProof(),
             hints: NO_HINTS,
-            roots: { newStateRoot, withdrawalsRoot: 0n },
+            roots: {
+                newStateRoot,
+                withdrawalsRoot: 0n,
+                withdrawalsCount: 0n,
+                queueProcessedUpTo: BigInt(queueProcessedUpTo),
+                blockTimestamp: BigInt(blockchain.now!),
+            },
             value: toNano('0.2'),
         });
+    const malformed = async (cell: Cell) => {
+        const before = await rollup.getDepositQueue();
+        expect((await forceCell(cell)).transactions).toHaveTransaction({
+            to: rollup.address,
+            success: false,
+            exitCode: RollupErrors.malformedForcedTransaction,
+        });
+        expect(await rollup.getDepositQueue()).toEqual(before);
+    };
+    const queuedHash = async () => (await rollup.getDepositQueue()).head.hash;
+    /** Регистрирует ячейку как библиотеку и возвращает ссылку на неё (экзотическую ячейку). */
+    const libraryReferenceTo = (content: Cell) => {
+        const libraries = Dictionary.empty(Dictionary.Keys.BigUint(256), Dictionary.Values.Cell());
+        libraries.set(BigInt('0x' + content.hash().toString('hex')), content);
+        blockchain.libs = beginCell().storeDictDirect(libraries).endCell();
+        return beginCell().storeUint(2, 8).storeBuffer(content.hash()).endCell({ exotic: true });
+    };
 
     beforeAll(async () => {
         code = await compile('RollupMock');
         nullifierCode = await compile('RollupNullifier');
+        constants = await readProtocolConstants(code, nullifierCode);
     });
 
     beforeEach(async () => {
@@ -63,14 +88,13 @@ describe('Rollup: принудительные транзакции L2 на те
         user = await blockchain.treasury('user');
         rollup = blockchain.openContract(
             Rollup.createFromConfig(
-                {
+                testConfig(constants, {
                     owner: owner.address,
                     sequencer: sequencer.address,
                     nullifierCode,
-                    genesisStateRoot: GENESIS_ROOT,
                     chainId: CHAIN_ID,
                     escapeTimeout: TIMEOUT,
-                },
+                }),
                 code,
             ),
         );
@@ -79,8 +103,8 @@ describe('Rollup: принудительные транзакции L2 на те
     });
 
     it('ставит транзакцию в общую очередь с депозитами, в порядке прихода', async () => {
-        const first = forcedTransactionCell(transactionBytes(0xa1));
-        const second = forcedTransactionCell(transactionBytes(0xa2, 122));
+        const first = transactionBytes(0xa1);
+        const second = transactionBytes(0xa2, 300);
         const result = await force(first);
         expect(result.transactions).toHaveTransaction({ from: user.address, to: rollup.address, success: true });
         await rollup.sendDeposit(user.getSender(), { l2Recipient: L2_RECIPIENT, value: toNano('1') });
@@ -91,78 +115,178 @@ describe('Rollup: принудительные транзакции L2 на те
         const queue = await rollup.getDepositQueue();
         expect(queue.head).toEqual({ count: 3n, hash: forcedTransactionHash(afterDeposit, second) });
         // Порядок — часть обязательства: те же элементы в другом порядке дают другой хеш.
-        expect(queue.head.hash).not.toBe(forcedTransactionHash(depositHash(afterFirst, L2_RECIPIENT, 1n), second));
-        // Квитанция есть только у депозита: принудительной транзакции возвращать нечего.
+        expect(queue.head.hash).not.toBe(forcedTransactionHash(depositHash(forcedTransactionHash(0n, second), L2_RECIPIENT, toNano('1') - DEPOSIT_FEE), first));
+        // Квитанция есть только у депозита: принудительной транзакции возвращать нечего. Запись
+        // словаря есть у всех: по ней считаются хеш в точке N и срок заморозки.
         expect(await rollup.getDepositReceipt(1)).toBeNull();
         expect(await rollup.getDepositReceipt(2)).not.toBeNull();
         expect(await rollup.getDepositReceipt(3)).toBeNull();
+        expect(await rollup.getQueueItem(1)).toEqual({ hashBefore: 0n, queuedAt: START });
+        expect(await rollup.getQueueItem(3)).toEqual({ hashBefore: afterDeposit, queuedAt: START });
     });
 
-    it('принудительную транзакцию нельзя спутать с депозитом', async () => {
+    it('элемент очереди — keccak-256 байтов транзакции под меткой: спутать с депозитом нельзя', async () => {
         // Депозит с тем же «содержимым» дал бы другой хеш очереди: у транзакции на месте
         // получателя стоит метка, которой не может быть у 160-битного адреса.
-        const cell = forcedTransactionCell(transactionBytes(0xa1));
-        await force(cell);
-        const asForced = (await rollup.getDepositQueue()).head.hash;
-        const cellHash = BigInt('0x' + cell.hash().toString('hex'));
-        expect(asForced).not.toBe(depositHash(0n, L2_RECIPIENT, cellHash));
-        expect(asForced).toBe(forcedTransactionHash(0n, cell));
+        const bytes = transactionBytes(0xa1);
+        await force(bytes);
+        const asForced = await queuedHash();
+        expect(asForced).toBe(sha256Int(0n, 1n << 255n, forcedTransactionKeccak(bytes)));
+        expect(asForced).not.toBe(depositHash(0n, L2_RECIPIENT, forcedTransactionKeccak(bytes)));
+        // И это хеш байтов, а не хеш ячейки, в которой они пришли.
+        const cellHash = BigInt('0x' + forcedTransactionCell(bytes).hash().toString('hex'));
+        expect(asForced).not.toBe(sha256Int(0n, 1n << 255n, cellHash));
     });
 
-    it('секвенсор обязан обработать её наравне с депозитом', async () => {
-        const cell = forcedTransactionCell(transactionBytes(0xa1));
-        await force(cell);
-        const queued = forcedTransactionHash(0n, cell);
-        await submit(sha256Int(2n)); // батч 1: транзакция становится целью
-        expect((await rollup.getDepositQueue()).target).toEqual({ count: 1n, hash: queued });
-        await submit(sha256Int(3n)); // батч 2: обязан включить её хеш в публичный вход
-        expect((await rollup.getDepositQueue()).processed).toEqual({ count: 1n, hash: queued });
+    it('хеш в очереди не зависит от нарезки байтов на ячейки', async () => {
+        const bytes = transactionBytes(0x33, 300);
+        const expected = forcedTransactionHash(0n, bytes);
+        const slicings: (number[] | undefined)[] = [
+            undefined, // по 127 байт
+            [100, 100, 100],
+            [1, 127, 127, 45],
+            [0, 127, 0, 127, 46, 0], // пустые ячейки в начале, середине и конце допустимы
+            new Array(60).fill(5),
+        ];
+        const cells = new Set<string>();
+        for (const pieces of slicings) {
+            const snapshot = blockchain.snapshot();
+            cells.add(forcedTransactionCell(bytes, pieces).hash().toString('hex'));
+            expect((await force(bytes, pieces)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+            expect(await queuedHash()).toBe(expected);
+            await blockchain.loadFrom(snapshot);
+        }
+        // Ячейки при этом все разные: одинаковый хеш очереди — не совпадение деревьев.
+        expect(cells.size).toBe(slicings.length);
+        // Другие байты той же длины — другой хеш.
+        const other = Buffer.from(bytes);
+        other[299] ^= 1;
+        await force(other);
+        expect(await queuedHash()).not.toBe(expected);
     });
 
-    it('принимает только одну ячейку без ссылок с целым числом байт', async () => {
-        const withRef = beginCell().storeBuffer(transactionBytes(1, 10)).storeRef(beginCell().endCell()).endCell();
-        const notByteAligned = beginCell().storeUint(1, 7).endCell();
-        const tooLong = beginCell().storeBuffer(transactionBytes(1, 127)).storeUint(0, 7).endCell();
-        for (const malformed of [withRef, notByteAligned, tooLong]) {
-            expect((await force(malformed)).transactions).toHaveTransaction({
-                to: rollup.address,
-                success: false,
-                exitCode: RollupErrors.malformedForcedTransaction,
-            });
-        }
-        expect((await rollup.getDepositQueue()).head.count).toBe(0n);
+    it('«змейка» из одной, из 64 и из 65 ячеек: предел — у контракта', async () => {
+        const limit = constants.maxForcedTxCells;
+        expect(limit).toBe(MAX_FORCED_TX_CELLS);
+        // 65 ячеек — отказ, даже если байтов мало (по одному на ячейку).
+        await malformed(byteSnake(transactionBytes(1, limit + 1), new Array(limit + 1).fill(1)));
+        await malformed(byteSnake(transactionBytes(1, (limit + 1) * 127)));
 
-        // Предельный размер и пустая ячейка формально допустимы: программа их просто пропустит.
-        for (const allowed of [forcedTransactionCell(transactionBytes(1, 127)), beginCell().endCell()]) {
-            expect((await force(allowed)).transactions).toHaveTransaction({ to: rollup.address, success: true });
-        }
-        expect((await rollup.getDepositQueue()).head.count).toBe(2n);
+        const one = transactionBytes(2, 127);
+        expect((await force(one)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+        expect(await queuedHash()).toBe(forcedTransactionHash(0n, one));
+        // Ровно предел: 64 ячейки по 127 байт — 8 128 байт.
+        const longest = transactionBytes(3, limit * 127);
+        expect((await force(longest)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+        expect(await queuedHash()).toBe(forcedTransactionHash(forcedTransactionHash(0n, one), longest));
+        // И 64 ячейки по одному байту.
+        const sparse = transactionBytes(4, limit);
+        expect((await force(sparse, new Array(limit).fill(1))).transactions).toHaveTransaction({
+            to: rollup.address,
+            success: true,
+        });
+        expect((await rollup.getDepositQueue()).head.count).toBe(3n);
+    });
+
+    it('пустая транзакция формально допустима: программа её просто пропустит', async () => {
+        expect((await forceCell(beginCell().endCell())).transactions).toHaveTransaction({ to: rollup.address, success: true });
+        expect(await queuedHash()).toBe(forcedTransactionHash(0n, Buffer.alloc(0)));
+    });
+
+    it('нецелое число байт — отказ, в первой ячейке и в любой следующей', async () => {
+        await malformed(beginCell().storeUint(1, 7).endCell());
+        await malformed(beginCell().storeBuffer(transactionBytes(1, 127)).storeUint(0, 7).endCell());
+        await malformed(beginCell().storeBuffer(transactionBytes(1, 10)).storeBit(1).endCell());
+        const tail = beginCell().storeBuffer(transactionBytes(2, 10)).storeUint(1, 4).endCell();
+        await malformed(beginCell().storeBuffer(transactionBytes(1, 10)).storeRef(tail).endCell());
+        const deepTail = beginCell().storeBuffer(transactionBytes(1, 10)).storeRef(
+            beginCell().storeBuffer(transactionBytes(2, 10)).storeRef(tail).endCell(),
+        );
+        await malformed(deepTail.endCell());
+    });
+
+    it('две ссылки у ячейки — отказ: продолжение было бы неоднозначным', async () => {
+        const leaf = () => beginCell().storeBuffer(transactionBytes(9, 5)).endCell();
+        await malformed(beginCell().storeBuffer(transactionBytes(1, 10)).storeRef(leaf()).storeRef(leaf()).endCell());
+        await malformed(beginCell().storeRef(leaf()).storeRef(leaf()).storeRef(leaf()).storeRef(leaf()).endCell());
+        const forked = beginCell().storeBuffer(transactionBytes(2, 10)).storeRef(leaf()).storeRef(leaf()).endCell();
+        await malformed(beginCell().storeBuffer(transactionBytes(1, 10)).storeRef(forked).endCell());
+        // Та же цепочка без лишней ссылки принимается.
+        const chain = beginCell().storeBuffer(transactionBytes(1, 10)).storeRef(
+            beginCell().storeBuffer(transactionBytes(2, 10)).storeRef(leaf()).endCell(),
+        );
+        expect((await forceCell(chain.endCell())).transactions).toHaveTransaction({ to: rollup.address, success: true });
+    });
+
+    it('экзотическая ячейка — отказ: байты обязаны лежать в самом сообщении', async () => {
+        // Ссылка на библиотеку: обычное чтение (CTOS) молча подставило бы содержимое библиотеки.
+        // Проверка формы прошла бы, а байты пришли бы не из сообщения L1 — секвенсор, собирающий
+        // свидетель по сообщениям, их не достал бы. Библиотека зарегистрирована: с обычным
+        // чтением транзакция была бы ПРИНЯТА, отказ даёт именно проверка на экзотику.
+        const content = forcedTransactionCell(transactionBytes(0xa1));
+        const reference = libraryReferenceTo(content);
+        expect(reference.isExotic).toBe(true);
+        await malformed(reference);
+        // То же в середине и в хвосте «змейки».
+        await malformed(beginCell().storeBuffer(transactionBytes(1, 10)).storeRef(reference).endCell());
+        await malformed(
+            beginCell()
+                .storeBuffer(transactionBytes(1, 10))
+                .storeRef(beginCell().storeBuffer(transactionBytes(2, 10)).storeRef(reference).endCell())
+                .endCell(),
+        );
+        // Сама библиотека как обычная ячейка — годится.
+        expect((await forceCell(content)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+    });
+
+    it('секвенсор обрабатывает её наравне с депозитом — ближайшим батчем', async () => {
+        const bytes = transactionBytes(0xa1);
+        await force(bytes);
+        const queued = forcedTransactionHash(0n, bytes);
+        await submit(sha256Int(2n), 1);
+        const queue = await rollup.getDepositQueue();
+        expect(queue.processed).toEqual({ count: 1n, hash: queued });
+        expect((await rollup.getEscapeState()).oldestPendingAt).toBe(0);
     });
 
     it('берёт плату и не принимает транзакцию без неё', async () => {
-        const cheap = await force(forcedTransactionCell(transactionBytes(1)), toNano('0.04'));
+        const { forceTransactionFee } = await rollup.getQueueFees();
+        expect(forceTransactionFee).toBe(toNano('0.05'));
+        const cheap = await forceCell(forcedTransactionCell(transactionBytes(1)), forceTransactionFee - 1n);
         expect(cheap.transactions).toHaveTransaction({
             to: rollup.address,
             success: false,
             exitCode: RollupErrors.notEnoughValue,
         });
         expect((await rollup.getDepositQueue()).head.count).toBe(0n);
+        expect((await forceCell(forcedTransactionCell(transactionBytes(1)), forceTransactionFee)).transactions).toHaveTransaction({
+            to: rollup.address,
+            success: true,
+        });
     });
 
-    it('газ постановки в очередь невелик', async () => {
-        const result = await force(forcedTransactionCell(transactionBytes(1, 122)));
-        const gasUsed = Number(computePhaseOf(result.transactions, rollup.address).gasUsed);
-        expect(gasUsed).toBeLessThan(10_000);
+    it('газ постановки в очередь укладывается в запас шага — на одной ячейке и на 64', async () => {
+        // Запас — у контракта (get-метод queueBudgets): из него считается плата при дорогом газе.
+        // Замер на словаре очереди, заполненном до предела, — tests/RollupQueue.spec.ts.
+        const { forceTransactionStepGas } = await rollup.getQueueBudgets();
+        for (const length of [122, constants.maxForcedTxCells * 127]) {
+            const result = await force(transactionBytes(1, length));
+            expect(result.transactions).toHaveTransaction({ to: rollup.address, success: true });
+            const gasUsed = Number(computePhaseOf(result.transactions, rollup.address).gasUsed);
+            expect(gasUsed).toBeLessThanOrEqual(forceTransactionStepGas);
+        }
     });
 
     it('цензура ведёт к заморозке: необработанная транзакция запускает срок', async () => {
         // Секвенсор жив и выпускает батчи, но транзакцию пользователя не берёт. Пользователь
         // ставит её в очередь сам — и дальше секвенсор либо обработает очередь, либо rollup
         // заморозят.
-        await force(forcedTransactionCell(transactionBytes(0xa1)));
+        await force(transactionBytes(0xa1));
         expect((await rollup.getEscapeState()).oldestPendingAt).toBe(START);
         blockchain.now = START + 10;
-        await submit(sha256Int(2n)); // батч 1 фиксирует транзакцию как цель и на этом секвенсор встаёт
+        await submit(sha256Int(2n), 0); // батч принят, но очередь он не тронул
+        expect((await rollup.getRollupState()).batchIndex).toBe(1);
+        expect((await rollup.getEscapeState()).oldestPendingAt).toBe(START);
 
         blockchain.now = START + TIMEOUT;
         expect((await rollup.sendActivateEscapeHatch(user.getSender(), toNano('0.05'))).transactions).toHaveTransaction(
@@ -176,20 +300,24 @@ describe('Rollup: принудительные транзакции L2 на те
     });
 
     it('после заморозки в очередь ничего не ставится, а «возврата» у транзакции нет', async () => {
-        await force(forcedTransactionCell(transactionBytes(0xa1)));
+        await force(transactionBytes(0xa1));
         blockchain.now = START + TIMEOUT + 1;
         await rollup.sendActivateEscapeHatch(user.getSender(), toNano('0.05'));
 
-        expect((await force(forcedTransactionCell(transactionBytes(0xa2)))).transactions).toHaveTransaction({
+        expect((await force(transactionBytes(0xa2))).transactions).toHaveTransaction({
             to: rollup.address,
             success: false,
             exitCode: RollupErrors.rollupFrozen,
         });
+        // Запись в словаре у транзакции есть, квитанции нет: возвращать нечего, и отказ записи
+        // не удаляет.
         const refund = await rollup.sendCancelDeposit(user.getSender(), { depositIndex: 1, value: toNano('0.05') });
         expect(refund.transactions).toHaveTransaction({
             to: rollup.address,
             success: false,
             exitCode: RollupErrors.noSuchDeposit,
         });
+        expect(refund.transactions).not.toHaveTransaction({ from: rollup.address, to: user.address, inMessageBounced: false });
+        expect(await rollup.getQueueItem(1)).not.toBeNull();
     });
 });

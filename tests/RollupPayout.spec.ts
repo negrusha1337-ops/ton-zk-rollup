@@ -2,20 +2,12 @@ import { Blockchain, internal as internalFrom, SandboxContract, TreasuryContract
 import { Address, beginCell, Cell, contractAddress, internal, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
-import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
-import {
-    ExitClaim,
-    exitNullifierKey,
-    NullifierErrors,
-    Rollup,
-    RollupErrors,
-    RollupOpcodes,
-} from '../wrappers/Rollup';
+import { NullifierErrors, Rollup, RollupErrors, RollupOpcodes } from '../wrappers/Rollup';
 import { merkleProofCell, sha256Int, withdrawalTree } from '../wrappers/rollupMath';
 import { RollupNullifier } from '../wrappers/RollupNullifier';
 import { saveGasReport } from './helpers/benchResults';
 import { cellStats, computePhaseOf } from './helpers/gas';
-import { finalizeDummyKeys } from './helpers/rollupSetup';
+import { finalizeDummyKeys, mockProof, ProtocolConstants, readProtocolConstants, testConfig } from './helpers/rollupSetup';
 
 // Выплата после нуллификатора: находки второго круга проверки (REVIEW.md).
 //
@@ -32,19 +24,10 @@ import { finalizeDummyKeys } from './helpers/rollupSetup';
 const CLAIM_MESSAGE_BITS = 8192;
 const CLAIM_MESSAGE_CELLS = 16;
 
-const GENESIS_ROOT = sha256Int(1n);
 const CHAIN_ID = 4242n;
 const TIMEOUT = 3600;
 const START = 1_800_000_000;
 const L2_RECIPIENT = 0x1234567890abcdef1234567890abcdef12345678n;
-const mockProof: Bn254Proof = {
-    a: [1n, 0n],
-    b: [
-        [0n, 0n],
-        [0n, 0n],
-    ],
-    c: [0n, 0n],
-};
 const NO_HINTS = beginCell().endCell();
 const recipientOf = (byte: number) => new Address(0, Buffer.alloc(32, byte));
 const hashOf = (address: Address) => BigInt('0x' + address.hash.toString('hex'));
@@ -52,6 +35,7 @@ const hashOf = (address: Address) => BigInt('0x' + address.hash.toString('hex'))
 describe('Rollup: выплата не теряется', () => {
     let code: Cell;
     let nullifierCode: Cell;
+    let constants: ProtocolConstants;
     let blockchain: Blockchain;
     let owner: SandboxContract<TreasuryContract>;
     let sequencer: SandboxContract<TreasuryContract>;
@@ -69,24 +53,30 @@ describe('Rollup: выплата не теряется', () => {
     const debtTo = (recipient: Address, amount: bigint) => ({ recipient: recipient.toString(), amount });
     const isDeployed = async (address: Address) =>
         ((await blockchain.getContract(address)).accountState?.type ?? 'uninit') === 'active';
-    const submit = (newStateRoot: bigint, withdrawalsRoot = 0n) =>
+    /** Батч с таким корнем выводов; очередь обрабатывается до головы. Счётчик выводов на логику выплаты не влияет. */
+    const submit = async (newStateRoot: bigint, withdrawalsRoot = 0n) =>
         rollup.sendSubmitBatch(sequencer.getSender(), {
-            proof: mockProof,
+            proof: mockProof(),
             hints: NO_HINTS,
-            roots: { newStateRoot, withdrawalsRoot },
+            roots: {
+                newStateRoot,
+                withdrawalsRoot,
+                withdrawalsCount: withdrawalsRoot === 0n ? 0n : 1n,
+                queueProcessedUpTo: (await rollup.getDepositQueue()).head.count,
+                blockTimestamp: BigInt(blockchain.now!),
+            },
             value: toNano('0.2'),
         });
     const deploy = async (value: bigint) => {
         rollup = blockchain.openContract(
             Rollup.createFromConfig(
-                {
+                testConfig(constants, {
                     owner: owner.address,
                     sequencer: sequencer.address,
                     nullifierCode,
-                    genesisStateRoot: GENESIS_ROOT,
                     chainId: CHAIN_ID,
                     escapeTimeout: TIMEOUT,
-                },
+                }),
                 code,
             ),
         );
@@ -127,6 +117,7 @@ describe('Rollup: выплата не теряется', () => {
     beforeAll(async () => {
         code = await compile('RollupMock');
         nullifierCode = await compile('RollupNullifier');
+        constants = await readProtocolConstants(code, nullifierCode);
     });
 
     afterAll(() => {
@@ -278,41 +269,10 @@ describe('Rollup: выплата не теряется', () => {
         });
     });
 
-    it('аварийный выход при нехватке баланса тоже становится долгом, а не сгорает', async () => {
-        // Два выхода по 2 TON одной транзакцией кошелька, денег на один.
-        await deploy(toNano('3'));
-        await rollup.sendDeposit(user.getSender(), { l2Recipient: L2_RECIPIENT, value: toNano('0.1') });
-        blockchain.now = START + TIMEOUT + 1;
-        await rollup.sendActivateEscapeHatch(user.getSender(), toNano('0.05'));
-        const claims: ExitClaim[] = [1n, 2n].map((account) => ({
-            l2Account: account,
-            amount: toNano('2'),
-            recipient: recipientOf(0xe0 + Number(account)),
-        }));
-        const body = (claim: ExitClaim) =>
-            beginCell()
-                .storeUint(RollupOpcodes.forceExit, 32)
-                .storeUint(0, 64)
-                .storeRef(Rollup.buildProofCell(mockProof))
-                .storeRef(NO_HINTS)
-                .storeRef(
-                    beginCell()
-                        .storeUint(claim.l2Account, 160)
-                        .storeUint(claim.amount, 128)
-                        .storeAddress(claim.recipient)
-                        .endCell(),
-                )
-                .endCell();
-        await user.sendMessages(
-            claims.map((claim) => internal({ to: rollup.address, value: toNano('0.3'), body: body(claim) })),
-        );
-        expect(await balanceOf(claims[0].recipient)).toBe(toNano('2'));
-        expect(await balanceOf(claims[1].recipient)).toBe(0n);
-        expect(await owedBy(exitNullifierKey(2n))).toEqual(debtTo(claims[1].recipient, toNano('2')));
-        await owner.send({ to: rollup.address, value: toNano('3') });
-        await rollup.sendPayOwed(user.getSender(), { key: exitNullifierKey(2n), value: toNano('0.05') });
-        expect(await balanceOf(claims[1].recipient)).toBe(toNano('2'));
-    });
+    // Выхода по пруфу zkVM в протоколе v2 нет, и теста «аварийный выход при нехватке баланса
+    // становится долгом» на двойнике больше нет: шаг выплаты (handleNullifierClaimed) у вывода и
+    // у выхода счёта EVM общий и от вида ключа нуллификатора не зависит. Отказ выхода EVM при
+    // нехватке денег до пометки — tests/RollupEvmExit.spec.ts.
 
     describe('пороги монет', () => {
         const leaf = { leafIndex: 0, recipientHash: hashOf(recipientOf(0xb0)), amount: toNano('0.3') };

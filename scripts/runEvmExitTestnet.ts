@@ -1,3 +1,9 @@
+// @ts-nocheck
+// СКРИПТ ПРОТОКОЛА v1, см. тег protocol-v1. С контрактом протокола v2 несовместим: контракт развёртывался со словом состояния, равным хешу блока из фикстуры; протокол v2 фиксирует ключ только на генезисе протокола, а слово состояния меняет только батч с пруфом.
+// Не удалён и не подогнан: отказывается стартовать (assertProtocolV1Script в начале run) и не
+// типизируется, пока пруфы в fixtures/ не перестроены под v2 (wrappers/protocolVersion.ts).
+// Перенос на v2 — вместе с шагом программы и пруфов (PROTOCOL-V2.md, раздел 11).
+import { assertProtocolV1Script } from '../wrappers/protocolVersion';
 import { Address, Cell, fromNano, toNano } from '@ton/core';
 import { compile, NetworkProvider, sleep } from '@ton/blueprint';
 import { readFileSync } from 'fs';
@@ -73,6 +79,7 @@ async function waitFor(description: string, check: () => Promise<boolean>) {
 }
 
 export async function run(provider: NetworkProvider, args: string[]) {
+    assertProtocolV1Script('runEvmExitTestnet');
     const ui = provider.ui();
     assertTestnetWithMnemonic(provider);
     const sender = provider.sender();

@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import path from 'path';
 import { Address, Cell } from '@ton/core';
 import { KeyUpload, KeyUploadJson, keyUploadFromJson } from './Bn254Groth16Verifier';
+import { PROTOCOL_VERSION } from './protocolVersion';
 import { Rollup, RollupConfig } from './Rollup';
 
 // Сверка развёрнутого rollup-контракта с тем, что должно быть развёрнуто.
@@ -9,19 +10,29 @@ import { Rollup, RollupConfig } from './Rollup';
 // Контракт в TON не может проверить собственные начальные данные: их задаёт тот, кто
 // развёртывает. Подложить можно код нуллификатора (тогда «пометка» ничего не значит),
 // уже зафиксированный ключ своей программы, ненулевой корень выводов, чужого секвенсора,
-// срок заморозки в минуты. Поэтому доверять rollup'у можно только после сверки:
+// срок заморозки в минуты. Часть этого контракт протокола v2 отсекает сам: FinalizeKey
+// отказывает, если начальное слово состояния — не хеш закреплённого генезиса, если уже есть
+// батчи, выводы или элементы очереди, если срок заморозки или возраст блока вне границ. Но
+// подложенный ключ и чужой код нуллификатора он не увидит. Поэтому доверять rollup'у можно
+// только после сверки:
 //
 //   1) адрес контракта = хеш (код, начальные данные). Если адрес, вычисленный из ОЖИДАЕМЫХ
 //      кода и параметров, совпал с настоящим, то начальные данные были ровно каноническими:
-//      пустые ключи, нулевые корни, пустая очередь, заявленные владелец, секвенсор, chainId,
-//      срок и код нуллификатора;
-//   2) ключи, зафиксированные уже после развёртывания, — это ключи из fixtures/zkvm_batches/key.json,
-//      а тот выводится из закреплённого верификатора SP1 и исходников программ
-//      (zk/gen-rollup-key.mjs), без чьего-либо пруфа.
+//      пустой ключ, нулевые корень и счётчик выводов, пустая очередь, заявленные владелец,
+//      секвенсор, chainId, срок, возраст блока и код нуллификатора;
+//   2) ключ, зафиксированный уже после развёртывания, — это ключ из файла ключа, а тот
+//      выводится из закреплённого верификатора SP1 и исходников программы, без чьего-либо пруфа;
+//   3) начальное слово состояния — константа генезиса в коде контракта (get-метод genesisHash).
+//
+// Ключа программы выхода в протоколе v2 нет: шаг SetExitKey из развёртывания убран.
+// Порядок развёртывания: части ключа → сверка частей → FinalizeKey → сверка развёртывания.
 //
 // Этим пользуются тесты и scripts/verifyRollupDeployment.ts.
 
-/** Ключ контракта, выведенный из исходников (fixtures/zkvm_batches/key.json). */
+/**
+ * Ключ контракта, выведенный из исходников (fixtures/zkvm_batches/key.json). Поля ключа
+ * программы выхода остались в файлах прежнего протокола; контракту v2 они не нужны.
+ */
 export type RollupKeyFile = {
     circuitVersion: string;
     sourcesSha256: string;
@@ -54,16 +65,26 @@ export function loadRollupKey(): ExpectedRollupKey {
     };
 }
 
-/** То, что сообщает о себе развёрнутый контракт (get-методы deployment, keyHash, exitKeyHash). */
+/** То, что сообщает о себе развёрнутый контракт (get-методы protocolVersion, genesisHash, deployment, keyHash). */
 export type OnchainRollup = {
     address: Address;
-    deployment: { owner: Address; sequencer: Address; chainId: bigint; escapeTimeout: number; nullifierCodeHash: bigint };
+    protocolVersion: number;
+    genesisHash: bigint;
+    deployment: {
+        owner: Address;
+        sequencer: Address;
+        chainId: bigint;
+        escapeTimeout: number;
+        maxBlockAge: number;
+        nullifierCodeHash: bigint;
+    };
     keyHash: bigint;
-    exitKeyHash: bigint;
 };
 
-/** Наименьший срок заморозки, с которым контракт соглашается зафиксировать ключи. */
+/** Наименьший срок заморозки, с которым контракт соглашается зафиксировать ключ. */
 export const MIN_ESCAPE_TIMEOUT_SECONDS = 3600;
+/** Наименьший возраст блока, с которым контракт соглашается зафиксировать ключ. */
+export const MIN_MAX_BLOCK_AGE_SECONDS = 1800;
 
 /**
  * Список расхождений между развёрнутым контрактом и ожидаемым; пустой — всё сошлось.
@@ -71,9 +92,12 @@ export const MIN_ESCAPE_TIMEOUT_SECONDS = 3600;
  */
 export function deploymentMismatches(
     onchain: OnchainRollup,
-    expected: { config: RollupConfig; code: Cell; key: Pick<ExpectedRollupKey, 'keyHash' | 'exitKeyHash'> },
+    expected: { config: RollupConfig; code: Cell; key: Pick<ExpectedRollupKey, 'keyHash'> },
 ): string[] {
     const problems: string[] = [];
+    if (onchain.protocolVersion !== PROTOCOL_VERSION) {
+        problems.push(`версия протокола контракта ${onchain.protocolVersion}, ожидалась ${PROTOCOL_VERSION}`);
+    }
     const canonical = Rollup.createFromConfig(expected.config, expected.code).address;
     if (!canonical.equals(onchain.address)) {
         problems.push(
@@ -89,12 +113,18 @@ export function deploymentMismatches(
     if (deployment.chainId !== config.chainId) problems.push('chainId не тот');
     if (deployment.escapeTimeout !== config.escapeTimeout) problems.push('срок заморозки не тот');
     if (deployment.escapeTimeout < MIN_ESCAPE_TIMEOUT_SECONDS) problems.push('срок заморозки меньше допустимого');
+    if (deployment.maxBlockAge !== config.maxBlockAge) problems.push('наибольший возраст блока не тот');
+    if (deployment.maxBlockAge < MIN_MAX_BLOCK_AGE_SECONDS || deployment.maxBlockAge > deployment.escapeTimeout) {
+        problems.push('наибольший возраст блока вне допустимых границ');
+    }
     if (deployment.nullifierCodeHash !== hashOf(config.nullifierCode)) problems.push('код нуллификатора не тот');
+    // Генезис: начальное слово состояния обязано быть константой протокола из кода контракта.
+    // Адрес выше уже связал его с ожидаемым; здесь — что ожидаемое и есть закреплённый генезис.
+    if (config.genesisStateRoot !== onchain.genesisHash) problems.push('начальное слово состояния — не хеш генезиса протокола');
     if (onchain.keyHash === 0n) {
         problems.push('ключ не зафиксирован: rollup ещё не принимает депозиты');
-    } else {
-        if (onchain.keyHash !== expected.key.keyHash) problems.push('ключ программы батчей не тот');
-        if (onchain.exitKeyHash !== expected.key.exitKeyHash) problems.push('ключ программы выхода не тот');
+    } else if (onchain.keyHash !== expected.key.keyHash) {
+        problems.push('ключ программы батчей не тот');
     }
     return problems;
 }
@@ -102,14 +132,16 @@ export function deploymentMismatches(
 /** Снимок развёрнутого контракта для сверки. */
 export async function readOnchainRollup(rollup: {
     address: Address;
+    getProtocolVersion(): Promise<number>;
+    getGenesisHash(): Promise<bigint>;
     getDeployment(): Promise<OnchainRollup['deployment']>;
     getKeyHash(): Promise<bigint>;
-    getExitKeyHash(): Promise<bigint>;
 }): Promise<OnchainRollup> {
     return {
         address: rollup.address,
+        protocolVersion: await rollup.getProtocolVersion(),
+        genesisHash: await rollup.getGenesisHash(),
         deployment: await rollup.getDeployment(),
         keyHash: await rollup.getKeyHash(),
-        exitKeyHash: await rollup.getExitKeyHash(),
     };
 }

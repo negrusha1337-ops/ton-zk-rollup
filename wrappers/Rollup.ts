@@ -6,6 +6,7 @@ import {
     contractAddress,
     ContractProvider,
     Dictionary,
+    DictionaryValue,
     Sender,
     SendMode,
 } from '@ton/core';
@@ -18,10 +19,8 @@ export const RollupOpcodes = {
     publishData: 0x52420003,
     withdraw: 0x52420004,
     activateEscapeHatch: 0x52420006,
-    forceExit: 0x52420007,
     forceExitEvm: 0x5242000d,
     cancelDeposit: 0x52420008,
-    setExitKey: 0x52420009,
     pruneDepositReceipts: 0x5242000a,
     discardBatchData: 0x5242000b,
     payOwed: 0x5242000c,
@@ -48,7 +47,6 @@ export const RollupErrors = {
     nothingToExit: 7315,
     depositAlreadyProcessed: 7316,
     noSuchDeposit: 7317,
-    exitKeyNotSet: 7318,
     malformedForcedTransaction: 7319,
     insufficientFunds: 7320,
     badDeployment: 7321,
@@ -57,6 +55,18 @@ export const RollupErrors = {
     badKeyPoint: 7324,
     feeBelowGasCost: 7325,
     queueFeeAboveLimit: 7326,
+    /** Батч заявил отметку очереди вне отрезка [processed, head]. */
+    queueMarkOutOfRange: 7327,
+    /** Батч заявил больше элементов очереди, чем можно за раз (get-метод queueLimits). */
+    tooManyQueueItems: 7328,
+    blockFromFuture: 7329,
+    blockTooOld: 7330,
+    /** В словаре очереди нет места: предел неубранных записей (get-метод queueLimits). */
+    queueStorageFull: 7331,
+    depositTooLarge: 7332,
+    /** Начальное состояние не каноническое: ключ не фиксируется. */
+    badGenesis: 7333,
+    queueEntryMissing: 7334,
 };
 
 /** Базовая комиссия депозита (DEPOSIT_FEE в contracts/rollup/logic.tolk). */
@@ -83,19 +93,81 @@ export type RollupConfig = {
     owner: Address;
     sequencer: Address;
     nullifierCode: Cell;
+    /**
+     * Начальное слово состояния: хеш заголовка генезиса L2. Контракт зафиксирует ключ, только
+     * если оно равно его константе протокола (get-метод genesisHash).
+     */
     genesisStateRoot: bigint;
     /** Идентификатор rollup'а: входит в публичный вход пруфа и в подписи транзакций L2. */
     chainId: bigint;
-    /** Сколько секунд депозит может ждать обработки, прежде чем rollup можно заморозить. */
+    /** Сколько секунд элемент очереди L1 может ждать обработки, прежде чем rollup можно заморозить. */
     escapeTimeout: number;
+    /** Наибольший возраст блока L2 на момент приёма батча, секунд. */
+    maxBlockAge: number;
 };
 
 /** Заявка аварийного выхода: какой счёт L2, сколько и кому в basechain. */
 export type ExitClaim = { l2Account: bigint; amount: bigint; recipient: Address };
 
-export type BatchRoots = { newStateRoot: bigint; withdrawalsRoot: bigint };
+/** То, что батч заявляет (BatchRoots в contracts/rollup/messages.tolk). */
+export type BatchRoots = {
+    newStateRoot: bigint;
+    withdrawalsRoot: bigint;
+    /** Число листьев дерева выводов после батча. */
+    withdrawalsCount: bigint;
+    /** До какого элемента очереди L1 (включительно) батч её обработал. */
+    queueProcessedUpTo: bigint;
+    /** Время блока L2, секунды. */
+    blockTimestamp: bigint;
+};
+
+/**
+ * То, что заявлял батч протокола v1. Нужен только загрузчикам фикстур прежних пруфов
+ * (wrappers/zkvmProofs.ts, wrappers/evmProofs.ts); контракту v2 такие батчи не отправить.
+ */
+export type BatchRootsV1 = { newStateRoot: bigint; withdrawalsRoot: bigint };
 
 export type QueueMark = { count: bigint; hash: bigint };
+
+/** Отметки очереди L1 (DepositQueue в contracts/rollup/storage.tolk). */
+export type QueueState = { head: QueueMark; processed: QueueMark; prunedCount: bigint };
+
+/** Запись словаря очереди L1 (QueueEntry в contracts/rollup/storage.tolk). */
+export type QueueEntry = {
+    hashBefore: bigint;
+    queuedAt: number;
+    receipt: { depositor: Address; amount: bigint } | null;
+};
+
+/** Раскладка записи словаря очереди — обязана совпадать с QueueEntry в storage.tolk. */
+export const QueueEntryValue: DictionaryValue<QueueEntry> = {
+    serialize(src, builder) {
+        builder.storeUint(src.hashBefore, 256).storeUint(src.queuedAt, 32);
+        if (src.receipt) builder.storeBit(true).storeAddress(src.receipt.depositor).storeCoins(src.receipt.amount);
+        else builder.storeBit(false);
+    },
+    parse(src) {
+        const hashBefore = src.loadUintBig(256);
+        const queuedAt = src.loadUint(32);
+        const receipt = src.loadBit() ? { depositor: src.loadAddress(), amount: src.loadCoins() } : null;
+        return { hashBefore, queuedAt, receipt };
+    },
+};
+
+/**
+ * Неканоническое начальное состояние — ТОЛЬКО ДЛЯ ТЕСТОВ: проверить, что контракт с ним не
+ * начинает работу, либо поставить очередь сразу на нужную отметку. Настоящее развёртывание —
+ * createFromConfig без подлога; сверка адреса (wrappers/rollupDeployment.ts) подлог ловит.
+ */
+export type PlantedState = {
+    withdrawalsRoot?: bigint;
+    withdrawalsCount?: bigint;
+    batchIndex?: bigint;
+    queue?: Partial<QueueState>;
+    queueItems?: Dictionary<bigint, QueueEntry>;
+    /** Ключ уже «зафиксирован» (значение — эта ячейка): минуя FinalizeKey, который такое состояние отверг бы. */
+    vkData?: Cell;
+};
 
 /** Обёртка над contracts/rollup.tolk и его тестовым двойником contracts/rollup_mock.tolk. */
 export class Rollup implements Contract {
@@ -108,38 +180,81 @@ export class Rollup implements Contract {
         return new Rollup(address);
     }
 
-    static createFromConfig(config: RollupConfig, code: Cell, workchain = 0) {
-        const queue = beginCell();
-        for (let i = 0; i < 3; i++) queue.storeUint(0, 64).storeUint(0, 256);
+    /**
+     * Ячейка начальных данных. Раскладка повторяет RollupStorage, RollupState, DepositQueue и
+     * RollupKeys (contracts/rollup/storage.tolk). `planted` — только для тестов.
+     */
+    static buildData(config: RollupConfig, planted: PlantedState = {}): Cell {
+        const head = planted.queue?.head ?? { count: 0n, hash: 0n };
+        const processed = planted.queue?.processed ?? { count: 0n, hash: 0n };
+        const queue = beginCell()
+            .storeUint(head.count, 64)
+            .storeUint(head.hash, 256)
+            .storeUint(processed.count, 64)
+            .storeUint(processed.hash, 256)
+            .storeUint(planted.queue?.prunedCount ?? 0n, 64)
+            .endCell();
         const state = beginCell()
             .storeUint(config.genesisStateRoot, 256)
-            .storeUint(0, 256) // корень выводов: выводов ещё не было
-            .storeUint(0, 64)
-            .storeRef(queue.endCell())
+            .storeUint(planted.withdrawalsRoot ?? 0n, 256) // корень выводов: выводов ещё не было
+            .storeUint(planted.withdrawalsCount ?? 0n, 64) // счётчик выводов
+            .storeUint(planted.batchIndex ?? 0n, 64)
+            .storeRef(queue)
             .storeBit(false) // pendingData: данных батчей ещё нет
-            .storeBit(false) // depositReceipts: депозитов ещё не было
+            .storeDict(planted.queueItems ?? null) // queueItems: очередь пуста
             .storeBit(false) // frozen
-            .storeUint(0, 32) // queuedAfterTargetAt
-            .storeUint(0, 32) // queuedAfterProcessedAt
             .storeBit(false) // owed: долгов нет
             .endCell();
         const keys = beginCell()
-            .storeBit(false) // vkData: ещё нет
+            .storeMaybeRef(planted.vkData ?? null) // vkData: ещё нет
             .storeBit(false) // keyParts: пустой словарь
-            .storeUint(0, 254) // exitIc0x: не задан
-            .storeUint(0, 254) // exitIc0y
             .endCell();
-        const data = beginCell()
+        return beginCell()
             .storeAddress(config.owner)
             .storeAddress(config.sequencer)
             .storeUint(config.chainId, 64)
             .storeUint(config.escapeTimeout, 32)
+            .storeUint(config.maxBlockAge, 32)
             .storeRef(keys)
             .storeRef(config.nullifierCode)
             .storeRef(state)
             .endCell();
-        const init = { code, data };
+    }
+
+    static createFromConfig(config: RollupConfig, code: Cell, workchain = 0) {
+        const init = { code, data: Rollup.buildData(config) };
         return new Rollup(contractAddress(workchain, init), init);
+    }
+
+    /** Контракт с подложенным начальным состоянием — только для тестов (см. PlantedState). */
+    static createPlanted(config: RollupConfig, planted: PlantedState, code: Cell, workchain = 0) {
+        const init = { code, data: Rollup.buildData(config, planted) };
+        return new Rollup(contractAddress(workchain, init), init);
+    }
+
+    /** Словарь очереди L1 для подложенного состояния. */
+    static queueItemsDictionary(): Dictionary<bigint, QueueEntry> {
+        return Dictionary.empty(Dictionary.Keys.BigUint(64), QueueEntryValue);
+    }
+
+    /**
+     * Отметки очереди L1 и её словарь — по ячейке данных контракта, без get-методов. Раскладка
+     * повторяет buildData. Нужна там, где get-метод недоступен (эмулятор Sandbox не исполняет
+     * get-методы контракта с балансом от 2^63 нанотон) и для сверки раскладки с контрактом.
+     */
+    static queueFromData(data: Cell): QueueState & { items: Dictionary<bigint, QueueEntry> } {
+        const root = data.beginParse();
+        root.loadRef(); // RollupKeys
+        root.loadRef(); // код нуллификатора
+        const state = root.loadRef().beginParse();
+        state.skip(256 + 256 + 64 + 64); // слово состояния, корень и счётчик выводов, номер батча
+        const queue = state.loadRef().beginParse();
+        const mark = (): QueueMark => ({ count: queue.loadUintBig(64), hash: queue.loadUintBig(256) });
+        const [head, processed] = [mark(), mark()];
+        const prunedCount = queue.loadUintBig(64);
+        state.loadMaybeRef(); // pendingData
+        const items = state.loadDict(Dictionary.Keys.BigUint(64), QueueEntryValue);
+        return { head, processed, prunedCount, items };
     }
 
     /**
@@ -163,29 +278,6 @@ export class Rollup implements Contract {
         keys.loadMaybeRef(); // vkData
         const parts = keys.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell());
         return new Map(parts.keys().map((slot) => [slot, parts.get(slot)!.hash().toString('hex')]));
-    }
-
-    /**
-     * Задан ли ключ программы выхода — по ячейке данных контракта. До фиксации основного
-     * ключа get-метод exitKeyHash возвращает 0, поэтому скрипту развёртывания нужен этот разбор.
-     */
-    static isExitKeySet(data: Cell): boolean {
-        const keys = data.beginParse().loadRef().beginParse(); // RollupKeys
-        keys.loadMaybeRef(); // vkData
-        keys.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell()); // keyParts
-        return keys.loadUintBig(254) !== 0n || keys.loadUintBig(254) !== 0n;
-    }
-
-    /**
-     * IC0 ключа программы выхода, как он записан в данных контракта; (0, 0) — не задан.
-     * Скрипт развёртывания сверяет его с ожидаемым ДО фиксации ключа: после неё ключ
-     * выхода уже не исправить.
-     */
-    static exitKeyIc0(data: Cell): [bigint, bigint] {
-        const keys = data.beginParse().loadRef().beginParse(); // RollupKeys
-        keys.loadMaybeRef(); // vkData
-        keys.loadDict(Dictionary.Keys.Uint(8), Dictionary.Values.Cell()); // keyParts
-        return [keys.loadUintBig(254), keys.loadUintBig(254)];
     }
 
     private async send(provider: ContractProvider, via: Sender, value: bigint, body: Cell) {
@@ -225,17 +317,23 @@ export class Rollup implements Contract {
             .endCell();
     }
 
-    static buildSubmitBatchBody(opts: { proof: Bn254Proof; hints: Cell; roots: BatchRoots }): Cell {
-        const roots = beginCell()
-            .storeUint(opts.roots.newStateRoot, 256)
-            .storeUint(opts.roots.withdrawalsRoot, 256)
+    static buildBatchRootsCell(roots: BatchRoots): Cell {
+        return beginCell()
+            .storeUint(roots.newStateRoot, 256)
+            .storeUint(roots.withdrawalsRoot, 256)
+            .storeUint(roots.withdrawalsCount, 64)
+            .storeUint(roots.queueProcessedUpTo, 64)
+            .storeUint(roots.blockTimestamp, 64)
             .endCell();
+    }
+
+    static buildSubmitBatchBody(opts: { proof: Bn254Proof; hints: Cell; roots: BatchRoots }): Cell {
         return beginCell()
             .storeUint(RollupOpcodes.submitBatch, 32)
             .storeUint(0, 64)
             .storeRef(Rollup.buildProofCell(opts.proof))
             .storeRef(opts.hints)
-            .storeRef(roots)
+            .storeRef(Rollup.buildBatchRootsCell(opts.roots))
             .endCell();
     }
 
@@ -247,42 +345,10 @@ export class Rollup implements Contract {
         await this.send(provider, via, opts.value, Rollup.buildSubmitBatchBody(opts));
     }
 
-    /** IC0 ключа программы выхода; задаётся владельцем один раз, до фиксации ключа. */
-    async sendSetExitKey(provider: ContractProvider, via: Sender, opts: { ic0: [bigint, bigint]; value: bigint }) {
-        const body = beginCell()
-            .storeUint(RollupOpcodes.setExitKey, 32)
-            .storeUint(0, 64)
-            .storeUint(opts.ic0[0], 254)
-            .storeUint(opts.ic0[1], 254)
-            .endCell();
-        await this.send(provider, via, opts.value, body);
-    }
-
-    /** Заморозить rollup: срабатывает, только если депозит ждёт дольше escapeTimeout. */
+    /** Заморозить rollup: срабатывает, только если элемент очереди L1 ждёт дольше escapeTimeout. */
     async sendActivateEscapeHatch(provider: ContractProvider, via: Sender, value: bigint) {
         const body = beginCell().storeUint(RollupOpcodes.activateEscapeHatch, 32).storeUint(0, 64).endCell();
         await this.send(provider, via, value, body);
-    }
-
-    /** Аварийный выход с баланса L2 по пруфу программы выхода (только после заморозки). */
-    async sendForceExit(
-        provider: ContractProvider,
-        via: Sender,
-        opts: { proof: Bn254Proof; hints: Cell; claim: ExitClaim; value: bigint },
-    ) {
-        const claim = beginCell()
-            .storeUint(opts.claim.l2Account, 160)
-            .storeUint(opts.claim.amount, 128)
-            .storeAddress(opts.claim.recipient)
-            .endCell();
-        const body = beginCell()
-            .storeUint(RollupOpcodes.forceExit, 32)
-            .storeUint(0, 64)
-            .storeRef(Rollup.buildProofCell(opts.proof))
-            .storeRef(opts.hints)
-            .storeRef(claim)
-            .endCell();
-        await this.send(provider, via, opts.value, body);
     }
 
     /**
@@ -327,7 +393,7 @@ export class Rollup implements Contract {
         await this.send(provider, via, opts.value, body);
     }
 
-    /** Удалить квитанции уже обработанных депозитов (не больше count за раз). */
+    /** Удалить записи уже обработанных элементов очереди L1 (не больше count за раз). */
     async sendPruneDepositReceipts(provider: ContractProvider, via: Sender, opts: { count: number; value: bigint }) {
         const body = beginCell()
             .storeUint(RollupOpcodes.pruneDepositReceipts, 32)
@@ -396,8 +462,8 @@ export class Rollup implements Contract {
     }
 
     /**
-     * Поставить транзакцию L2 в очередь L1 в обход секвенсора. `l2Transaction` — ячейка из
-     * `forcedTransactionCell` (wrappers/rollupMath.ts): одна ячейка без ссылок.
+     * Поставить транзакцию L2 в очередь L1 в обход секвенсора. `l2Transaction` — «змейка» из
+     * `forcedTransactionCell` (wrappers/rollupMath.ts): байты подписанной транзакции EVM.
      */
     async sendForceTransaction(provider: ContractProvider, via: Sender, opts: { l2Transaction: Cell; value: bigint }) {
         const body = beginCell()
@@ -424,27 +490,67 @@ export class Rollup implements Contract {
         await this.send(provider, via, opts.value, body);
     }
 
+    async getProtocolVersion(provider: ContractProvider): Promise<number> {
+        const { stack } = await provider.get('protocolVersion', []);
+        return stack.readNumber();
+    }
+
+    /** Хеш заголовка генезиса L2 — константа протокола в коде контракта. */
+    async getGenesisHash(provider: ContractProvider): Promise<bigint> {
+        const { stack } = await provider.get('genesisHash', []);
+        return stack.readBigNumber();
+    }
+
     async getRollupState(provider: ContractProvider) {
         const { stack } = await provider.get('rollupState', []);
         return {
             stateRoot: stack.readBigNumber(),
             withdrawalsRoot: stack.readBigNumber(),
             batchIndex: stack.readNumber(),
+            withdrawalsCount: stack.readBigNumber(),
         };
     }
 
-    async getDepositQueue(
-        provider: ContractProvider,
-    ): Promise<{ head: QueueMark; target: QueueMark; processed: QueueMark }> {
+    async getDepositQueue(provider: ContractProvider): Promise<QueueState> {
         const { stack } = await provider.get('depositQueue', []);
         const mark = (): QueueMark => ({ count: stack.readBigNumber(), hash: stack.readBigNumber() });
-        return { head: mark(), target: mark(), processed: mark() };
+        return { head: mark(), processed: mark(), prunedCount: stack.readBigNumber() };
+    }
+
+    /** Запись словаря очереди L1 по номеру элемента; null, если её нет (убрана либо не было). */
+    async getQueueItem(provider: ContractProvider, index: number | bigint) {
+        const { stack } = await provider.get('queueItem', [{ type: 'int', value: BigInt(index) }]);
+        const found = stack.readBoolean();
+        const hashBefore = stack.readBigNumber();
+        const queuedAt = stack.readNumber();
+        return found ? { hashBefore, queuedAt } : null;
+    }
+
+    /** Пределы очереди L1 — константы контракта. */
+    async getQueueLimits(provider: ContractProvider) {
+        const { stack } = await provider.get('queueLimits', []);
+        return {
+            maxBatchQueueItems: stack.readNumber(),
+            maxTrackedItems: stack.readNumber(),
+            maxForcedTxCells: stack.readNumber(),
+            prunePerPush: stack.readNumber(),
+            depositAmountLimit: stack.readBigNumber(),
+        };
+    }
+
+    /** Наименьшие допустимые maxBlockAge и срок заморозки — константы контракта. */
+    async getTimeLimits(provider: ContractProvider) {
+        const { stack } = await provider.get('timeLimits', []);
+        return { minMaxBlockAge: stack.readNumber(), minEscapeTimeout: stack.readNumber() };
     }
 
     async getExpectedPublicInput(provider: ContractProvider, roots: BatchRoots): Promise<bigint> {
         const { stack } = await provider.get('expectedPublicInput', [
             { type: 'int', value: roots.newStateRoot },
             { type: 'int', value: roots.withdrawalsRoot },
+            { type: 'int', value: roots.withdrawalsCount },
+            { type: 'int', value: roots.queueProcessedUpTo },
+            { type: 'int', value: roots.blockTimestamp },
         ]);
         return stack.readBigNumber();
     }
@@ -465,25 +571,10 @@ export class Rollup implements Contract {
         return stack.readBigNumber();
     }
 
-    async getExitKeyHash(provider: ContractProvider): Promise<bigint> {
-        const { stack } = await provider.get('exitKeyHash', []);
-        return stack.readBigNumber();
-    }
-
-    /** Заморожен ли rollup, когда встал самый старый необработанный депозит (0 — нет таких) и срок. */
+    /** Заморожен ли rollup, когда встал самый старый необработанный элемент очереди (0 — нет таких) и срок. */
     async getEscapeState(provider: ContractProvider) {
         const { stack } = await provider.get('escapeState', []);
         return { frozen: stack.readBoolean(), oldestPendingAt: stack.readNumber(), timeout: stack.readNumber() };
-    }
-
-    /** Публичный вход, который контракт потребует от пруфа выхода с такой заявкой. */
-    async getExpectedExitInput(provider: ContractProvider, claim: ExitClaim): Promise<bigint> {
-        const { stack } = await provider.get('expectedExitInput', [
-            { type: 'int', value: claim.l2Account },
-            { type: 'int', value: claim.amount },
-            { type: 'int', value: BigInt('0x' + claim.recipient.hash.toString('hex')) },
-        ]);
-        return stack.readBigNumber();
     }
 
     async getExitNullifierAddress(provider: ContractProvider, l2Account: bigint): Promise<Address> {
@@ -512,6 +603,7 @@ export class Rollup implements Contract {
             sequencer: stack.readAddress(),
             chainId: stack.readBigNumber(),
             escapeTimeout: stack.readNumber(),
+            maxBlockAge: stack.readNumber(),
             nullifierCodeHash: stack.readBigNumber(),
         };
     }
@@ -524,7 +616,7 @@ export class Rollup implements Contract {
         return recipient ? { recipient, amount } : null;
     }
 
-    /** Плата за место в очереди L1 прямо сейчас и длина текущего окна. */
+    /** Плата за место в очереди L1 прямо сейчас и число необработанных элементов. */
     async getQueueFees(provider: ContractProvider) {
         const { stack } = await provider.get('queueFees', []);
         return {
@@ -557,10 +649,10 @@ export class Rollup implements Contract {
         };
     }
 
-    /** Минимум монет для Withdraw и для ForceExit при текущих ценах сети. */
+    /** Минимум монет для Withdraw при текущих ценах сети (для ForceExitEvm — getEvmExitBudget). */
     async getMinimumValues(provider: ContractProvider) {
         const { stack } = await provider.get('minimumValues', []);
-        return { withdraw: stack.readBigNumber(), forceExit: stack.readBigNumber() };
+        return { withdraw: stack.readBigNumber() };
     }
 }
 

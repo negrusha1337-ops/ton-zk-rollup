@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { Cell } from '@ton/core';
 import { Bn254Proof, KeyUpload, keyUploadFromJson } from './Bn254Groth16Verifier';
-import { BatchRoots } from './Rollup';
+import { BatchRootsV1 } from './Rollup';
 import { RollupKeyFile } from './rollupDeployment';
 import { dataChunkCell } from './rollupMath';
 import { HintedFixture } from './zkvmProofs';
@@ -108,7 +108,7 @@ export type ProvenEvmBatch = {
     hinted: HintedFixture;
     publicInputs: bigint[];
     report: EvmBatchReport;
-    roots: BatchRoots;
+    roots: BatchRootsV1;
     /** Порции данных (RLP блока), которые публикуются в TON до отправки батча. */
     dataChunks: Cell[];
 };
