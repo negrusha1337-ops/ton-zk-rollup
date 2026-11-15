@@ -163,8 +163,10 @@ if (!circuits || !existsSync(MAC_ELF)) {
         it('предел времени: задание на сервере погашено, отказ ProverFailure', async () => {
             server.host({ hang: true });
             const job = rethJob(1);
-            const failed = prover({ timeoutMs: 1500 }).prove(job);
-            await expect(failed).rejects.toThrow(/^блок 1: пруф на сервере zk-gpu не готов за 2 с — задание погашено$/);
+            // Предел — с запасом на сверку сервера и запуск под нагрузкой полного прогона тестов.
+            const failed = prover({ timeoutMs: 6000 }).prove(job);
+            await waitUntil('пруф на сервере запущен', () => server.hostRuns().length === 1);
+            await expect(failed).rejects.toThrow(/^блок 1: пруф на сервере zk-gpu не готов за 6 с — задание погашено$/);
             await waitUntil('процесс на сервере погашен', () => server.hostRuns().every((run) => !alive(run.pid)), 10_000);
             expect(readFileSync(path.join(server.jobsDir, jobKeyOf(job), 'state'), 'utf8').trim()).toBe('cancelled');
         }, 60_000);
