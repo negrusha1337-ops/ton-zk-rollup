@@ -26,3 +26,4 @@ Session.vim
 # ZK: локальные инструменты и тяжёлые артефакты сборки (ptau, zkey, wasm)
 .tools/
 circuits/build/
+.claude/
