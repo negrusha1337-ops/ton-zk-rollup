@@ -7,6 +7,11 @@
 //!   rollup-evm-host --batch-input batch.bin --execute         # готовый вход батча (фикстура)
 //!   rollup-evm-host --batch-input batch.bin --prove --proof-out proof.json
 //!   rollup-evm-host --classify-forced items.json --chain-id <chainId> --report verdicts.json
+//!   rollup-evm-host --identity                               # хеши ELF и исходников этой сборки (JSON)
+//!
+//! `--identity` — чем собран этот бинарник: хеш ELF программы, хеши исходников программы и хоста
+//! на момент сборки и на диске сейчас. Сборщик блоков сверяет их с fixtures/evm_batches/program.json
+//! при старте: устаревший хост — остановка до пересборки.
 //!
 //! `--classify-forced` — только проверка ФОРМЫ принудительных транзакций той же функцией, что в
 //! программе (`decode_forced_transaction`): файл — JSON-массив байтов элементов очереди (hex),
@@ -83,6 +88,9 @@ struct Args {
     /// Посчитать ключ программы и записать fixtures/evm_batches/program.json.
     #[arg(long, conflicts_with_all = ["block_input", "batch_input", "execute", "compressed", "prove"])]
     vkeys: bool,
+    /// Напечатать JSON: хеш ELF программы и хеши исходников (на момент сборки и на диске).
+    #[arg(long, conflicts_with_all = ["vkeys", "block_input", "batch_input", "execute", "compressed", "prove", "classify_forced"])]
+    identity: bool,
     /// Проверить форму принудительных транзакций: JSON-массив байтов (hex). Ответ — в --report.
     #[arg(
         long,
@@ -285,6 +293,19 @@ fn assert_binary_is_fresh() {
             std::process::exit(2);
         }
     }
+}
+
+/// Чем собран этот бинарник (`--identity`). Ничего не проверяет и не пишет: сверяет вызывающий.
+fn print_identity() {
+    let repository = repository();
+    let identity = serde_json::json!({
+        "programElfSha256": format!("0x{}", elf_sha256()),
+        "sourcesSha256": BUILT_FROM_SOURCES,
+        "sourcesSha256OnDisk": sources::sources_sha256(&repository),
+        "hostSha256": BUILT_FROM_HOST,
+        "hostSha256OnDisk": sources::host_sha256(&repository),
+    });
+    println!("{}", serde_json::to_string_pretty(&identity).expect("JSON"));
 }
 
 fn program_vkey(client: &impl Prover) -> String {
@@ -567,6 +588,9 @@ fn main() {
     if args.vkeys {
         return write_program_keys();
     }
+    if args.identity {
+        return print_identity();
+    }
     if let Some(items) = &args.classify_forced {
         let chain_id = args.chain_id.expect("clap требует --chain-id");
         return classify_forced(items, chain_id, args.report.as_ref().expect("clap требует --report"));
@@ -689,6 +713,7 @@ fn main() {
             "withdrawalsFrontierAfter": outcome.withdrawals_frontier.iter().map(|node| hex(node)).collect::<Vec<_>>(),
             "zkvmCycles": cycles,
             "programElfSha256": format!("0x{}", elf_sha256()),
+            "sourcesSha256": BUILT_FROM_SOURCES,
             "proofMode": if args.compressed { Some("compressed") } else if args.prove { Some("groth16") } else { None },
             "proofSeconds": proof_seconds,
             "programVKey": vkey,
