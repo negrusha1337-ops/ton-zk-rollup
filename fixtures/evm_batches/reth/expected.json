@@ -1,0 +1,59 @@
+{
+ "source": "Сгенерировано zkvm-evm/scenario/reth-scenario.mjs (Reth Version: 2.2.0); не редактировать вручную",
+ "note": "Цепочка узла Reth с пустым генезисом: депозиты с L1 зачислениями EIP-4895, перевод и вывод через мост. Ключ пользователя одноразовый и в файл не попадает.",
+ "chainId": "362107787851",
+ "genesisHash": "0x0598047b8adde700d2e815fe0c7436002f7c50ef32447aa4f4bf4c09e1a97789",
+ "blocks": [
+  {
+   "number": 1,
+   "hash": "0x321abdfcf9bab7e1dbbda63d57a1c623fb3036617465990d0ed37e81efd4f6d1",
+   "stateRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+   "transactions": 0,
+   "zkvmCycles": 7493747
+  },
+  {
+   "number": 2,
+   "hash": "0xe0c848409f829b62c27d3f582c770df4f588cdc405c4098337428ba425c4078a",
+   "stateRoot": "0x6bc1e8ef0fdd10e69bf7b2cdeb2b3dfa1f1ce8b6b6346c95cdebc7cc142ca7aa",
+   "transactions": 0,
+   "zkvmCycles": 7540185
+  },
+  {
+   "number": 3,
+   "hash": "0x7a8619becc3e3b4e5cfda0f438034987e31bb30a4e9f8ec3b9684a47df0f5485",
+   "stateRoot": "0xe8e0a41c10be3a12409c540614885f216fc71ee83ac2d45ee518f39e06b81a10",
+   "transactions": 2,
+   "zkvmCycles": 7961116
+  }
+ ],
+ "user": "0x65898a285635df1a6c645410091f79538fdcce91",
+ "deposits": [
+  {
+   "l2Recipient": "0x65898a285635df1a6c645410091f79538fdcce91",
+   "amount": "2000000000",
+   "batch": 2
+  },
+  {
+   "l2Recipient": "0x1111111111111111111111111111111111111111",
+   "amount": "1500000000",
+   "batch": 3
+  }
+ ],
+ "withdrawal": {
+  "leafIndex": 0,
+  "recipientHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+  "amount": "250000000"
+ },
+ "exit": {
+  "blockNumber": 3,
+  "account": "0x65898a285635df1a6c645410091f79538fdcce91",
+  "balanceWei": "1649929008281250000",
+  "accountProof": [
+   "0xf8b18080a0f8bc8d3e575c7ceb33f1b074e6b11a49ba0789826f81cb99513164719aa1279f8080a055248d809f742ec4cd2c16d6875f21d2e87902ca66f9b0f5b058265535ea047aa0b22409d2179b597d58ef3266e923612fe86f1f965715eecba707eb538a1b7fb680808080808080a0f924c6508baf00883a7c7fd7b44a112b41d7faf81099b539831668e5064f9e5aa072f1fbb7b397719c678980cac5be823d29155539ee8c7031aff136b4c8b4d96480",
+   "0xf871a0364952a5c268b1fe81aeb7b365c29d682aaf00da0492f0e5e200541239cb060fb84ef84c028816e5b9b0fb3768d0a056e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421a0c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
+  ],
+  "recipientHash": "0x0c330c1d3884b21883dfcae8bee30aa83dcaac4d0c6615df32e83a5243349325",
+  "consentHash": "0x279c491262c998b0b4458e5428d5e393adecc53aa1e7dff4003746cb00bf8db4",
+  "signature": "0xc455e807d88cdad63396d11de0324c18f82dadf11ce0dc055002b94f5e01cdce658a04b81879605fbab088217bb80e9b04d6c5beba46bfac747ba0b19eead6961c"
+ }
+}
