@@ -23,6 +23,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { bn254 } from '@noble/curves/bn254.js';
 import { loadEvmProgramKeys } from './evm-binding.mjs';
+import { isInside } from './path-guard.mjs';
 import { loadProgramKeys } from './program-binding.mjs';
 import { g2FromParts, loadSp1Verifier, verificationKeyJson } from './sp1-verifier.mjs';
 
@@ -58,7 +59,8 @@ if (forSequencer !== Boolean(flags['out-dir']) || forSequencer !== Boolean(flags
     process.exit(1);
 }
 const FIXTURES_DIR = path.join(ROOT, 'fixtures');
-if (forSequencer && (flags['out-dir'] === FIXTURES_DIR || flags['out-dir'].startsWith(FIXTURES_DIR + path.sep))) {
+// По настоящим путям: симлинк и регистр (APFS) не обходят сверку (круг 21, 5г).
+if (forSequencer && isInside(flags['out-dir'], FIXTURES_DIR)) {
     console.error(`Пруф батча сервиса пишется вне fixtures/: ${flags['out-dir']}`);
     process.exit(1);
 }

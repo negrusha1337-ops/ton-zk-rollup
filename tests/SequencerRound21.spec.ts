@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync } from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import { mnemonicNew } from '@ton/crypto';
@@ -169,6 +169,36 @@ describe('круг 21: окружение дочерних, группы про�
             fake.behave({ codes: [7], spawnChild: tag });
             await expect(prover().prove(rethJob(1))).rejects.toThrow(ProverFailure);
             expect(await eventually(() => processesWith(tag).length === 0)).toBe(true);
+        }, 60_000);
+    });
+
+    describe('5г: каталог вывода фикстуры — вне fixtures/ по настоящему пути (симлинк, регистр)', () => {
+        const node = (args: string[]) => {
+            try {
+                execFileSync(process.execPath, args, { cwd: ROOT, stdio: 'pipe', env: childEnv() });
+                return { code: 0, stderr: '' };
+            } catch (error) {
+                const failed = error as { status: number; stderr: Buffer };
+                return { code: failed.status, stderr: failed.stderr.toString() };
+            }
+        };
+        const importInto = (out: string) =>
+            node([path.join(ROOT, 'zk', 'import-sp1-fixture.mjs'), 'a.sol', 'b.sol', 'proof.json', 'sp1_evm_sequencer', '--out-dir', out, '--report', 'report.json']);
+        const hintsInto = (out: string) => node([path.join(ROOT, 'zk', 'gen-bn254-groth16-fixture.mjs'), '--dir', out]);
+
+        it('симлинк вне fixtures/, указывающий внутрь, и FIXTURES/ в другом регистре — отказ обоих скриптов', () => {
+            const link = path.join(dir, 'link');
+            symlinkSync(path.join(ROOT, 'fixtures'), link);
+            const caseVariant = path.join(ROOT, 'FIXTURES', 'sequencer-round21');
+            const caseless = existsSync(path.join(ROOT, 'FIXTURES'));
+            for (const out of [path.join(link, 'sequencer-round21'), ...(caseless ? [caseVariant] : [])]) {
+                expect(importInto(out)).toEqual({ code: 1, stderr: expect.stringContaining('Пруф батча сервиса пишется вне fixtures/') });
+                expect(hintsInto(out)).toEqual({ code: 1, stderr: expect.stringContaining('--dir пишет фикстуру вне fixtures/') });
+            }
+            expect(existsSync(path.join(ROOT, 'fixtures', 'sequencer-round21'))).toBe(false);
+            // Каталог действительно вне fixtures/ — сверка пропускает (дальше скрипт падает на входе).
+            expect(importInto(path.join(dir, 'out')).stderr).not.toContain('вне fixtures/');
+            expect(hintsInto(path.join(dir, 'out')).stderr).toContain('Нет фикстуры');
         }, 60_000);
     });
 

@@ -29,11 +29,18 @@ import {
     parseProof,
     parseVerificationKey,
 } from './bn254-onchain.mjs';
+import { isInside } from './path-guard.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = process.argv[2] === '--dir' ? process.argv[3] : null;
 if (process.argv[2] === '--dir' && !OUT_DIR) {
     console.error('После --dir нужен каталог фикстуры');
+    process.exit(1);
+}
+// --dir — фикстура вне fixtures/ (пруф батча сервиса); внутрь — только по имени фикстуры.
+// Сверка — по настоящим путям: симлинк и регистр (APFS) её не обходят (круг 21, 5г).
+if (OUT_DIR && isInside(OUT_DIR, path.join(ROOT, 'fixtures'))) {
+    console.error(`--dir пишет фикстуру вне fixtures/, а ${path.resolve(OUT_DIR)} — внутри; фикстуры fixtures/ — по имени`);
     process.exit(1);
 }
 const NAME = OUT_DIR ? path.resolve(OUT_DIR) : (process.argv[2] ?? 'multiplier_bn254');
