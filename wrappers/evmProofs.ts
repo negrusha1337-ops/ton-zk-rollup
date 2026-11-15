@@ -3,118 +3,118 @@ import { createHash } from 'crypto';
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { Cell } from '@ton/core';
-import { Bn254Proof, KeyUpload, keyUploadFromJson } from './Bn254Groth16Verifier';
-import { BatchRootsV1 } from './Rollup';
-import { RollupKeyFile } from './rollupDeployment';
-import { dataChunkCell } from './rollupMath';
+import { Bn254Proof } from './Bn254Groth16Verifier';
+import { BatchRoots } from './Rollup';
+import { ExpectedRollupKey, RollupKeyFile, rollupKeyFromFile } from './rollupDeployment';
+import { BatchPublicValues, dataChunkCell } from './rollupMath';
 import { HintedFixture } from './zkvmProofs';
 
-// Пруф SP1 программы батча EVM (zkvm-evm/) и его привязка к исходникам — то же, что
-// wrappers/sp1Proofs.ts и wrappers/zkvmProofs.ts для программ zkvm/, с отдельными файлами:
+// Программа батча EVM протокола v2 (zkvm-evm/): её ключ, отчёты о блоках цепочки узла Reth и
+// пруфы SP1 этих блоков с привязкой к исходникам:
 //   исходники → sourcesSha256 → fixtures/evm_batches/program.json → fixtures/evm_batches/key.json
-//   → fixtures/sp1_evm_batch<N> (импорт пруфа: zk/import-sp1-fixture.mjs).
-// Батч, под который строится пруф, — fixtures/evm_batches/contract/block-<N>.json: блок EVM с
-// нулевым хешем очереди L1, как у только что развёрнутого контракта без депозитов.
+//   → fixtures/sp1_evm_reth<N> (импорт пруфа: zk/import-sp1-fixture.mjs).
+// Батч k контракта — блок k цепочки (fixtures/evm_batches/reth/block-<k>.json).
+//
+// Загрузчиков протокола v1 (блок anvil fixtures/evm_batches/contract, пруф fixtures/sp1_evm_batch2)
+// здесь больше нет: тот пруф построен прежней программой под восемь слов и контракту v2 не
+// подходит. Прежняя версия целиком — тег protocol-v1.
 
 const ROOT = path.join(__dirname, '..');
 const FIXTURES = path.join(ROOT, 'fixtures');
 const read = (...parts: string[]) => JSON.parse(readFileSync(path.join(FIXTURES, ...parts), 'utf8'));
 
-/** Номер блока EVM, который служит первым батчем контракта. */
-export const EVM_BATCH_BLOCK = 2;
-const PROOF_DIRECTORY = `sp1_evm_batch${EVM_BATCH_BLOCK}`;
-
 export type EvmProgramKeys = { sourcesSha256: string; programVKey: string; programElfSha256: string };
 
-/** Отчёт хоста о батче: восемь слов и данные, которые публикуются в TON. */
+/** Одиннадцать слов публичных значений батча, как их пишет хост (строки: hex либо десятичные). */
+export type EvmPublicValues = {
+    chainId: string;
+    prevStateRoot: string;
+    newStateRoot: string;
+    batchHash: string;
+    prevWithdrawalsRoot: string;
+    withdrawalsRoot: string;
+    prevDepositHash: string;
+    newDepositHash: string;
+    prevWithdrawalsCount: string;
+    withdrawalsCount: string;
+    blockTimestamp: string;
+};
+
+/** Отчёт хоста о блоке, исполненном программой: публичные значения и то, что публикуется в TON. */
 export type EvmBatchReport = {
     blockNumber: number;
     transactions: number;
+    /** Порции данных батча (RLP блока), которые публикуются в TON до отправки батча. */
     dataChunksHex: string[];
-    publicValues: {
-        chainId: string;
-        prevStateRoot: string;
-        newStateRoot: string;
-        batchHash: string;
-        prevWithdrawalsRoot: string;
-        withdrawalsRoot: string;
-        prevDepositHash: string;
-        newDepositHash: string;
-    };
+    dataBytes: number;
+    publicValues: EvmPublicValues;
+    /** 352 байта публичных значений программы (hex). */
     publicValuesBytes: string;
+    /** Отрезок очереди L1, обработанный блоком: элементы (queueProcessedFrom, queueProcessedUpTo]. */
+    queueItems: number;
+    queueProcessedFrom: number;
+    queueProcessedUpTo: number;
+    /** Исход каждой принудительной транзакции отрезка; queueIndex — место в отрезке, с нуля. */
+    forced: { queueIndex: number; outcome: 'included' | 'skipped'; reason?: string }[];
+    /** Листья дерева выводов, дозаписанные блоком. */
+    withdrawals: { leafIndex: number; recipientHash: string; amount: string }[];
+    /** Фронтир дерева выводов после блока (32 хеша). */
+    withdrawalsFrontierAfter: string[];
+    programElfSha256: string;
     zkvmCycles: number | null;
 };
 
 export const loadEvmProgramKeys = (): EvmProgramKeys => read('evm_batches', 'program.json');
-export const loadEvmBatchReport = (): EvmBatchReport => read('evm_batches', 'contract', `block-${EVM_BATCH_BLOCK}.json`);
 
-/** Ключ контракта для программы EVM (zk/gen-evm-rollup-key.mjs). Ключ выхода в нём — заглушка. */
-export function loadEvmRollupKey(): { keyHash: bigint; exitKeyHash: bigint; exitIc0: [bigint, bigint]; upload: KeyUpload; file: RollupKeyFile & { vkRoot: string } } {
-    const file = read('evm_batches', 'key.json');
-    return {
-        keyHash: BigInt(file.keyHash),
-        exitKeyHash: BigInt(file.exitKeyHash),
-        exitIc0: [BigInt(file.exitIc0[0]), BigInt(file.exitIc0[1])],
-        upload: keyUploadFromJson(file.keyUpload),
-        file,
-    };
-}
+/** Ключ контракта для программы EVM (zk/gen-evm-rollup-key.mjs). Ключа программы выхода в протоколе v2 нет. */
+export const loadEvmRollupKey = (): ExpectedRollupKey => rollupKeyFromFile(read('evm_batches', 'key.json') as RollupKeyFile);
+
+/** Публичные значения отчёта числами — в виде, который понимает batchDigest. */
+export const publicValuesOf = (report: EvmBatchReport): BatchPublicValues => ({
+    chainId: BigInt(report.publicValues.chainId),
+    prevStateRoot: BigInt(report.publicValues.prevStateRoot),
+    newStateRoot: BigInt(report.publicValues.newStateRoot),
+    batchHash: BigInt(report.publicValues.batchHash),
+    prevWithdrawalsRoot: BigInt(report.publicValues.prevWithdrawalsRoot),
+    withdrawalsRoot: BigInt(report.publicValues.withdrawalsRoot),
+    prevDepositHash: BigInt(report.publicValues.prevDepositHash),
+    newDepositHash: BigInt(report.publicValues.newDepositHash),
+    prevWithdrawalsCount: BigInt(report.publicValues.prevWithdrawalsCount),
+    withdrawalsCount: BigInt(report.publicValues.withdrawalsCount),
+    blockTimestamp: BigInt(report.publicValues.blockTimestamp),
+});
+
+/** То, что батч с этим блоком заявляет контракту (BatchRoots): четыре слова и отметка очереди. */
+export const batchRootsOf = (report: EvmBatchReport): BatchRoots => ({
+    newStateRoot: BigInt(report.publicValues.newStateRoot),
+    withdrawalsRoot: BigInt(report.publicValues.withdrawalsRoot),
+    withdrawalsCount: BigInt(report.publicValues.withdrawalsCount),
+    queueProcessedUpTo: BigInt(report.queueProcessedUpTo),
+    blockTimestamp: BigInt(report.publicValues.blockTimestamp),
+});
+
+/** Порции данных батча ячейками — как их считает программа (dataChunkCell). */
+export const dataChunksOf = (report: EvmBatchReport): Cell[] =>
+    report.dataChunksHex.map((hex) => dataChunkCell(Buffer.from(hex, 'hex')));
 
 /** Хеш исходников программы EVM по дереву на диске (zk/evm-binding.mjs). */
 export const currentEvmSourcesSha256 = (): string =>
     execFileSync('node', [path.join(ROOT, 'zk', 'evm-binding.mjs')], { encoding: 'utf8' }).trim();
 
-/** Публичный вход схемы для 256 байт публичных значений: sha256, обрезанный до 253 бит. */
+/** Публичный вход схемы для байтов публичных значений (352 байта): sha256, обрезанный до 253 бит. */
 export const publicInputOf = (publicValuesHex: string): bigint =>
     BigInt('0x' + createHash('sha256').update(Buffer.from(publicValuesHex.replace(/^0x/, ''), 'hex')).digest('hex')) &
     ((1n << 253n) - 1n);
-
-/** Годен ли пруф SP1 блока EVM для сквозного теста и почему нет. */
-export function evmProofStatus(): { current: boolean; reason: string } {
-    const file = (name: string) => path.join(FIXTURES, PROOF_DIRECTORY, name);
-    for (const required of [['evm_batches', 'program.json'], ['evm_batches', 'key.json'], ['evm_batches', 'contract', `block-${EVM_BATCH_BLOCK}.json`]]) {
-        if (!existsSync(path.join(FIXTURES, ...required))) return { current: false, reason: `нет fixtures/${required.join('/')}` };
-    }
-    const program = loadEvmProgramKeys();
-    if (program.sourcesSha256 !== currentEvmSourcesSha256()) {
-        return { current: false, reason: 'fixtures/evm_batches/program.json описывает прежние исходники программы' };
-    }
-    if (!['proof.json', 'public.json', 'source.json', 'onchain.json'].every((name) => existsSync(file(name)))) {
-        return { current: false, reason: `${PROOF_DIRECTORY}: пруфа нет` };
-    }
-    const problems: string[] = [];
-    const key = read('evm_batches', 'key.json');
-    const inputs = (read(PROOF_DIRECTORY, 'public.json') as string[]).map(BigInt);
-    const source = read(PROOF_DIRECTORY, 'source.json');
-    const onchain = read(PROOF_DIRECTORY, 'onchain.json');
-    if (key.programVKey !== program.programVKey) problems.push('ключ контракта выведен для другой программы');
-    if (inputs[0] !== BigInt(program.programVKey)) problems.push('ключ программы не тот, что в program.json');
-    if (inputs[2] !== 0n) problems.push('exitCode не ноль');
-    if (inputs[3] !== BigInt(key.vkRoot)) problems.push('vkRoot не тот, что у закреплённого верификатора');
-    if (inputs[4] !== 0n) problems.push('нонс не ноль');
-    if (source.kind !== 'batch' || source.program !== 'evm') problems.push('это не пруф программы батча EVM');
-    if (source.elfSha256 !== program.programElfSha256) problems.push('построен для другого ELF, чем записан в program.json');
-    if (inputs[1] !== publicInputOf(loadEvmBatchReport().publicValuesBytes)) {
-        problems.push('публичный вход не тот, что даёт батч для контракта');
-    }
-    if (JSON.stringify(source.variableInputs) !== '[1]') problems.push('переменных входов должно быть ровно один (дайджест)');
-    const vkHash = '0x' + Cell.fromBase64(onchain.hinted.vkDataBoc).hash().toString('hex');
-    if (vkHash !== key.keyHash) problems.push('ключ контракта не тот, что выведен из исходников (key.json)');
-    return { current: problems.length === 0, reason: problems.map((problem) => `${PROOF_DIRECTORY}: ${problem}`).join('; ') };
-}
 
 export type ProvenEvmBatch = {
     proof: Bn254Proof;
     hinted: HintedFixture;
     publicInputs: bigint[];
     report: EvmBatchReport;
-    roots: BatchRootsV1;
+    roots: BatchRoots;
     /** Порции данных (RLP блока), которые публикуются в TON до отправки батча. */
     dataChunks: Cell[];
 };
-
-/** Пруф SP1 блока EVM вместе с подсказками для контракта и данными батча. */
-export const loadProvenEvmBatch = (): ProvenEvmBatch => provenBatch(PROOF_DIRECTORY, loadEvmBatchReport());
 
 function provenBatch(directory: string, report: EvmBatchReport): ProvenEvmBatch {
     const raw = read(directory, 'proof.json');
@@ -130,22 +130,59 @@ function provenBatch(directory: string, report: EvmBatchReport): ProvenEvmBatch 
         hinted: (read(directory, 'onchain.json') as { hinted: HintedFixture }).hinted,
         publicInputs: (read(directory, 'public.json') as string[]).map(BigInt),
         report,
-        roots: {
-            newStateRoot: BigInt(report.publicValues.newStateRoot),
-            withdrawalsRoot: BigInt(report.publicValues.withdrawalsRoot),
-        },
-        dataChunks: report.dataChunksHex.map((hex) => dataChunkCell(Buffer.from(hex, 'hex'))),
+        roots: batchRootsOf(report),
+        dataChunks: dataChunksOf(report),
     };
 }
 
-// --- блоки узла Reth (zkvm-evm/scenario/reth-scenario.mjs): батчи 1–3 идут под пруфы ---
+// --- блоки узла Reth (zkvm-evm/scenario/reth-scenario.mjs) ---
 
-/** Блоки цепочки Reth, которые принимает настоящий контракт: батч k — блок k. */
+/**
+ * Блоки цепочки Reth, под которые строятся пруфы SP1 для настоящего контракта: батч k — блок k.
+ * Первые три покрывают депозит, частичную обработку очереди, включённый принудительный вывод,
+ * пропуски и выводы через мост. Пруфов v2 пока нет: строятся только по команде пользователя.
+ */
 export const RETH_PROVEN_BLOCKS = [1, 2, 3];
+/** Сколько блоков в цепочке сценария (fixtures/evm_batches/reth/block-<N>.json). */
+export const RETH_CHAIN_BLOCKS = 12;
 const rethProofDirectory = (block: number) => `sp1_evm_reth${block}`;
-export const loadRethBatchReport = (block: number): EvmBatchReport & { programElfSha256: string } =>
-    read('evm_batches', 'reth', `block-${block}.json`);
-export const loadRethExpected = () => read('evm_batches', 'reth', 'expected.json');
+export const loadRethBatchReport = (block: number): EvmBatchReport => read('evm_batches', 'reth', `block-${block}.json`);
+
+/** Элемент очереди L1 цепочки: депозит либо принудительная транзакция; `batch` — каким батчем обработан. */
+export type RethQueueItem =
+    | { number: number; batch: number; kind: 'deposit'; l2Recipient: string; amount: string }
+    | { number: number; batch: number; kind: 'forced'; label: string; bytes: string; outcome: string };
+
+export type RethExit = { account: string; balanceWei: string; nonce: number; accountProof: string[]; signature: string };
+
+/** Описание цепочки сценария (fixtures/evm_batches/reth/expected.json). */
+export type RethExpected = {
+    protocolVersion: number;
+    chainId: string;
+    /** Хеш заголовка генезиса цепочки: с ним обязана совпасть константа GENESIS_HASH контракта. */
+    genesisHash: string;
+    programElfSha256: string;
+    blocks: {
+        number: number;
+        note: string;
+        hash: string;
+        parentHash: string;
+        timestamp: number;
+        queueProcessedFrom: number;
+        queueProcessedUpTo: number;
+        /** Сколько элементов стояло в очереди L1, когда батч с этим блоком принят. */
+        headAtBatch: number;
+        withdrawalsRoot: string;
+        withdrawalsCount: number;
+    }[];
+    queue: RethQueueItem[];
+    withdrawals: { leafIndex: number; recipientHash: string; amount: string; block: number }[];
+    /** Получатель выплат в basechain (хеш адреса): на него подписаны согласия на выход. */
+    exitRecipientHash: string;
+    /** Аварийные выходы счетов против состояния после каждого блока. */
+    exitsByBlock: { block: number; blockHash: string; consentHash: string; exits: RethExit[] }[];
+};
+export const loadRethExpected = (): RethExpected => read('evm_batches', 'reth', 'expected.json');
 
 /**
  * Годны ли пруфы SP1 блоков Reth для сквозного теста и почему нет. Каждый запуск сценария даёт
@@ -180,6 +217,7 @@ export function rethProofStatus(): { current: boolean; reason: string } {
         if (source.elfSha256 !== program.programElfSha256) problem('построен для другого ELF, чем записан в program.json');
         if (report.programElfSha256.replace(/^0x/, '') !== program.programElfSha256.replace(/^0x/, '')) problem('блок исполнен другим ELF');
         if (inputs[1] !== publicInputOf(report.publicValuesBytes)) problem('публичный вход не тот, что даёт блок нынешней цепочки Reth');
+        if (String(source.publicValues ?? '').replace(/^0x/, '').length !== 704) problem('публичных значений не 352 байта: пруф прежнего протокола');
         if (JSON.stringify(source.variableInputs) !== '[1]') problem('переменных входов должно быть ровно один (дайджест)');
         const vkHash = '0x' + Cell.fromBase64(onchain.hinted.vkDataBoc).hash().toString('hex');
         if (vkHash !== key.keyHash) problem('ключ контракта не тот, что выведен из исходников (key.json)');

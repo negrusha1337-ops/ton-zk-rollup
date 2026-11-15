@@ -179,6 +179,8 @@ export type PlantedState = {
     pendingData?: Dictionary<bigint, bigint>;
     /** Долги (RollupState.owed): ключ нуллификатора → кому и сколько. */
     owed?: Dictionary<bigint, { recipient: Address; amount: bigint }>;
+    /** Аварийный режим уже включён. */
+    frozen?: boolean;
     /** Ключ уже «зафиксирован» (значение — эта ячейка): минуя FinalizeKey, который такое состояние отверг бы. */
     vkData?: Cell;
 };
@@ -216,7 +218,7 @@ export class Rollup implements Contract {
             .storeRef(queue)
             .storeDict(planted.pendingData ?? null) // pendingData: данных батчей ещё нет
             .storeDict(planted.queueItems ?? null) // queueItems: очередь пуста
-            .storeBit(false) // frozen
+            .storeBit(planted.frozen ?? false) // frozen
             .storeDict(planted.owed ?? null) // owed: долгов нет
             .endCell();
         const keys = beginCell()
@@ -279,6 +281,11 @@ export class Rollup implements Contract {
         state.loadMaybeRef(); // pendingData
         const items = state.loadDict(Dictionary.Keys.BigUint(64), QueueEntryValue);
         return { head, processed, prunedCount, items };
+    }
+
+    /** Собранный ключ (RollupKeys.vkData) из ячейки данных контракта; null, пока ключ не зафиксирован. */
+    static finalizedKeyCell(data: Cell): Cell | null {
+        return data.beginParse().loadRef().beginParse().loadMaybeRef();
     }
 
     /**

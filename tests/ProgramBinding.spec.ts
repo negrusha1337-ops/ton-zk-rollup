@@ -1,8 +1,13 @@
 import { spawnSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
-import { currentSourcesSha256, fixtureProblems, loadProgramKeys, SP1_FIXTURES } from '../wrappers/sp1Proofs';
-import { loadRollupKey } from '../wrappers/rollupDeployment';
+import {
+    currentSourcesSha256,
+    fixtureProblems,
+    loadProgramKeys,
+    loadToyRollupKey,
+    SP1_FIXTURES,
+} from '../wrappers/sp1Proofs';
 
 // Цепочка «исходники программ → ключ программы → ключ контракта → пруфы».
 //
@@ -16,9 +21,12 @@ import { loadRollupKey } from '../wrappers/rollupDeployment';
 //   • фикстуры пруфов, если они есть, построены для этих же ключей и исходников.
 // Чего здесь НЕТ: проверки, что ключ программы действительно получается из этих
 // исходников. Для неё нужно пересобрать ELF (cargo prove build) — см. PROVING.md.
+// Это цепочка программ игрушечного реестра (zkvm/), замороженных на протоколе v1 (тег
+// protocol-v1): их ключ и пруфы контракту v2 не подходят, но привязка к исходникам остаётся
+// верной и сторожит zkvm/ от случайной правки. Цепочка программы EVM — tests/RollupKeys.spec.ts.
 describe('Привязка ключей к исходникам программ zkVM', () => {
     const programs = loadProgramKeys();
-    const key = loadRollupKey();
+    const key = loadToyRollupKey();
 
     it('program.json описывает нынешние исходники программ', () => {
         // Упало — значит, zkvm/lib, zkvm/exit-lib или гостевые программы изменились, а ключи

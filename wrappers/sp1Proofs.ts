@@ -2,6 +2,7 @@ import { execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { Cell } from '@ton/core';
+import { KeyUpload, KeyUploadJson, keyUploadFromJson } from './Bn254Groth16Verifier';
 
 // Пруфы SP1 наших программ и их привязка к исходникам.
 //
@@ -27,6 +28,27 @@ export type ProgramKeys = {
 };
 
 export const loadProgramKeys = (): ProgramKeys => readJson('zkvm_batches', 'program.json');
+
+/**
+ * Файл ключа контракта ПРОТОКОЛА v1 для программ игрушечного реестра
+ * (fixtures/zkvm_batches/key.json, пишет zk/gen-rollup-key.mjs): в нём ещё есть ключ программы
+ * выхода. Контракту v2 этот ключ не подходит; нужен цепочке привязки zkvm/ (ProgramBinding).
+ */
+export type ToyRollupKeyFile = {
+    circuitVersion: string;
+    sourcesSha256: string;
+    programVKey: string;
+    exitProgramVKey: string;
+    keyHash: string;
+    exitKeyHash: string;
+    exitIc0: [string, string];
+    keyUpload: KeyUploadJson;
+};
+
+export function loadToyRollupKey(): { keyHash: bigint; upload: KeyUpload; file: ToyRollupKeyFile } {
+    const file = readJson('zkvm_batches', 'key.json') as ToyRollupKeyFile;
+    return { keyHash: BigInt(file.keyHash), upload: keyUploadFromJson(file.keyUpload), file };
+}
 
 /** Хеш исходников программ по дереву на диске (zk/program-binding.mjs). */
 export const currentSourcesSha256 = (): string =>

@@ -2,8 +2,8 @@ import { spawnSync } from 'child_process';
 import path from 'path';
 import { Address, fromNano } from '@ton/core';
 import { compile, NetworkProvider } from '@ton/blueprint';
-import { currentEvmSourcesSha256, loadEvmProgramKeys, loadEvmRollupKey } from '../wrappers/evmProofs';
-import { proofFixturesBlocker } from '../wrappers/protocolVersion';
+import { currentEvmSourcesSha256, loadEvmProgramKeys, loadEvmRollupKey, loadRethExpected } from '../wrappers/evmProofs';
+import { PROTOCOL_VERSION } from '../wrappers/protocolVersion';
 import { Rollup } from '../wrappers/Rollup';
 import { deploymentMismatches, readOnchainRollup } from '../wrappers/rollupDeployment';
 
@@ -22,9 +22,11 @@ import { deploymentMismatches, readOnchainRollup } from '../wrappers/rollupDeplo
 //     срока заморозки): на столько время L2 может отставать от времени L1;
 //   • по желанию — кто секвенсор и кто владелец. Без этих аргументов скрипт их только печатает.
 //
-// Генезис задавать не нужно: хеш заголовка генезиса — константа протокола в коде контракта
-// (get-метод genesisHash), а код собирается из исходников этого репозитория. Контракт сам
-// отказывается фиксировать ключ, если начальное слово состояния — не эта константа.
+// Генезис задавать не нужно: хеш заголовка генезиса — константа протокола. Скрипт берёт её
+// ожидаемое значение у цепочки L2 этого репозитория (fixtures/evm_batches/reth/expected.json —
+// генезис, от которого узел Reth построил блоки, а программа zkVM их исполнила) и сверяет с
+// константой в коде контракта (get-метод genesisHash). Контракт сам отказывается фиксировать
+// ключ, если начальное слово состояния — не эта константа.
 //
 // Что скрипт делает:
 //   1) собирает код rollup-контракта и нуллификатора из исходников этого репозитория;
@@ -40,9 +42,9 @@ import { deploymentMismatches, readOnchainRollup } from '../wrappers/rollupDeplo
 // Ключа программы выхода в протоколе v2 нет: шага SetExitKey и его сверки больше нет.
 //
 // Чего скрипт НЕ проверяет: что ключ программы в program.json действительно получается из
-// исходников zkvm-evm/ (нужна пересборка программы — PROVING.md); что константа генезиса в
-// коде — хеш именно того генезиса, который описан в документах (её закрепляет шаг программы);
-// покрывает ли баланс контракта его обязательства; кто стоит за владельцем и секвенсором.
+// исходников zkvm-evm/ (нужна пересборка программы — PROVING.md); что в генезисе цепочки нет
+// счетов с балансом (это свойство генезиса, хеш которого записан в expected.json: его
+// проверяют сценарий цепочки и нативные тесты программы, не этот скрипт); покрывает ли баланс контракта его обязательства; кто стоит за владельцем и секвенсором.
 export async function run(provider: NetworkProvider, args: string[]) {
     const ui = provider.ui();
     const positional = args.filter((arg) => !arg.includes('='));
@@ -72,6 +74,7 @@ export async function run(provider: NetworkProvider, args: string[]) {
     const sequencer = named.has('sequencer') ? Address.parse(named.get('sequencer')!) : deployment.sequencer;
 
     const key = loadEvmRollupKey();
+    const expectedGenesis = BigInt(loadRethExpected().genesisHash);
     const problems = deploymentMismatches(onchain, {
         config: {
             owner,
@@ -82,8 +85,9 @@ export async function run(provider: NetworkProvider, args: string[]) {
             escapeTimeout: deployment.escapeTimeout,
             maxBlockAge: deployment.maxBlockAge,
             nullifierCode: await compile('RollupNullifier'),
-            // Константа протокола из кода: код ниже собран из исходников, и адрес это связывает.
-            genesisStateRoot: onchain.genesisHash,
+            // Ожидаемый генезис — у цепочки L2, а не у контракта: иначе сверка константы кода
+            // сравнивала бы значение с самим собой (REVIEW.md, 14-10).
+            genesisStateRoot: expectedGenesis,
         },
         code: await compile('Rollup'),
         key,
@@ -94,9 +98,10 @@ export async function run(provider: NetworkProvider, args: string[]) {
     if (deployment.maxBlockAge > maxAge) {
         problems.push(`наибольший возраст блока ${deployment.maxBlockAge} с больше допустимых ${maxAge} с`);
     }
-    // Пока ключ в fixtures/ построен под прежний протокол, сверка сойтись не может.
-    const blocker = proofFixturesBlocker();
-    if (blocker) problems.push(`ключ для сверки негоден: ${blocker}`);
+    // Ключ для сверки обязан быть ключом программы нынешнего протокола.
+    if (key.file.protocolVersion !== PROTOCOL_VERSION) {
+        problems.push(`key.json выведен для протокола v${key.file.protocolVersion}, контракт — протокола v${PROTOCOL_VERSION}`);
+    }
     // Ключ в key.json обязан быть выведен из нынешних исходников программы.
     const programs = loadEvmProgramKeys();
     const sources = currentEvmSourcesSha256();
@@ -124,7 +129,7 @@ export async function run(provider: NetworkProvider, args: string[]) {
     ui.write(`chainId:         ${deployment.chainId} (ожидался ${expectedChainId})`);
     ui.write(`Срок заморозки:  ${deployment.escapeTimeout} с (требовалось не меньше ${minTimeout})`);
     ui.write(`Возраст блока:   до ${deployment.maxBlockAge} с (допускалось не больше ${maxAge})`);
-    ui.write(`Генезис:         0x${onchain.genesisHash.toString(16)} (константа кода контракта)`);
+    ui.write(`Генезис:         0x${onchain.genesisHash.toString(16)} (константа кода; ожидался 0x${expectedGenesis.toString(16)} — генезис цепочки L2)`);
     ui.write(`Ключ батчей:     0x${onchain.keyHash.toString(16)}`);
     ui.write(`Исходники программы (sha256): ${sources}`);
     ui.write(

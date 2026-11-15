@@ -1,5 +1,3 @@
-import { readFileSync } from 'fs';
-import path from 'path';
 import { Address, Cell } from '@ton/core';
 import { KeyUpload, KeyUploadJson, keyUploadFromJson } from './Bn254Groth16Verifier';
 import { PROTOCOL_VERSION } from './protocolVersion';
@@ -22,7 +20,10 @@ import { Rollup, RollupConfig } from './Rollup';
 //      секвенсор, chainId, срок, возраст блока и код нуллификатора;
 //   2) ключ, зафиксированный уже после развёртывания, — это ключ из файла ключа, а тот
 //      выводится из закреплённого верификатора SP1 и исходников программы, без чьего-либо пруфа;
-//   3) начальное слово состояния — константа генезиса в коде контракта (get-метод genesisHash).
+//   3) константа генезиса в коде контракта (get-метод genesisHash) — хеш того генезиса, от
+//      которого построена цепочка L2. Ожидаемое значение проверяющий берёт НЕ у контракта:
+//      у цепочки (fixtures/evm_batches/reth/expected.json, loadRethExpected) либо из своего
+//      источника. Сверять слово состояния с тем, что сообщил сам контракт, бессмысленно.
 //
 // Ключа программы выхода в протоколе v2 нет: шаг SetExitKey из развёртывания убран.
 // Порядок развёртывания: части ключа → сверка частей → FinalizeKey → сверка развёртывания.
@@ -30,39 +31,31 @@ import { Rollup, RollupConfig } from './Rollup';
 // Этим пользуются тесты и scripts/verifyRollupDeployment.ts.
 
 /**
- * Ключ контракта, выведенный из исходников (fixtures/zkvm_batches/key.json). Поля ключа
- * программы выхода остались в файлах прежнего протокола; контракту v2 они не нужны.
+ * Файл ключа контракта, выведенного из исходников программы батчей
+ * (fixtures/evm_batches/key.json, пишет zk/gen-evm-rollup-key.mjs). Ключ у контракта один:
+ * ключа программы выхода в протоколе v2 нет.
  */
 export type RollupKeyFile = {
+    protocolVersion: number;
     circuitVersion: string;
+    verifierHash: string;
+    vkRoot: string;
     sourcesSha256: string;
     programVKey: string;
-    exitProgramVKey: string;
+    programElfSha256: string;
     keyHash: string;
-    exitKeyHash: string;
-    exitIc0: [string, string];
     keyUpload: KeyUploadJson;
 };
 
 export type ExpectedRollupKey = {
     keyHash: bigint;
-    exitKeyHash: bigint;
-    exitIc0: [bigint, bigint];
     upload: KeyUpload;
     file: RollupKeyFile;
 };
 
-export function loadRollupKey(): ExpectedRollupKey {
-    const file = JSON.parse(
-        readFileSync(path.join(__dirname, '..', 'fixtures', 'zkvm_batches', 'key.json'), 'utf8'),
-    ) as RollupKeyFile;
-    return {
-        keyHash: BigInt(file.keyHash),
-        exitKeyHash: BigInt(file.exitKeyHash),
-        exitIc0: [BigInt(file.exitIc0[0]), BigInt(file.exitIc0[1])],
-        upload: keyUploadFromJson(file.keyUpload),
-        file,
-    };
+/** Разбор файла ключа: хеш собранного ключа и его части для загрузки. */
+export function rollupKeyFromFile(file: RollupKeyFile): ExpectedRollupKey {
+    return { keyHash: BigInt(file.keyHash), upload: keyUploadFromJson(file.keyUpload), file };
 }
 
 /** То, что сообщает о себе развёрнутый контракт (get-методы protocolVersion, genesisHash, deployment, keyHash). */
@@ -118,8 +111,9 @@ export function deploymentMismatches(
         problems.push('наибольший возраст блока вне допустимых границ');
     }
     if (deployment.nullifierCodeHash !== hashOf(config.nullifierCode)) problems.push('код нуллификатора не тот');
-    // Генезис: начальное слово состояния обязано быть константой протокола из кода контракта.
-    // Адрес выше уже связал его с ожидаемым; здесь — что ожидаемое и есть закреплённый генезис.
+    // Генезис: адрес выше связал начальное слово состояния с ожидаемым; здесь — что константа
+    // в коде контракта (с ней он сверяет слово состояния при фиксации ключа) равна ожидаемому
+    // генезису. Ожидаемое обязано прийти не от контракта, иначе сравнение ничего не значит.
     if (config.genesisStateRoot !== onchain.genesisHash) problems.push('начальное слово состояния — не хеш генезиса протокола');
     if (onchain.keyHash === 0n) {
         problems.push('ключ не зафиксирован: rollup ещё не принимает депозиты');
