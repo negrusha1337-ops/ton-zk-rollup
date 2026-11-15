@@ -38,8 +38,9 @@ Groth16 и принят тем же контрактом в Sandbox и в testne
 дерево Merkle-Patricia и подпись прямо в TVM, без zkVM. 103–144 тыс. gas на настоящих
 доказательствах из трёх–пяти узлов (в том числе против блока, принятого по пруфу SP1),
 454 тыс. на дереве из десяти полных веток
-([ARCHITECTURE.md](ARCHITECTURE.md), «Аварийный выход счёта EVM без пруфа»). Только Sandbox:
-в testnet не проверено; токены и контракты L2 так не выходят.
+([ARCHITECTURE.md](ARCHITECTURE.md), «Аварийный выход счёта EVM без пруфа»). В testnet
+15.11.2026 выход прошёл на контракте [`EQD06rb5…Kpl3XPy`](https://testnet.tonviewer.com/EQD06rb5PMYFl7JYjFy28ffvPhYtp_TjunTGp2b71Kpl3XPy): 143 859 gas, как в Sandbox ([TESTNET.md](TESTNET.md)).
+Токены и контракты L2 так не выходят.
 
 ## Документы
 
