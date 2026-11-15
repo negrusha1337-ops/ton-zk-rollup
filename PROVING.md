@@ -286,6 +286,13 @@ npx jest tests/ProgramBinding.spec.ts tests/RollupEvmRethProof.spec.ts
   шёл 15,4 минуты (`bench/rollup-evm-proof.json`, история).
 - GPU не нужен.
 
+Замер на арендованном сервере с NVIDIA — [`zkvm-evm/host/remote/README.md`](zkvm-evm/host/remote/README.md)
+(ещё не запускался). ELF там не пересобирается: хост берёт собранный на маке через `--elf` и
+сверяет его sha256 и ключ с `program.json`. Прувер — `SP1_PROVER=cuda` в сборке с `--features
+cuda`; если обёртка Groth16 не поместится в видеопамять — два шага: `--prove-compressed` на GPU и
+`--wrap-groth16` на процессоре. Присланный пруф импортируется под меткой (`sp1_evm_reth3_gpu`) и
+проверяется `tests/RollupEvmRemoteProof.spec.ts`.
+
 `zkvm-evm/host/prove-guarded.sh` не стартует, если уже работает другой прувер или мало места,
 и останавливает прувер, если свободного места меньше `MIN_FREE_GB` (по умолчанию 8) или запуск
 длится дольше `MAX_TOTAL_MINUTES` (по умолчанию 60). Неудачная попытка лучше зависшей машины.
