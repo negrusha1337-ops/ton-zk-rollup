@@ -273,3 +273,10 @@ export function rethProofStatus(): { current: boolean; reason: string } {
 
 /** Пруф SP1 блока Reth вместе с подсказками для контракта и данными батча. */
 export const loadProvenRethBatch = (block: number): ProvenEvmBatch => provenBatch(rethProofDirectory(block), loadRethBatchReport(block));
+
+/**
+ * Тот же блок, но пруф — из другого каталога фикстуры (fixtures/<каталог>): пруф, построенный на
+ * арендованном сервере и импортированный рядом с основным (zkvm-evm/host/remote/).
+ */
+export const loadProvenRethBatchFrom = (directory: string, block: number): ProvenEvmBatch =>
+    provenBatch(directory, loadRethBatchReport(block));

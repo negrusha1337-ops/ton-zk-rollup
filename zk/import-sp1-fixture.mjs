@@ -10,6 +10,8 @@
 // Без имени пишет fixtures/sp1_v6_fibonacci (пруф шаблона Succinct). С именем — пруф нашей
 // собственной программы из zkvm/script (fixtures/zkvm_batches/proof-batch<N>.json): версия
 // верификатора должна совпадать с версией схемы SDK, иначе не сойдётся selector пруфа.
+// У пруфов программы EVM после номера блока допустима метка: sp1_evm_reth3_gpu — пруф блока 3,
+// построенный на арендованном сервере (zkvm-evm/host/remote/), рядом с fixtures/sp1_evm_reth3.
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -84,8 +86,11 @@ function scenarioPublicValues(kind, name, evm = false, prefix = '', reportDirect
     if (evm) {
         // Батч для контракта: fixtures/evm_batches/<каталог>/block-<N>.json пишет хост после
         // сверки публичных значений zkVM с нативным расчётом (сценарии в zkvm-evm/scenario/).
-        const block = name.slice(prefix.length);
-        if (!/^[0-9]+$/.test(block)) throw new Error(`В имени ${name} нет номера блока`);
+        // После номера блока допустима метка через подчёркивание (sp1_evm_reth3_gpu): тот же
+        // блок, пруф построен в другом месте и импортируется рядом, не затирая основной.
+        const match = /^([0-9]+)(?:_[a-z0-9]+)?$/.exec(name.slice(prefix.length));
+        if (!match) throw new Error(`В имени ${name} нет номера блока`);
+        const block = match[1];
         return read('evm_batches', reportDirectory, `block-${block}.json`).publicValuesBytes.slice(2);
     }
     if (kind === 'batch') {

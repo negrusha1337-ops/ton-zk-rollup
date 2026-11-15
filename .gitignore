@@ -27,3 +27,7 @@ Session.vim
 .tools/
 circuits/build/
 .claude/
+
+# Пруфы с арендованного сервера (zkvm-evm/host/remote/): импорт для проверки рядом с основными,
+# в репозиторий не идут. Сырые файлы с сервера — в .tools/remote-proofs/.
+fixtures/sp1_evm_reth*_*/
