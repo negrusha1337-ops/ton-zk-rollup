@@ -1,10 +1,20 @@
-// Два батча для сквозного теста rollup-контракта с НАСТОЯЩЕЙ проверкой пруфа.
+// Батчи для сквозного теста rollup-контракта протокола v2 с НАСТОЯЩЕЙ проверкой пруфа.
 //
 // Пруф здесь строится игрушечной схемой Multiplier (BN254): её единственный публичный
 // вход можно сделать равным любому числу, и мы делаем его равным дайджесту публичных
-// значений батча. Настоящие пруфы программы перехода состояния — в fixtures/sp1_rollup_batch*.
-// Переход состояния такой пруф НЕ доказывает — он нужен, чтобы контракт прошёл весь
-// настоящий путь: дайджест → верификатор → смена корня, и чтобы измерить газ.
+// значений батча (одиннадцать слов, PROTOCOL-V2.md). Переход состояния такой пруф НЕ
+// доказывает — он нужен, чтобы контракт прошёл весь настоящий путь: дайджест → верификатор →
+// смена состояния, и чтобы измерить газ SubmitBatch без пруфов SP1.
+//
+// Что в фикстуре:
+//   • три батча полного пути (очередь L1 с депозитом и принудительной транзакцией, отметка
+//     очереди в середине и на голове, данные, дерево выводов) — у каждого «лучшая подделка»
+//     и пруф с испорченной точкой;
+//   • wordForgeries — пруф батча 3 с ЧЕСТНЫМИ подсказками под дайджест, в котором подменено
+//     одно из одиннадцати слов: тест приводит контракт в состояние, где он требует именно этот
+//     дайджест, и ждёт отказа замыкающим равенством (7300) — по случаю на слово;
+//   • fullQueue — батч для замера газа на словаре очереди, заполненном до предела;
+//   • attacks — честный пруф батча, построенного от поддельного прежнего дерева выводов.
 //
 // Требует локальных артефактов: node zk/build.mjs multiplier_bn254.
 // Результат: fixtures/rollup_batches/batches.json. Сценарий должен совпадать с
@@ -13,6 +23,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { keccak_256 } from '@noble/hashes/sha3';
 import * as snarkjs from 'snarkjs';
 import ton from '@ton/core';
 import { buildProofHints, buildVerificationKeyData, parseProof, parseVerificationKey } from './bn254-onchain.mjs';
@@ -69,75 +80,133 @@ const chunkBytes = (text, length) => {
     return Buffer.concat(blocks).subarray(0, length);
 };
 
-const batchDigest = (v) =>
-    sha256Int(
-        CHAIN_ID,
-        v.prevStateRoot,
-        v.newStateRoot,
-        v.batchHash,
-        v.prevWithdrawalsRoot,
-        v.withdrawalsRoot,
-        v.prevDepositHash,
-        v.newDepositHash,
-    ) & MASK_253;
+/** Слова публичных значений по порядку — как batchPublicValueWords в wrappers/rollupMath.ts. */
+const WORDS = [
+    'chainId',
+    'prevStateRoot',
+    'newStateRoot',
+    'batchHash',
+    'prevWithdrawalsRoot',
+    'withdrawalsRoot',
+    'prevDepositHash',
+    'newDepositHash',
+    'prevWithdrawalsCount',
+    'withdrawalsCount',
+    'blockTimestamp',
+];
+const batchDigest = (v) => sha256Int(...WORDS.map((word) => v[word])) & MASK_253;
+
+// Очередь L1 — как в contracts/rollup/logic.tolk (pushQueueItem) и wrappers/rollupMath.ts.
+const FORCED_TRANSACTION_MARKER = 1n << 255n;
+const depositHash = (previous, l2Recipient, amount) => sha256Int(previous, l2Recipient, amount);
+const forcedTransactionHash = (previous, bytes) =>
+    sha256Int(previous, FORCED_TRANSACTION_MARKER, BigInt('0x' + Buffer.from(keccak_256(bytes)).toString('hex')));
+
+// Дерево выводов: лист sha256(номер ‖ хеш получателя ‖ сумма), пустой лист — 0; корень дерева
+// из первых n листьев (n > 0) — свёртка с хешами пустых поддеревьев.
+const emptySubtrees = [0n];
+for (let level = 0; level < TREE_DEPTH; level++) emptySubtrees.push(sha256Int(emptySubtrees[level], emptySubtrees[level]));
+const leafHash = (leaf) => sha256Int(BigInt(leaf.leafIndex), leaf.recipientHash, leaf.amount);
+function withdrawalsRootOf(leaves) {
+    if (leaves.length === 0) return 0n;
+    let level = leaves.map(leafHash);
+    for (let depth = 0; depth < TREE_DEPTH; depth++) {
+        const next = [];
+        for (let index = 0; index < level.length; index += 2) {
+            next.push(sha256Int(level[index], level[index + 1] ?? emptySubtrees[depth]));
+        }
+        level = next;
+    }
+    return level[0];
+}
 
 // --- сценарий ---
 const TON = 1_000_000_000n;
 // Идентификатор rollup'а этого сценария: тест развёртывает контракт с ним же.
 const CHAIN_ID = 20261113n;
-const genesisStateRoot = label('stage1:genesis');
+// Начальное слово состояния — хеш генезиса протокола: с другим контракт v2 не фиксирует ключ.
+// Берётся у цепочки L2 (тест сверяет его с константой контракта).
+const genesisStateRoot = BigInt(
+    JSON.parse(readFileSync(path.join(ROOT, 'fixtures', 'evm_batches', 'reth', 'expected.json'), 'utf8')).genesisHash,
+);
+// Время блоков L2: тест принимает батч через минуту после времени его блока.
+const BLOCK_TIME = [1_900_000_000n, 1_900_000_600n, 1_900_001_200n];
+
+// Очередь L1: депозит встаёт до батча 1, принудительная транзакция — между батчами 1 и 2.
 const deposit = { l2Recipient: label('stage1:l2-recipient') >> 96n, value: 1n * TON, fee: TON / 100n };
 const depositAmount = deposit.value - deposit.fee;
-const depositHashAfter = sha256Int(0n, deposit.l2Recipient, depositAmount);
+const forcedTransaction = chunkBytes('stage1:forced-transaction', 150);
+const queueHash = [0n];
+queueHash.push(depositHash(queueHash[0], deposit.l2Recipient, depositAmount));
+queueHash.push(forcedTransactionHash(queueHash[1], forcedTransaction));
 
-const withdrawal = { leafIndex: 0, recipientHash: label('stage1:withdraw-recipient'), amount: TON / 4n };
-// Дерево выводов с единственным листом 0: соседи — хеши пустых поддеревьев.
-const siblings = [0n];
-for (let level = 1; level < TREE_DEPTH; level++) siblings.push(sha256Int(siblings[level - 1], siblings[level - 1]));
-let withdrawalsRoot = sha256Int(BigInt(withdrawal.leafIndex), withdrawal.recipientHash, withdrawal.amount);
-for (const sibling of siblings) withdrawalsRoot = sha256Int(withdrawalsRoot, sibling);
+// Дерево выводов: батч 2 публикует первый лист, батч 3 дозаписывает второй.
+const withdrawals = [
+    { leafIndex: 0, recipientHash: label('stage1:withdraw-recipient'), amount: TON / 4n },
+    { leafIndex: 1, recipientHash: label('stage1:withdraw-recipient-2'), amount: TON / 10n },
+];
+const rootAfter = [0n, withdrawalsRootOf(withdrawals.slice(0, 1)), withdrawalsRootOf(withdrawals)];
 
 // Данные батчей (data availability): батч 1 — без данных, батч 2 — две порции, вторая
-// длиннее одной ячейки. Содержимое произвольное: игрушечная схема его не исполняет.
-const batchData = [[], [chunkBytes('stage1:data-2a', 100), chunkBytes('stage1:data-2b', 700)], []];
-// Корень дерева выводов после батча 3: к листу 0 добавился ещё один вывод. Само дерево
-// тесту не нужно — важно, что батч 3 продолжает НЕнулевой прежний корень.
-const withdrawalsRootAfter3 = label('stage1:withdrawals-root-3');
+// длиннее одной ячейки, батч 3 — одна. Содержимое произвольное: игрушечная схема его не исполняет.
+const batchData = [
+    [],
+    [chunkBytes('stage1:data-2a', 100), chunkBytes('stage1:data-2b', 700)],
+    [chunkBytes('stage1:data-3', 300)],
+];
 
 const batchValues = [
     {
-        // Батч 1: депозит уже в очереди, но цель зафиксирована на генезисе — депозиты не обрабатываются.
+        // Батч 1: в очереди депозит, но блок его не обработал — отметка N = 0 в середине очереди
+        // (хеш в точке N контракт берёт из словаря очереди).
+        chainId: CHAIN_ID,
         prevStateRoot: genesisStateRoot,
         newStateRoot: label('stage1:state-1'),
         batchHash: batchDataHash(batchData[0]),
         prevWithdrawalsRoot: 0n,
         withdrawalsRoot: 0n,
-        prevDepositHash: 0n,
-        newDepositHash: 0n,
+        prevDepositHash: queueHash[0],
+        newDepositHash: queueHash[0],
+        prevWithdrawalsCount: 0n,
+        withdrawalsCount: 0n,
+        blockTimestamp: BLOCK_TIME[0],
+        queueProcessedUpTo: 0n,
     },
     {
-        // Батч 2: обязан обработать депозит и публикует корень дерева выводов.
+        // Батч 2: обрабатывает депозит (N = 1; в очереди уже два элемента — отметка снова в
+        // середине), публикует данные и первый лист дерева выводов.
+        chainId: CHAIN_ID,
         prevStateRoot: label('stage1:state-1'),
         newStateRoot: label('stage1:state-2'),
         batchHash: batchDataHash(batchData[1]),
-        // Батч 1 выводов не публиковал: прежний корень дерева — ноль.
-        prevWithdrawalsRoot: 0n,
-        withdrawalsRoot,
-        prevDepositHash: 0n,
-        newDepositHash: depositHashAfter,
+        prevWithdrawalsRoot: rootAfter[0],
+        withdrawalsRoot: rootAfter[1],
+        prevDepositHash: queueHash[0],
+        newDepositHash: queueHash[1],
+        prevWithdrawalsCount: 0n,
+        withdrawalsCount: 1n,
+        blockTimestamp: BLOCK_TIME[1],
+        queueProcessedUpTo: 1n,
     },
     {
-        // Батч 3: без данных и без новых депозитов; дерево выводов продолжается от корня,
-        // который опубликовал батч 2 (он уже не нулевой).
+        // Батч 3: обрабатывает принудительную транзакцию (N = 2 — голова очереди) и продолжает
+        // НЕнулевые прежние корень и счётчик выводов. Все одиннадцать слов ненулевые: на нём
+        // проверяется подмена каждого слова.
+        chainId: CHAIN_ID,
         prevStateRoot: label('stage1:state-2'),
         newStateRoot: label('stage1:state-3'),
         batchHash: batchDataHash(batchData[2]),
-        prevWithdrawalsRoot: withdrawalsRoot,
-        withdrawalsRoot: withdrawalsRootAfter3,
-        prevDepositHash: depositHashAfter,
-        newDepositHash: depositHashAfter,
+        prevWithdrawalsRoot: rootAfter[1],
+        withdrawalsRoot: rootAfter[2],
+        prevDepositHash: queueHash[1],
+        newDepositHash: queueHash[2],
+        prevWithdrawalsCount: 1n,
+        withdrawalsCount: 2n,
+        blockTimestamp: BLOCK_TIME[2],
+        queueProcessedUpTo: 2n,
     },
 ];
+if (WORDS.some((word) => batchValues[2][word] === 0n)) throw new Error('В батче 3 все слова обязаны быть ненулевыми');
 
 // --- ключ и пруфы ---
 const vkJson = JSON.parse(readFileSync(path.join(KEY_DIR, 'verification_key.json'), 'utf8'));
@@ -160,36 +229,22 @@ const proofArray = (proof) => [
     proof.pi_c[0],
     proof.pi_c[1],
 ];
-/**
- * Пруф игрушечной схемы и подсказки к нему. Контракт проверяет его под вход `digest` ключом
- * `usedKey`; сама схема при этом доказывает вход `digest + shift`. Для ключа батчей сдвиг
- * нулевой. Для ключа выхода — EXIT_KEY_SHIFT: его IC0 сдвинут на shift·IC1, поэтому
- *   IC0' + digest·IC1 = IC0 + (digest + shift)·IC1,
- * и пруф для входа digest + shift проходит под ключом выхода со входом digest — и только
- * под ним. Так ключ выхода в тестах отличается от ключа батчей, как у настоящих программ.
- */
-async function proveDigest(digest, what, usedKey = key, usedPrepared = prepared, shift = 0n) {
-    const circuitInput = digest + shift;
-    const { proof, publicSignals } = await snarkjs.groth16.fullProve(
-        { a: circuitInput.toString(), b: '1' },
-        wasm,
-        zkey,
-    );
-    if (BigInt(publicSignals[0]) !== circuitInput || !(await snarkjs.groth16.verify(vkJson, publicSignals, proof))) {
+/** Пруф игрушечной схемы, чей публичный вход равен `digest`, и подсказки к нему. */
+async function proveDigest(digest, what) {
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve({ a: digest.toString(), b: '1' }, wasm, zkey);
+    if (BigInt(publicSignals[0]) !== digest || !(await snarkjs.groth16.verify(vkJson, publicSignals, proof))) {
         throw new Error(`${what}: пруф не сошёлся с дайджестом`);
     }
     const points = parseProof(proof);
-    return { proof, points, hints: buildProofHints(usedKey, usedPrepared, points, [digest]).hints };
+    return { proof, points, hints: buildProofHints(key, prepared, points, [digest]).hints };
 }
 /**
  * «Лучшая подделка»: настоящий пруф предъявлен под другой публичный вход, а все
  * подсказки посчитаны честно для этого ложного утверждения. Не сходится только
  * замыкающее равенство — контракт обязан отказать именно на нём (WrongProof).
  */
-const forgedHints = (points, falseDigest, usedKey = key, usedPrepared = prepared) =>
-    buildProofHints(usedKey, usedPrepared, points, [falseDigest], { forge: true })
-        .hints.toBoc()
-        .toString('base64');
+const forgedHints = (points, falseDigest) =>
+    buildProofHints(key, prepared, points, [falseDigest], { forge: true }).hints.toBoc().toString('base64');
 /**
  * Подделка второго вида: вход верный, а сам пруф испорчен — к точке C прибавлена образующая
  * (точка остаётся на кривой). Подсказки снова честные для этого негодного пруфа.
@@ -202,28 +257,34 @@ function tamperedProof(points, digest) {
         hintsBoc: buildProofHints(key, prepared, tampered, [digest], { forge: true }).hints.toBoc().toString('base64'),
     };
 }
+const rootsOf = (values) => ({
+    newStateRoot: s(values.newStateRoot),
+    withdrawalsRoot: s(values.withdrawalsRoot),
+    withdrawalsCount: s(values.withdrawalsCount),
+    queueProcessedUpTo: s(values.queueProcessedUpTo),
+    blockTimestamp: s(values.blockTimestamp),
+});
+const wordsOf = (values) => Object.fromEntries(WORDS.map((word) => [word, s(values[word])]));
 
 const batches = [];
-let batch2Points;
+let batch3Points;
 for (const [index, values] of batchValues.entries()) {
     const digest = batchDigest(values);
     const { proof, points, hints } = await proveDigest(digest, `Батч ${index + 1}`);
-    if (index === 1) batch2Points = points;
-    // Подделка: тот же пруф под батч с другим новым корнем состояния.
+    if (index === 2) batch3Points = points;
+    // Подделка: тот же пруф под батч с другим новым словом состояния.
     const forgedStateRoot = label(`stage1:forged-state-${index + 1}`);
     batches.push({
         forgery: {
             newStateRoot: s(forgedStateRoot),
+            publicInput: s(batchDigest({ ...values, newStateRoot: forgedStateRoot })),
             hintsBoc: forgedHints(points, batchDigest({ ...values, newStateRoot: forgedStateRoot })),
         },
         tamperedProof: tamperedProof(points, digest),
-        roots: {
-            newStateRoot: s(values.newStateRoot),
-            withdrawalsRoot: s(values.withdrawalsRoot),
-        },
+        roots: rootsOf(values),
         // Порции данных, которые секвенсор публикует до батча, и их накопительный хеш.
         dataChunksHex: batchData[index].map((chunk) => chunk.toString('hex')),
-        batchHash: s(values.batchHash),
+        publicValues: wordsOf(values),
         publicInput: s(digest),
         proof: proofArray(proof),
         hintsBoc: hints.toBoc().toString('base64'),
@@ -231,71 +292,82 @@ for (const [index, values] of batchValues.entries()) {
     console.log(`  батч ${index + 1}: готово`);
 }
 
-// --- аварийный выход на игрушечной схеме ---
-// Ключ выхода в тесте — ключ игрушечной схемы со сдвинутым IC0 (см. proveDigest): как и у
-// настоящих программ, он отличается от ключа батчей одной константой, и пруф выхода проходит
-// только под ним. Так проверяется весь путь выхода, разделение ключей и отказ на подделке —
-// без пруфов SP1. Состояние — после батча 2.
-const EXIT_KEY_SHIFT = 0x5eedn;
-const exitKey = { ...key, ic: [key.ic[0].add(key.ic[1].multiply(EXIT_KEY_SHIFT)), ...key.ic.slice(1)] };
-const exitPrepared = buildVerificationKeyData(exitKey, [0n], [0]);
-const exitDigest = (claim) =>
-    sha256Int(CHAIN_ID, batchValues[1].newStateRoot, claim.l2Account, claim.amount, claim.recipientHash) & MASK_253;
-const exitClaim = {
-    l2Account: label('stage1:exit-account') >> 96n,
-    amount: TON / 2n,
-    recipientHash: label('stage1:exit-recipient'),
+// --- подмена каждого из одиннадцати слов ---
+// Пруф батча 3 остаётся настоящим — для настоящих слов. Для каждого слова считается дайджест,
+// в котором подменено только оно, и ЧЕСТНЫЕ подсказки пруфа батча 3 под этот дайджест. Тест
+// приводит контракт в состояние, где он требует именно такой дайджест (слово из сообщения —
+// меняет сообщение; слово из хранилища — меняет хранилище), и ждёт отказа замыкающим
+// равенством: пруф привязан к каждому слову, а не только к тем, что приходят в сообщении.
+// Подмена — прибавление единицы: счётчики и время остаются правдоподобными.
+const wordForgeries = WORDS.map((word, index) => {
+    const altered = { ...batchValues[2], [word]: batchValues[2][word] + 1n };
+    return {
+        word,
+        index,
+        alteredValue: s(altered[word]),
+        publicInput: s(batchDigest(altered)),
+        hintsBoc: forgedHints(batch3Points, batchDigest(altered)),
+    };
+});
+console.log('  подмена каждого слова: готово');
+
+// --- батч на словаре очереди, заполненном до предела: замер газа ---
+// Состояние контракта подкладывает тест: словарь очереди из MAX_TRACKED_ITEMS − 1 записей,
+// отметка батча — в середине очереди, на MAX_BATCH_QUEUE_ITEMS элементов дальше прежней (хеш в
+// точке N берётся поиском в полном словаре). Номера элементов в дайджест не входят — их
+// выбирает тест; сюда входят только хеши очереди в прежней отметке и в точке N.
+const fullQueueValues = {
+    chainId: CHAIN_ID,
+    prevStateRoot: label('stage1:full-queue-state'),
+    newStateRoot: label('stage1:full-queue-state-next'),
+    batchHash: batchDataHash([chunkBytes('stage1:full-queue-data', 500)]),
+    prevWithdrawalsRoot: label('stage1:full-queue-withdrawals'),
+    withdrawalsRoot: label('stage1:full-queue-withdrawals-next'),
+    prevDepositHash: label('stage1:full-queue-processed-hash'),
+    newDepositHash: label('stage1:full-queue-hash-at-mark'),
+    prevWithdrawalsCount: 4_000_000_000n,
+    withdrawalsCount: 4_000_000_032n,
+    blockTimestamp: BLOCK_TIME[2],
 };
-const provenExit = await proveDigest(exitDigest(exitClaim), 'Выход', exitKey, exitPrepared, EXIT_KEY_SHIFT);
-// Подделка: тот же пруф под заявку с суммой вдвое больше.
-const forgedExitAmount = exitClaim.amount * 2n;
-const exit = {
-    l2Account: s(exitClaim.l2Account),
-    amount: s(exitClaim.amount),
-    recipientHash: s(exitClaim.recipientHash),
-    publicInput: s(exitDigest(exitClaim)),
-    proof: proofArray(provenExit.proof),
-    hintsBoc: provenExit.hints.toBoc().toString('base64'),
+const provenFullQueue = await proveDigest(batchDigest(fullQueueValues), 'Батч на полном словаре');
+const fullQueue = {
+    note: 'Батч для замера газа на словаре очереди, заполненном до предела; состояние контракта подкладывает тест',
+    batchIndexBefore: 41,
+    dataChunksHex: [chunkBytes('stage1:full-queue-data', 500).toString('hex')],
+    publicValues: wordsOf(fullQueueValues),
+    publicInput: s(batchDigest(fullQueueValues)),
+    proof: proofArray(provenFullQueue.proof),
+    hintsBoc: provenFullQueue.hints.toBoc().toString('base64'),
     forgery: {
-        amount: s(forgedExitAmount),
+        newStateRoot: s(label('stage1:full-queue-forged-state')),
+        publicInput: s(batchDigest({ ...fullQueueValues, newStateRoot: label('stage1:full-queue-forged-state') })),
         hintsBoc: forgedHints(
-            provenExit.points,
-            exitDigest({ ...exitClaim, amount: forgedExitAmount }),
-            exitKey,
-            exitPrepared,
+            provenFullQueue.points,
+            batchDigest({ ...fullQueueValues, newStateRoot: label('stage1:full-queue-forged-state') }),
         ),
     },
-    // IC0 ключа выхода: тест задаёт его сообщением SetExitKey.
-    keyIc0: exitPrepared.upload.ic0.map(s),
-    // Пруф батча 2, предъявленный как пруф выхода: подсказки честные для ключа выхода и
-    // дайджеста заявки. Отказать обязано замыкающее равенство: ключ не тот и вход не тот.
-    batchProofAsExit: {
-        proof: batches[1].proof,
-        hintsBoc: forgedHints(batch2Points, exitDigest(exitClaim), exitKey, exitPrepared),
-    },
 };
-console.log('  выход: готово');
+console.log('  батч на полном словаре: готово');
 
-// --- атака «приписать лист в дерево выводов» (REVIEW.md, круг 1, находка 2) ---
+// --- атака «приписать лист в дерево выводов» (REVIEW.md, круг 1, находка 2; PROTOCOL-V2.md, раздел 4) ---
 // Секвенсор строит батч 3 от ПОДДЕЛЬНОГО прежнего дерева выводов (в нём лишний лист в его
-// пользу) и публикует корень, включающий этот лист. Пруф честный — для того утверждения,
-// которое секвенсор выбрал сам. Контракт подставляет прежний корень из своего хранилища,
-// и утверждения расходятся: пруф не подходит.
-const forgedPriorRoot = label('stage1:forged-prior-withdrawals');
+// пользу: другой корень и счётчик на единицу больше) и публикует корень, включающий этот лист.
+// Пруф честный — для того утверждения, которое секвенсор выбрал сам. Контракт подставляет
+// прежние корень и счётчик из своего хранилища, и утверждения расходятся: пруф не подходит.
 const forgedPriorValues = {
     ...batchValues[2],
-    prevWithdrawalsRoot: forgedPriorRoot,
+    prevWithdrawalsRoot: label('stage1:forged-prior-withdrawals'),
+    prevWithdrawalsCount: 2n,
     withdrawalsRoot: label('stage1:withdrawals-root-with-planted-leaf'),
+    withdrawalsCount: 3n,
 };
 const forgedPrior = await proveDigest(batchDigest(forgedPriorValues), 'Батч 3 от поддельного дерева');
 const attacks = {
     forgedPriorWithdrawals: {
-        note: 'Честный пруф батча 3, построенного от поддельного прежнего корня выводов',
-        roots: {
-            newStateRoot: s(forgedPriorValues.newStateRoot),
-            withdrawalsRoot: s(forgedPriorValues.withdrawalsRoot),
-        },
-        claimedPrevWithdrawalsRoot: s(forgedPriorRoot),
+        note: 'Честный пруф батча 3, построенного от поддельных прежних корня и счётчика выводов',
+        roots: rootsOf(forgedPriorValues),
+        claimedPrevWithdrawalsRoot: s(forgedPriorValues.prevWithdrawalsRoot),
+        claimedPrevWithdrawalsCount: s(forgedPriorValues.prevWithdrawalsCount),
         publicInput: s(batchDigest(forgedPriorValues)),
         proof: proofArray(forgedPrior.proof),
         hintsBoc: forgedPrior.hints.toBoc().toString('base64'),
@@ -308,26 +380,29 @@ writeFileSync(
     path.join(OUT, 'batches.json'),
     JSON.stringify({
         source: 'Сгенерировано zk/gen-rollup-batches.mjs; не редактировать вручную',
-        note: 'Пруфы игрушечной схемы Multiplier: публичный вход равен дайджесту батча, переход состояния НЕ доказывается',
+        note: 'Пруфы игрушечной схемы Multiplier под протокол версии 2: публичный вход равен дайджесту одиннадцати слов батча, переход состояния НЕ доказывается',
+        protocolVersion: 2,
         chainId: s(CHAIN_ID),
         genesisStateRoot: s(genesisStateRoot),
+        words: WORDS,
         deposit: {
             l2Recipient: s(deposit.l2Recipient),
             value: s(deposit.value),
             amount: s(depositAmount),
-            hashAfter: s(depositHashAfter),
         },
-        withdrawal: {
-            leafIndex: withdrawal.leafIndex,
-            recipientHash: s(withdrawal.recipientHash),
-            amount: s(withdrawal.amount),
-            siblings: siblings.map(s),
-            root: s(withdrawalsRoot),
-        },
+        forcedTransactionHex: forcedTransaction.toString('hex'),
+        queueHashes: queueHash.map(s),
+        withdrawals: withdrawals.map((leaf, index) => ({
+            leafIndex: leaf.leafIndex,
+            recipientHash: s(leaf.recipientHash),
+            amount: s(leaf.amount),
+            rootAfter: s(rootAfter[index + 1]),
+        })),
         batches,
-        exit,
+        wordForgeries,
+        fullQueue,
         attacks,
     }) + '\n',
 );
-console.log(`Записано: fixtures/rollup_batches/batches.json (батчей: ${batches.length})`);
+console.log(`Записано: fixtures/rollup_batches/batches.json (батчей: ${batches.length}, подмен слов: ${wordForgeries.length})`);
 process.exit(0); // snarkjs держит воркеры кривой
