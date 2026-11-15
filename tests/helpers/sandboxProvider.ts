@@ -15,7 +15,7 @@ import { Blockchain, internal } from '@ton/sandbox';
 export function sandboxProvider(
     blockchain: Blockchain,
     wallet: Address,
-    options: { failAt?: number; beforeSend?: (index: number) => void } = {},
+    options: { failAt?: number; beforeSend?: (index: number) => void | Promise<void> } = {},
 ) {
     const lines: string[] = [];
     const sent: SenderArguments[] = [];
@@ -23,7 +23,7 @@ export function sandboxProvider(
         address: wallet,
         send: async (args) => {
             if (options.failAt !== undefined && sent.length + 1 >= options.failAt) throw new Error('сеть недоступна (сбой, заданный тестом)');
-            options.beforeSend?.(sent.length + 1);
+            await options.beforeSend?.(sent.length + 1);
             sent.push(args);
             // Штатный отправитель Sandbox (blockchain.sender) не передаёт init: сообщение
             // развёртывания собирается здесь.

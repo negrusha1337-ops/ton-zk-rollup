@@ -20,16 +20,20 @@ import {
 import { accountOf, DEFAULT_TRAFFIC_DIR, loadL2Keys, newL2Account, signBridgeWithdrawal, storeL2Key } from '../sequencer/l2Keys';
 import { writeAtomically } from '../sequencer/state';
 import { claimProofCell, recipientHashOf, withdrawalClaims, WithdrawalsMismatch } from '../sequencer/withdrawals';
+import { assertNotServiceWallet, passToncenterKey, TrafficRefused, withRetries } from '../sequencer/trafficSafety';
 
 // Нагрузка на сервис-секвенсор в testnet: очередь L1 контракта получает депозиты на новые счета
 // L2 и принудительные выводы с них через мост, а выводы, попавшие в принятые батчи, забираются на
 // L1 сообщением Withdraw по Merkle-доказательству (sequencer/withdrawals.ts — по отчётам блоков
-// сервиса, сверенным с контрактом). Кошелёк — кошелёк прогонов (мнемоника Blueprint), НЕ кошелёк
-// сервиса: у них общий seqno был бы гонкой.
+// сервиса, сверенным с контрактом). Кошелёк — кошелёк прогонов (WALLET_MNEMONIC в .env, Blueprint
+// загружает его сам), НЕ кошелёк сервиса: у них общий seqno был бы гонкой. Отказ во всех режимах
+// (и report, и settle), если кошелёк нагрузки — секвенсор контракта или адрес из SEQUENCER_MNEMONIC
+// (круг 23, пункт 1). TONCENTER_API_KEY из .env вписывается в клиент Blueprint (passToncenterKey).
 //
 //   npx blueprint run sequencerTraffic --testnet --mnemonic <адрес контракта> [check | report | settle]
 //       [interval=<с>] [duration=<с>] [budget=<TON>] [deposit=<TON>] [withdraw=<TON>]
 //       [withdrawEvery=<k>] [drain=<с>] [stateDir=<каталог сервиса>] [trafficDir=<каталог>]
+//       [retryPause=<с>] [maxFailures=<n>]
 //
 // Раз в interval секунд (3600) — одно действие: принудительный вывод withdraw TON (0,05) со
 // счёта, чей депозит уже обработан, если такой есть и прошлое действие было депозитом; иначе
@@ -39,8 +43,13 @@ import { claimProofCell, recipientHashOf, withdrawalClaims, WithdrawalsMismatch 
 // нагрузки и не исчерпан budget (2 TON); затем до drain секунд (7200) — только ожидание обработки и
 // выплаты. Вместе с паузами между действиями забираются выводы на этот кошелёк.
 //
+// Сбой шага (toncenter, сеть, «не дождался») не роняет нагрузку: строка журнала, пауза retryPause
+// (60 с) и повтор; подряд maxFailures (10) — выход с текстом. Защиты (чужой кошелёк, бюджет) —
+// выход сразу. Свой элемент очереди ищется по хешу в окне после отметки, а не по ожидаемому
+// номеру: чужой элемент мог встать между чтением головы и постановкой.
+//
 // Режимы: check — план по бюджету и проверки, ничего не отправляет; report — сводка по журналу и
-// контракту, ничего не отправляет; settle — без новых элементов: забрать выводы на этот кошелёк,
+// контракту, ничего не отправляет и журнал НЕ пишет (можно во время run); settle — без новых элементов: забрать выводы на этот кошелёк,
 // а если rollup заморожен, вернуть необработанные депозиты нагрузки (CancelDeposit по квитанциям).
 // Балансы счетов L2 (депозит минус вывод) после заморозки этим скриптом не вернуть: выход счёта
 // EVM требует доказательства счёта от узла сервиса (ForceExitEvm) — на стенде это потеря. Журнал (возобновление, сводка) —
@@ -63,6 +72,8 @@ type Options = {
     withdrawEvery: number;
     stateDir: string;
     trafficDir: string;
+    retryPause: number;
+    maxFailures: number;
 };
 
 /** Элемент очереди, поставленный нагрузкой. `number` — номер в очереди L1; null — ещё не найден. */
@@ -87,7 +98,18 @@ type Claim = { leafIndex: number; amountNano: string; status: 'sent' | 'paid' | 
 
 type Journal = { rollup: string; startedAt: number; spentNano: string; returnedNano: string; items: Item[]; claims: Claim[]; summary?: object };
 
-type Run = { provider: NetworkProvider; ui: UIProvider; rollup: OpenedContract<Rollup>; wallet: Address; options: Options; journal: Journal; file: string; chainId: bigint };
+type Run = {
+    provider: NetworkProvider;
+    ui: UIProvider;
+    rollup: OpenedContract<Rollup>;
+    wallet: Address;
+    options: Options;
+    journal: Journal;
+    file: string;
+    chainId: bigint;
+    /** report: журнал не пишется (run может идти параллельно). */
+    readOnly: boolean;
+};
 
 function parseOptions(args: string[]): Options {
     const named = new Map<string, string>();
@@ -101,7 +123,7 @@ function parseOptions(args: string[]): Options {
         } else if (address === null && Address.isFriendly(arg)) address = Address.parse(arg);
         else throw new Error(`Непонятный аргумент «${arg}»: см. комментарий в начале scripts/sequencerTraffic.ts.`);
     }
-    const known = ['interval', 'duration', 'drain', 'budget', 'deposit', 'withdraw', 'withdrawEvery', 'stateDir', 'trafficDir'];
+    const known = ['interval', 'duration', 'drain', 'budget', 'deposit', 'withdraw', 'withdrawEvery', 'stateDir', 'trafficDir', 'retryPause', 'maxFailures'];
     for (const name of named.keys()) if (!known.includes(name)) throw new Error(`Непонятный параметр ${name}: см. комментарий в начале scripts/sequencerTraffic.ts.`);
     if (!address) throw new Error('Нужен адрес контракта (тот, что напечатал sequencer/main.ts deploy).');
     const int = (name: string, fallback: number) => {
@@ -127,7 +149,16 @@ function parseOptions(args: string[]): Options {
         withdrawEvery: int('withdrawEvery', 1),
         stateDir: path.resolve(named.get('stateDir') ?? path.join(__dirname, '..', '.tools', 'sequencer')),
         trafficDir: path.resolve(named.get('trafficDir') ?? DEFAULT_TRAFFIC_DIR),
+        retryPause: int('retryPause', 60),
+        maxFailures: Math.max(1, int('maxFailures', 10)),
     };
+}
+
+/** Не дождался; `lastError` — ошибка последнего опроса (пусто — опрос прошёл, условия нет). */
+class WaitTimeout extends Error {
+    constructor(message: string, readonly lastError: string) {
+        super(message);
+    }
 }
 
 async function waitFor(description: string, check: () => Promise<boolean>) {
@@ -136,48 +167,73 @@ async function waitFor(description: string, check: () => Promise<boolean>) {
         await sleep(POLL_DELAY_MS);
         try {
             if (await check()) return;
+            lastError = '';
         } catch (error) {
             lastError = error instanceof Error ? error.message : String(error);
         }
     }
-    throw new Error(`Не дождался: ${description}.${lastError ? ` Последняя ошибка запроса: ${lastError}.` : ''} Запусти скрипт ещё раз: он продолжит по журналу.`);
+    throw new WaitTimeout(`Не дождался: ${description}.${lastError ? ` Последняя ошибка запроса: ${lastError}.` : ''} Запусти скрипт ещё раз: он продолжит по журналу.`, lastError);
 }
 
-const save = (run: Run) => writeAtomically(run.file, JSON.stringify(run.journal, null, 1) + '\n');
+const save = (run: Run) => {
+    if (!run.readOnly) writeAtomically(run.file, JSON.stringify(run.journal, null, 1) + '\n');
+};
 const spend = (run: Run, nano: bigint) => (run.journal.spentNano = (BigInt(run.journal.spentNano) + nano).toString());
 
 /** Комиссия кошелька за сообщение с таким телом (оценка сверху, testnetPlan.ts). */
 const walletFeeOf = (forward: ForwardPrices, body = beginCell().endCell()) => estimateWalletFees([body], 0, forward);
 
-/** Номер элемента в очереди, если он встал сразу после отметки `prev`; null — ещё не видно; 'foreign' — встал чужой. */
+/** Сколько элементов после отметки `prev` просматривать в поисках своего (чужие могли встать раньше). */
+const LOCATE_WINDOW = 64n;
+
+/** Хеши очереди после элемента, если перед ним хеш `before`: так его поставил бы этот элемент журнала. */
+function hashesAfter(item: Item, before: bigint): bigint[] {
+    return item.kind === 'withdrawal'
+        ? [forcedTransactionHash(before, Buffer.from(item.bytes!, 'hex'))]
+        : // Плата могла упасть между чтением и постановкой (батч обработал хвост): сумма на L2 — value минус плата.
+          Array.from({ length: QUEUE_FEE_MAX_DOUBLINGS + 1 }, (_, d) => depositHash(before, BigInt(item.l2Address), BigInt(item.valueNano) - (BASE_DEPOSIT_FEE << BigInt(d))));
+}
+
+/**
+ * Номер элемента в очереди: первый номер n после отметки `prev` (в окне LOCATE_WINDOW), у которого
+ * хеш после n — тот, что дал бы этот элемент поверх хеша до n (круг 23, пункт 3: чужой элемент
+ * мог встать между чтением головы и постановкой). null — ещё не видно; 'foreign' — окно занято
+ * чужими или записи очереди уже нет (сверить нечем).
+ */
 async function locate(run: Run, item: Item): Promise<number | null | 'foreign'> {
     const prev = { count: BigInt(item.prev.count), hash: BigInt(item.prev.hash) };
     const queue = await run.rollup.getDepositQueue();
     if (queue.head.count <= prev.count) return null;
-    const after = queue.head.count === prev.count + 1n ? queue.head.hash : (await run.rollup.getQueueItem(prev.count + 2n))?.hashBefore;
-    if (after === undefined) return 'foreign';
-    const candidates =
-        item.kind === 'withdrawal'
-            ? [forcedTransactionHash(prev.hash, Buffer.from(item.bytes!, 'hex'))]
-            : // Плата могла упасть между чтением и постановкой (батч обработал хвост): сумма на L2 — value минус плата.
-              Array.from({ length: QUEUE_FEE_MAX_DOUBLINGS + 1 }, (_, d) => depositHash(prev.hash, BigInt(item.l2Address), BigInt(item.valueNano) - (BASE_DEPOSIT_FEE << BigInt(d))));
-    return candidates.includes(after) ? Number(prev.count) + 1 : 'foreign';
+    const last = queue.head.count < prev.count + LOCATE_WINDOW ? queue.head.count : prev.count + LOCATE_WINDOW;
+    let before = prev.hash;
+    for (let number = prev.count + 1n; number <= last; number++) {
+        const after = number === queue.head.count ? queue.head.hash : (await run.rollup.getQueueItem(number + 1n))?.hashBefore;
+        if (after === undefined) return 'foreign';
+        if (hashesAfter(item, before).includes(after)) return Number(number);
+        before = after;
+    }
+    return last === prev.count + LOCATE_WINDOW ? 'foreign' : null;
 }
 
 /** Дождаться, пока отправленный элемент встанет в очередь, и записать его номер и время постановки. */
 async function confirm(run: Run, item: Item, patient: boolean) {
     let found: number | null | 'foreign' = null;
-    const check = async () => (found = await locate(run, item)) !== null;
+    const check = async () => {
+        found = await locate(run, item);
+        // Окно занято чужими сейчас — но свой мог ещё не дойти: ждать до конца опроса.
+        return found !== null && found !== 'foreign';
+    };
     try {
         await waitFor(`элемент очереди (${item.kind}, ${item.l2Address})`, check);
     } catch (error) {
-        if (patient) throw error;
+        // Последний опрос не прошёл (toncenter): «не найден» не доказан — сбой шага, не «потерян».
+        if (patient || (error instanceof WaitTimeout && error.lastError !== '')) throw error;
     }
     if (found === null || found === 'foreign') {
         item.status = 'lost';
         run.ui.write(
             found === 'foreign'
-                ? `ВНИМАНИЕ: после отметки ${item.prev.count} в очередь встал чужой элемент: ${item.kind} ${item.l2Address} не опознан (в сводке — «не найден»)`
+                ? `ВНИМАНИЕ: после отметки ${item.prev.count} в окне ${LOCATE_WINDOW} элементов — только чужие: ${item.kind} ${item.l2Address} не опознан (в сводке — «не найден»)`
                 : `ВНИМАНИЕ: ${item.kind} ${item.l2Address} в очереди не появился (в обозревателе: 7326 — плата выросла, 7307 — мало монет, 7312 — заморожен)`,
         );
     } else {
@@ -347,12 +403,17 @@ export async function run(provider: NetworkProvider, args: string[]) {
     const options = parseOptions(args);
     const wallet = provider.sender().address;
     if (!wallet) throw new Error('У отправителя нет адреса: подключи кошелёк.');
+    const key = passToncenterKey(provider as { api?: () => unknown }, process.env.TONCENTER_API_KEY);
+    if (key === 'passed') ui.write('Ключ API toncenter (TONCENTER_API_KEY) передан клиенту Blueprint.');
+    if (key === 'unsupported') ui.write('ВНИМАНИЕ: TONCENTER_API_KEY задан, но клиенту Blueprint его не передать — запросы без ключа (1 в секунду).');
     const rollup = provider.open(Rollup.createFromAddress(options.address));
     if (!(await provider.isContractDeployed(rollup.address))) throw new Error(`По адресу ${rollup.address.toString()} контракта нет: сначала sequencer/main.ts deploy.`);
     const [deployment, keyHash, escape, fees, budgets, minimum] = [
         await rollup.getDeployment(), await rollup.getKeyHash(), await rollup.getEscapeState(),
         await rollup.getQueueFees(), await rollup.getQueueBudgets(), await rollup.getMinimumValues(),
     ];
+    // Во всех режимах, и в report и settle: они тоже шлют (settle) или пишут сводку о «своих» выводах.
+    await assertNotServiceWallet(wallet, deployment.sequencer);
     const forward: ForwardPrices = JSON.parse(readFileSync(path.join(__dirname, '..', 'bench', 'network-config.json'), 'utf8')).basechain.forward;
     const prices: TrafficPrices = {
         depositAmount: options.deposit,
@@ -375,22 +436,22 @@ export async function run(provider: NetworkProvider, args: string[]) {
     const refusals = [...plan.problems];
     if (keyHash === 0n) refusals.push('ключ контракта не зафиксирован: очередь не принимает элементы');
     if (escape.frozen) refusals.push('rollup заморожен: очередь закрыта');
-    if (deployment.sequencer.equals(wallet)) refusals.push('кошелёк нагрузки — кошелёк сервиса: нужен отдельный (общий seqno — гонка отправок)');
     if (fees.depositFee !== BASE_DEPOSIT_FEE) refusals.push(`плата за место уже удвоена (${ton(fees.depositFee)}): очередь перегружена, сервис отстаёт`);
     if (options.mode === 'run' && balance < options.budget) refusals.push(`на кошельке ${ton(balance)}, бюджет ${ton(options.budget)}: не хватает ${ton(options.budget - balance)}`);
-    if ((options.mode === 'run' || options.mode === 'check') && refusals.length > 0) throw new Error(`Нагрузка не начата, ничего не отправлено:\n  - ${refusals.join('\n  - ')}`);
+    if ((options.mode === 'run' || options.mode === 'check') && refusals.length > 0) throw new TrafficRefused(`Нагрузка не начата, ничего не отправлено:\n  - ${refusals.join('\n  - ')}`);
     if (options.mode === 'check') {
         ui.write('Проверки пройдены. Режим check: ничего не отправлено.');
         return;
     }
 
-    mkdirSync(options.trafficDir, { recursive: true, mode: 0o700 });
+    const readOnly = options.mode === 'report';
+    if (!readOnly) mkdirSync(options.trafficDir, { recursive: true, mode: 0o700 });
     const file = path.join(options.trafficDir, `journal-${rollup.address.toRawString().replace(':', '_')}.json`);
     const journal: Journal = existsSync(file)
         ? JSON.parse(readFileSync(file, 'utf8'))
         : { rollup: rollup.address.toRawString(), startedAt: nowSeconds(), spentNano: '0', returnedNano: '0', items: [], claims: [] };
     if (journal.rollup !== rollup.address.toRawString()) throw new Error(`${file} — журнал другого контракта (${journal.rollup})`);
-    const context: Run = { provider, ui, rollup, wallet, options, journal, file, chainId: deployment.chainId };
+    const context: Run = { provider, ui, rollup, wallet, options, journal, file, chainId: deployment.chainId, readOnly };
     if (options.mode === 'settle') {
         for (const item of journal.items.filter((entry) => entry.status === 'sent')) await confirm(context, item, false);
         await claimPayouts(context, minimum.withdraw, forward, true);
@@ -400,43 +461,65 @@ export async function run(provider: NetworkProvider, args: string[]) {
         return;
     }
     if (options.mode === 'report') {
+        // Только чтение: журнал не пишется — run мог идти параллельно и писать его сам.
         await claimPayouts(context, minimum.withdraw, forward, false);
         summary(context, await observe(context));
+        ui.write('Режим report: ничего не отправлено, журнал не изменён.');
         return;
     }
-    // Отправленное в прошлом запуске, но не подтверждённое: найти в очереди (без повтора).
-    for (const item of journal.items.filter((entry) => entry.status === 'sent')) await confirm(context, item, false);
+    // Каждый шаг — с повтором после сбоя (круг 23, пункт 3); защиты — выход сразу.
+    const retrying = <T>(what: string, step: () => Promise<T>) =>
+        withRetries(what, step, { maxFailures: options.maxFailures, pauseSeconds: options.retryPause, sleep: async (ms) => void (await sleep(ms)), log: (line) => ui.write(line) });
+    // Отправленное раньше, но не подтверждённое: найти в очереди (без повтора отправки).
+    const confirmSent = async () => {
+        for (const item of journal.items.filter((entry) => entry.status === 'sent')) await confirm(context, item, false);
+    };
+    await retrying('подтверждение отправленного', confirmSent);
 
-    let lastWasDeposit = journal.items.length > 0 && journal.items[journal.items.length - 1].kind === 'deposit';
     for (;;) {
-        const marks = await observe(context);
-        await claimPayouts(context, minimum.withdraw, forward, true);
-        if (nowSeconds() >= journal.startedAt + options.duration) break;
-        const from = lastWasDeposit ? withdrawable(context, marks.processed) : null;
-        const cost = from ? costs.withdrawal : costs.deposit;
-        if (BigInt(journal.spentNano) + cost > options.budget) {
-            ui.write(`Бюджет исчерпан: потрачено ${ton(BigInt(journal.spentNano))} из ${ton(options.budget)}`);
-            break;
-        }
-        const current = await rollup.getQueueFees();
-        if (current.depositFee !== prices.depositFee || current.forceTransactionFee !== fees.forceTransactionFee) {
-            ui.write(`Плата за место выросла (${ton(current.depositFee)} / ${ton(current.forceTransactionFee)}): очередь перегружена — новых элементов не ставлю`);
-            break;
-        }
-        if (from) await forcedWithdrawal(context, from, prices, forward);
-        else await deposit(context, prices, forward);
-        lastWasDeposit = !from;
+        const decision = await retrying('подготовка действия', async () => {
+            await confirmSent();
+            const marks = await observe(context);
+            await claimPayouts(context, minimum.withdraw, forward, true);
+            if (nowSeconds() >= journal.startedAt + options.duration) return 'done' as const;
+            const lastWasDeposit = journal.items.length > 0 && journal.items[journal.items.length - 1].kind === 'deposit';
+            const from = lastWasDeposit ? withdrawable(context, marks.processed) : null;
+            const cost = from ? costs.withdrawal : costs.deposit;
+            if (BigInt(journal.spentNano) + cost > options.budget) {
+                ui.write(`Бюджет исчерпан: потрачено ${ton(BigInt(journal.spentNano))} из ${ton(options.budget)}`);
+                return 'done' as const;
+            }
+            const current = await rollup.getQueueFees();
+            if (current.depositFee !== prices.depositFee || current.forceTransactionFee !== fees.forceTransactionFee) {
+                ui.write(`Плата за место выросла (${ton(current.depositFee)} / ${ton(current.forceTransactionFee)}): очередь перегружена — новых элементов не ставлю`);
+                return 'done' as const;
+            }
+            return { from };
+        });
+        if (decision === 'done') break;
+        // Отправка — один раз за действие: повтор после сбоя только дожидается отправленного
+        // (найден — поставлен, нет — «не найден»), второго элемента не ставит.
+        let attempted = false;
+        await retrying('действие нагрузки', async () => {
+            if (attempted) return confirmSent();
+            attempted = true;
+            if (decision.from) await forcedWithdrawal(context, decision.from, prices, forward);
+            else await deposit(context, prices, forward);
+        });
         await sleep(options.interval * 1000);
     }
     // Ожидание обработки и выплат: не дольше drain секунд.
     const drainUntil = nowSeconds() + options.drain;
     for (;;) {
-        const marks = await observe(context);
-        await claimPayouts(context, minimum.withdraw, forward, true);
-        const waiting = journal.items.some((item) => item.number !== null && item.number > marks.processed) || journal.claims.some((claim) => claim.status === 'sent');
+        const waiting = await retrying('ожидание обработки', async () => {
+            await confirmSent();
+            const marks = await observe(context);
+            await claimPayouts(context, minimum.withdraw, forward, true);
+            return journal.items.some((item) => item.number !== null && item.number > marks.processed) || journal.claims.some((claim) => claim.status === 'sent');
+        });
         if (!waiting || nowSeconds() >= drainUntil) break;
         await sleep(Math.min(options.interval, 300) * 1000);
     }
-    summary(context, await observe(context));
+    summary(context, await retrying('сводка', () => observe(context)));
     ui.write(`Готово. Отчёт по сети: node zk/sequencer-run-report.mjs ${rollup.address.toString()}`);
 }
