@@ -14,6 +14,7 @@ mod common;
 use common::{address_of, bridge_call, encoded, key, sign, sign_high_s, signature_of, CHAIN_ID};
 
 const RECIPIENT: [u8; 32] = [0x5a; 32];
+const TYPE_ZERO_PREFIX: &str = "байт типа 0 перед обычной транзакцией";
 
 fn decode(bytes: &[u8]) -> Result<Address, SkipReason> {
     decode_forced_transaction(bytes, CHAIN_ID, FORCED_TX_GAS_CAP).map(|transaction| transaction.signer())
@@ -270,23 +271,27 @@ fn non_canonical_variants(canonical: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
     wide_length.extend_from_slice(&canonical[2..]);
     variants.push(("длина списка с ведущим нулём", wide_length));
     // Обычная транзакция с байтом типа 0 впереди: «типизированной» обычной транзакции нет.
-    variants.push(("байт типа 0 перед обычной транзакцией", [&[0u8][..], canonical].concat()));
+    variants.push((TYPE_ZERO_PREFIX, [&[0u8][..], canonical].concat()));
     variants
 }
 
 #[test]
 fn non_canonical_encodings_are_skipped() {
     // Узел получит ровно байты из очереди и сравнит их с транзакцией блока побайтно: кодировку,
-    // которая не воспроизводится кодировщиком, в блок не поставить. Декодер alloy строгий и
-    // сам отвергает известные неканонические формы; проверка «перекодировать и сравнить» в
-    // программе — второй рубеж, и случая, который дошёл бы до неё, здесь построить не удалось.
+    // которая не воспроизводится кодировщиком, в блок не поставить. Неканонический RLP декодер
+    // alloy отвергает сам, но байт типа 0 перед обычной транзакцией он ПРИНИМАЕТ и возвращает
+    // обычную транзакцию (круг 16, находка 16б-1): её отсекает только проверка «перекодировать
+    // и сравнить» в программе. Без неё программа требовала бы в блоке транзакцию, чьи байты
+    // там другие, — батч недоказуем, то есть остановка rollup'а одним элементом очереди.
     let canonical = encoded(&sign(&key(1), legacy(Some(CHAIN_ID))));
     assert!(decode(&canonical).is_ok());
     for (name, bytes) in non_canonical_variants(&canonical) {
         let outcome = decode(&bytes);
-        assert!(
-            matches!(outcome, Err(SkipReason::Undecodable | SkipReason::NonCanonicalEncoding)),
-            "{name}: {outcome:?}"
-        );
+        let expected = if name == TYPE_ZERO_PREFIX {
+            SkipReason::NonCanonicalEncoding
+        } else {
+            SkipReason::Undecodable
+        };
+        assert_eq!(outcome, Err(expected), "{name}");
     }
 }
