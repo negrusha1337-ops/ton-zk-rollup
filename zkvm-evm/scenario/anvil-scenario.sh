@@ -21,6 +21,14 @@
 # rsp из succinctlabs/rsp на коммите 5afe72eb.
 set -euo pipefail
 
+# СЦЕНАРИЙ ПРОТОКОЛА v1 (тег protocol-v1). С программой и хостом протокола v2 несовместим: формат
+# свидетеля другой (очередь с принудительными транзакциями, фронтир дерева выводов), выводы — по
+# логам моста-предустановки, которого в цепочке anvil нет, генезис не тот. Его фикстуры
+# (fixtures/evm_batches/honest, reverting-bridge, contract) остались историческими, тесты на них
+# заменены тестами на цепочке Reth (zkvm-evm/scenario/reth-scenario.mjs). Не удалён намеренно.
+echo "anvil-scenario.sh — сценарий протокола v1 и с нынешним хостом не работает; цепочка v2: node zkvm-evm/scenario/reth-scenario.mjs" >&2
+exit 1
+
 VARIANT="${1:?вариант: honest | reverting-bridge}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TOOLS="${EVM_TOOLS:-$ROOT/.tools}"
