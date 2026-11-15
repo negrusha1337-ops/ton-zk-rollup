@@ -10,7 +10,8 @@ const config: Config = {
     testTimeout: 120_000,
     testEnvironment: '@ton/sandbox/jest-environment',
     // .claude/worktrees — рабочие копии агентов: их тесты относятся к другим веткам.
-    testPathIgnorePatterns: ['/node_modules/', '/dist/', '/circuits/build/', '/.tools/', '/.claude/'],
+    // zkvm-evm/ — тесты там идут под cargo и node:test (zkvm-evm/scenario/*.test.mjs), не под jest.
+    testPathIgnorePatterns: ['/node_modules/', '/dist/', '/circuits/build/', '/.tools/', '/.claude/', '/zkvm-evm/'],
     reporters: ['default', ['@ton/sandbox/jest-reporter', {}]],
 };
 
