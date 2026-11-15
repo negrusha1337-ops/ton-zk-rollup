@@ -39,6 +39,8 @@ const PENDING: Record<string, string> = {
         'проверяет пруф, построенный на другой машине (zkvm-evm/host/remote): без переменной REMOTE_PROOF_FIXTURE проверять нечего, набор — один todo с подсказкой',
     'tests/SequencerReth.spec.ts':
         'ждёт бинарников вне репозитория (reth v2.2.0, rsp, rollup-evm-host — PROVING.md), а не пруфов: todo только в ветке их отсутствия; набор поднимает настоящий узел и зовёт хост программы',
+    'tests/SequencerProver.spec.ts':
+        'ждёт артефактов схемы Groth16 вне репозитория (~/.sp1/circuits/groth16/v6.1.0): без них импорт пруфа нечем проверить; todo только в ветке их отсутствия',
 };
 
 /**
@@ -48,6 +50,8 @@ const PENDING: Record<string, string> = {
 const CONDITIONAL_SKIPS: Record<string, string> = {
     'tests/RollupEvmExit.spec.ts':
         'случай «счёт для прогона в testnet» есть, только если генератору фикстуры дали адрес кошелька прогона (раздел testnet фикстуры)',
+    'tests/SequencerTestnet.spec.ts':
+        'сквозной шаг с LocalProver импортирует пруф и требует артефактов схемы Groth16 вне репозитория (~/.sp1/circuits); остальные случаи набора идут всегда',
 };
 
 const sourcesIn = (directory: string): string[] =>

@@ -243,11 +243,8 @@ done
 #    он не строится, остальные два не нужны. С настройками SP1 по умолчанию прувер не
 #    помещается в 16 ГБ: шарды уменьшены, по одному рабочему на этап.
 export RAYON_NUM_THREADS=4
-export ELEMENT_THRESHOLD=67108864 HEIGHT_THRESHOLD=1048576 SP1_WORKER_NUM_CORE_WORKERS=1 \
-  SP1_WORKER_CORE_BUFFER_SIZE=1 SP1_WORKER_NUM_SPLICING_WORKERS=1 SP1_WORKER_SPLICING_BUFFER_SIZE=1 \
-  SP1_WORKER_NUM_SETUP_WORKERS=1 SP1_WORKER_NUM_RECURSION_PROVER_WORKERS=1 \
-  SP1_WORKER_NUM_RECURSION_EXECUTOR_WORKERS=1 SP1_WORKER_NUM_PREPARE_REDUCE_WORKERS=1 \
-  SP1_WORKER_NUM_DEFERRED_WORKERS=1
+# Переменные шардов — в одном файле: его же берут сервис-секвенсор и remote/measure.sh.
+set -a; . zkvm-evm/host/prover-shards.env; set +a
 D="$HOME/.sp1/circuits/groth16/v6.1.0"
 for N in 3 1 2; do
   zkvm-evm/host/prove-guarded.sh --batch-input fixtures/evm_batches/reth/block-$N.bin \
@@ -591,12 +588,10 @@ zkvm-evm/host/verify-elf.sh                      # чистая пересбор
 node zk/gen-evm-rollup-key.mjs && node zk/gen-evm-rollup-key.mjs --check
 
 # Только по команде пользователя. С настройками SP1 по умолчанию прувер не помещается в 16 ГБ:
-# шарды уменьшены в шесть раз, по одному рабочему на этап (bench/evm-rsp-cycles.json).
-export ELEMENT_THRESHOLD=67108864 HEIGHT_THRESHOLD=1048576 SP1_WORKER_NUM_CORE_WORKERS=1 \
-  SP1_WORKER_CORE_BUFFER_SIZE=1 SP1_WORKER_NUM_SPLICING_WORKERS=1 SP1_WORKER_SPLICING_BUFFER_SIZE=1 \
-  SP1_WORKER_NUM_SETUP_WORKERS=1 SP1_WORKER_NUM_RECURSION_PROVER_WORKERS=1 \
-  SP1_WORKER_NUM_RECURSION_EXECUTOR_WORKERS=1 SP1_WORKER_NUM_PREPARE_REDUCE_WORKERS=1 \
-  SP1_WORKER_NUM_DEFERRED_WORKERS=1
+# шарды уменьшены в шесть раз, по одному рабочему на этап (bench/evm-rsp-cycles.json). Значения —
+# в zkvm-evm/host/prover-shards.env: тот же файл читают сервис-секвенсор (LocalProver) и
+# remote/measure.sh (этапы на процессоре).
+set -a; . zkvm-evm/host/prover-shards.env; set +a
 zkvm-evm/host/prove-guarded.sh --batch-input fixtures/evm_batches/contract/block-2.bin \
   --prove --proof-out fixtures/evm_batches/proof-block2.json
 

@@ -78,6 +78,16 @@ sample() {
     done
 }
 
+# Настройки прувера на процессоре — из общего файла (zkvm-evm/host/prover-shards.env: его же
+# берут PROVING.md и сервис-секвенсор). Только для этапов с прувером cpu: GPU-этапы идут с
+# настройками SP1 по умолчанию, как в прежних замерах.
+CPU_ENV=()
+SHARDS_ENV="$ROOT/zkvm-evm/host/prover-shards.env"
+[ -f "$SHARDS_ENV" ] || die "нет $SHARDS_ENV (push.sh везёт его вместе с zkvm-evm/host)"
+while IFS= read -r line; do
+    case "$line" in ''|'#'*) ;; [A-Z_]*=*) CPU_ENV+=("$line") ;; *) die "непонятная строка в $SHARDS_ENV: $line" ;; esac
+done < "$SHARDS_ENV"
+
 # stage <имя> <прувер> <аргументы хоста…>: запуск, замер, сводка в stages/<имя>/stage.json.
 stage() {
     local name="$1" prover="$2"; shift 2
@@ -85,7 +95,9 @@ stage() {
     mkdir -p "$dir"
     say "этап $name (прувер $prover): старт $(date -u +%T), журнал stages/$name/log.txt"
     local started; started="$(date +%s)"
-    SP1_PROVER="$prover" RUST_LOG="${RUST_LOG:-info}" setsid timeout --signal=KILL "${MAX_STAGE_MINUTES}m" \
+    local extra=()
+    [ "$prover" = cpu ] && extra=("${CPU_ENV[@]}")
+    env ${extra[@]+"${extra[@]}"} SP1_PROVER="$prover" RUST_LOG="${RUST_LOG:-info}" setsid timeout --signal=KILL "${MAX_STAGE_MINUTES}m" \
         /usr/bin/time -v -o "$dir/time.txt" "$HOST" "$@" > "$dir/log.txt" 2>&1 &
     local group=$!
     sample "$group" "$dir/samples.csv" &

@@ -6,6 +6,8 @@
 // fixtures/<имя>/onchain.json.
 //
 // Запуск: node zk/gen-bn254-groth16-fixture.mjs [имя фикстуры]   (по умолчанию multiplier_bn254)
+//         node zk/gen-bn254-groth16-fixture.mjs --dir <каталог>   (фикстура вне fixtures/: пруф
+//         батча сервиса-секвенсора, импортированный import-sp1-fixture.mjs --out-dir)
 //
 // Публичные входы делятся на переменные (не больше двух, для них строятся оконные
 // таблицы) и постоянные — их вклад заранее складывается в IC0. Список переменных
@@ -29,10 +31,16 @@ import {
 } from './bn254-onchain.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const NAME = process.argv[2] ?? 'multiplier_bn254';
-const DIR = path.join(ROOT, 'fixtures', NAME);
+const OUT_DIR = process.argv[2] === '--dir' ? process.argv[3] : null;
+if (process.argv[2] === '--dir' && !OUT_DIR) {
+    console.error('После --dir нужен каталог фикстуры');
+    process.exit(1);
+}
+const NAME = OUT_DIR ? path.resolve(OUT_DIR) : (process.argv[2] ?? 'multiplier_bn254');
+const DIR = OUT_DIR ? path.resolve(OUT_DIR) : path.join(ROOT, 'fixtures', NAME);
+const SHOWN = OUT_DIR ? DIR : `fixtures/${NAME}`;
 if (!existsSync(path.join(DIR, 'proof.json'))) {
-    console.error(`Нет фикстуры fixtures/${NAME}/proof.json`);
+    console.error(`Нет фикстуры ${SHOWN}/proof.json`);
     process.exit(1);
 }
 const { Fp12 } = bn254.fields;
@@ -203,6 +211,6 @@ const fixture = {
 };
 writeFileSync(path.join(DIR, 'onchain.json'), JSON.stringify(fixture) + '\n');
 console.log(
-    `Записано: fixtures/${NAME}/onchain.json (линий на точку: ${fixture.lineCount}, ` +
+    `Записано: ${SHOWN}/onchain.json (линий на точку: ${fixture.lineCount}, ` +
         `тождеств: ${stats.relations}, аккумуляторов: ${stats.accumulators}, коэффициентов bigQ: ${stats.bigQCoefficients})`,
 );
