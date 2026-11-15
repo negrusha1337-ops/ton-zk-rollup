@@ -173,13 +173,20 @@ export class SandboxSubmitter implements BatchSubmitter {
 
 // --- testnet ---
 
-/** Чем контракт показывает, что сообщение учтено: хеш данных батча или номер принятого батча. */
-type Effect = { kind: 'dataHash'; batch: number; value: bigint } | { kind: 'batchIndex'; atLeast: number };
+/**
+ * Чем контракт показывает, что сообщение учтено: хеш данных батча, номер принятого батча — либо,
+ * при развёртывании (sequencer/deploy.ts), счёт активен, часть ключа с этим хешем загружена,
+ * ключ с этим хешем зафиксирован.
+ */
+export type Effect =
+    | { kind: 'dataHash'; batch: number; value: bigint }
+    | { kind: 'batchIndex'; atLeast: number }
+    | { kind: 'deployed' }
+    | { kind: 'keyPart'; slot: number; hash: string }
+    | { kind: 'keyHash'; value: bigint };
 
-const sameEffect = (a: Effect, b: Effect): boolean =>
-    a.kind === 'dataHash' && b.kind === 'dataHash'
-        ? a.batch === b.batch && a.value === b.value
-        : a.kind === 'batchIndex' && b.kind === 'batchIndex' && a.atLeast === b.atLeast;
+/** Одно ли это следствие: поля сравниваются по сериализации (bigint — строкой, порядок полей — как при сборке). */
+const sameEffect = (a: Effect, b: Effect): boolean => serialize(a) === serialize(b);
 
 /**
  * Запись исходящего журнала: внешнее сообщение кошельку ушло (или могло уйти) с этим seqno и
@@ -197,6 +204,8 @@ type Outbox = {
     sentAt: string;
     bodyHash?: string;
     sentUtime?: number;
+    /** Адрес контракта (raw), которому сообщение (с развёртывания 15.11.2026; у прежних записей поля нет). */
+    rollup?: string;
 };
 
 /** Чем кончилось прежнее сообщение из журнала. */
@@ -390,9 +399,23 @@ export class TestnetSubmitter implements BatchSubmitter {
 
     /** Следствие сообщения уже видно у контракта (на снимке не старее виденного). */
     private async effectHolds(effect: Effect): Promise<boolean> {
-        const on = this.on(await this.snapshot());
+        const snapshot = await this.snapshot();
+        if (effect.kind === 'deployed') return snapshot.state === 'active';
+        if (snapshot.state !== 'active' || !snapshot.data) return false;
+        if (effect.kind === 'keyPart') return Rollup.uploadedKeyPartHashes(snapshot.data).get(effect.slot) === effect.hash;
+        const on = this.on(snapshot);
+        if (effect.kind === 'keyHash') return (await on((rollup) => rollup.getKeyHash())) === effect.value;
         if (effect.kind === 'batchIndex') return (await on((rollup) => rollup.getRollupState())).batchIndex >= effect.atLeast;
         return (await on((rollup) => rollup.getBatchDataHash(effect.batch))) === effect.value;
+    }
+
+    /**
+     * Одно сообщение контракту с ожидаемым следствием — тот же путь, что у порций и батчей
+     * (исходящий журнал, монотонные снимки, ожидание по состоянию). Строка — отказ, null — учтено.
+     * Им развёртывает контракт `sequencer/deploy.ts`.
+     */
+    send(what: string, message: SenderArguments, effect: Effect): Promise<string | null> {
+        return this.sendOnce(what, message, effect);
     }
 
     /**
@@ -423,6 +446,15 @@ export class TestnetSubmitter implements BatchSubmitter {
     private async settleOutbox(): Promise<Settled> {
         const outbox = this.readOutbox();
         if (!outbox) return { kind: 'none' };
+        // Сообщение другому контракту (каталог состояния от прежнего прогона): его следствие у
+        // этого контракта не проверить — нужен человек, журнал не трогается.
+        if (outbox.rollup !== undefined && outbox.rollup !== this.options.rollup.toRawString())
+            return {
+                kind: 'failed',
+                reason:
+                    `в ${this.outboxFile} — сообщение «${outbox.what}» другому контракту (${outbox.rollup}): ` +
+                    'доведите его тем каталогом состояния, с которым оно ушло, либо задайте другой --state-dir',
+            };
         const margin = this.options.expiryMargin ?? 60;
         const verdict = await this.poll(`кошелёк принял сообщение «${outbox.what}» (seqno ${outbox.seqno}) либо истёк его срок`, async () => {
             const snapshot = await this.fresh(this.options.wallet.address);
@@ -490,6 +522,7 @@ export class TestnetSubmitter implements BatchSubmitter {
                 sentAt: new Date().toISOString(),
                 bodyHash: (message.body ?? beginCell().endCell()).hash().toString('hex'),
                 sentUtime: snapshot.utime,
+                rollup: this.options.rollup.toRawString(),
             };
             // Отправка — только под своей блокировкой каталога (круг 21, 5в).
             this.options.assertHeld?.();

@@ -126,9 +126,13 @@ describe('круг 21: окружение дочерних, группы про�
                     calls.push({ file: path.relative(ROOT, file), text: source.slice(match.index, end + 1) });
                 }
             }
-            // Все известные запуски найдены: reth, хост и rsp, прувер, импорт, ssh/scp, проверка ключа.
+            // Все известные запуски найдены: reth, хост и rsp, прувер, импорт, ssh/scp, проверка ключа
+            // (check и deploy).
             expect(new Set(calls.map((call) => call.file))).toEqual(
-                new Set(['sequencer/node.ts', 'sequencer/program.ts', 'sequencer/prover.ts', 'sequencer/proofImport.ts', 'sequencer/remoteProver.ts', 'sequencer/testnet.ts']),
+                new Set([
+                    'sequencer/node.ts', 'sequencer/program.ts', 'sequencer/prover.ts', 'sequencer/proofImport.ts', 'sequencer/remoteProver.ts', 'sequencer/testnet.ts',
+                    'sequencer/deploy.ts',
+                ]),
             );
             const unfiltered = calls.filter((call) => !/\benv(:\s*(childEnv\(|environment\(\))|\s*,)/.test(call.text));
             expect(unfiltered.map((call) => `${call.file}: ${call.text.slice(0, 60)}`)).toEqual([]);

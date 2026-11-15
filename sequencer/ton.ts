@@ -256,7 +256,14 @@ export class SequencerWallet {
                 timeout: validUntil,
                 sendMode: SendMode.PAY_GAS_SEPARATELY + SendMode.IGNORE_ERRORS,
                 messages: messages.map((message) =>
-                    internal({ to: message.to, value: message.value, bounce: message.bounce ?? true, body: message.body ?? undefined }),
+                    internal({
+                        to: message.to,
+                        value: message.value,
+                        bounce: message.bounce ?? true,
+                        // StateInit — у сообщения развёртывания контракта (sequencer/deploy.ts).
+                        init: message.init ?? undefined,
+                        body: message.body ?? undefined,
+                    }),
                 ),
             });
         return new SequencerWallet(version, contract, sign);
