@@ -48,6 +48,7 @@ export function sandboxChain(blockchain: Blockchain) {
         const account = contract.accountState;
         return {
             utime: blockchain.now ?? Math.floor(Date.now() / 1000),
+            lt: contract.lastTransactionLt,
             balance: contract.balance,
             state: account?.type === 'active' ? 'active' : account?.type === 'frozen' ? 'frozen' : 'uninit',
             code: account?.type === 'active' ? (account.state.code ?? null) : null,

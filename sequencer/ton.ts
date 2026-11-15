@@ -34,6 +34,12 @@ export const TESTNET_GLOBAL_ID = -3;
 export type AccountSnapshot = {
     /** Время блока провайдера, на котором прочитан счёт (sync_utime), с. */
     utime: number;
+    /**
+     * lt последней транзакции счёта (last_transaction_id.lt; у счёта без транзакций — 0). Два
+     * снимка с одним `utime` могут отличаться (круг 22, 1): сервер отстаёт на блок мастерчейна в
+     * пределах секунды. Монотонность снимков сверяется и по нему.
+     */
+    lt: bigint;
     balance: bigint;
     state: 'active' | 'uninit' | 'frozen';
     code: Cell | null;
@@ -89,8 +95,11 @@ export class ToncenterChain implements TonChain {
         const info = await this.call(() => this.client.getContractState(address));
         if (!Number.isInteger(info.timestampt) || info.timestampt <= 0)
             throw new Error(`toncenter не сообщил время снимка счёта ${address.toString()}`);
+        const lt = info.lastTransaction?.lt ?? '0';
+        if (!/^\d+$/.test(lt)) throw new Error(`toncenter сообщил lt последней транзакции счёта ${address.toString()} не числом: «${lt}»`);
         return {
             utime: info.timestampt,
+            lt: BigInt(lt),
             balance: info.balance,
             state: info.state === 'active' ? 'active' : info.state === 'frozen' ? 'frozen' : 'uninit',
             code: info.code ? Cell.fromBoc(info.code)[0] : null,

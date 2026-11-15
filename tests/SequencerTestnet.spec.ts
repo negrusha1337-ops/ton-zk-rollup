@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from 'fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import path from 'path';
 import { inspect } from 'util';
 import { randomBytes } from 'crypto';
@@ -57,6 +57,8 @@ describe('TestnetSubmitter в Sandbox: настоящий контракт, ко
             pollMs: 0,
             pollAttempts: 20,
             log: (line) => lines.push(line),
+            // Часы машины — время Sandbox: проверка «снимок из будущего» (круг 22, 2) от настоящих часов не зависит.
+            now: () => blockchain.now!,
             ...options,
         });
     const opsTo = (results: { transactions: Transaction[] }[]) =>
@@ -191,7 +193,7 @@ describe('TestnetSubmitter в Sandbox: настоящий контракт, ко
             expect((await submitter().contractState()).utime).toBe(seen + 10);
             // Отстающий сервер так и не догнал: предел перечитываний — отказ шага, не старое состояние.
             net.control.lagReads.set(raw(), 100);
-            await expect(submitter({ staleRereads: 2 }).contractState()).rejects.toThrow(/^снимок счёта .* на время \d+, а уже виден снимок на \d+: 3 ответов подряд/);
+            await expect(submitter({ staleRereads: 2 }).contractState()).rejects.toThrow(/^снимок счёта .* на время \d+ \(lt \d+\), а уже виден снимок на \d+ \(lt \d+\): 3 ответов подряд/);
         }, 60_000);
 
         it('«не дошло» — только после validUntil + expiryMargin: в запасе ждать, после — слать снова', async () => {
@@ -260,6 +262,50 @@ describe('TestnetSubmitter в Sandbox: настоящий контракт, ко
             expect(net.attempts).toHaveLength(2);
             expect(await rollup.getBatchDataHash(1)).toBe(hash);
         }, 120_000);
+    });
+
+    describe('круг 22: монотонность и по lt счёта, снимок из будущего', () => {
+        const raw = () => rollup.address.toRawString();
+        const seenFile = () => path.join(dir, 'state', 'l1-seen.json');
+
+        it('снимок кошелька с тем же временем и прежним seqno после доставки — по lt старее: перечитан, без ложного «не учёл»', async () => {
+            // tick 0: время L1 не меняется — отличить отстающий снимок можно только по lt.
+            net.control.rewind = { address: wallet.address.toRawString(), delivery: 1, skip: 1, reads: 1 };
+            expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: false });
+            expect(net.attempts).toHaveLength(chunks + 1);
+            expect(opsTo(net.results)).toEqual([...Array(chunks).fill(RollupOpcodes.publishData), RollupOpcodes.submitBatch]);
+        }, 120_000);
+
+        it('после SubmitBatch снимок контракта с тем же временем и «не принят» — по lt старее: «принят» не теряется', async () => {
+            net.control.rewind = { address: raw(), delivery: chunks + 1, skip: 1, reads: 1 };
+            expect(await submitter().submit(batch())).toEqual({ accepted: true, alreadyAccepted: false });
+            expect(net.attempts).toHaveLength(chunks + 1);
+            expect(submits()).toBe(1);
+            // На диске — и время, и lt.
+            const seen = JSON.parse(readFileSync(seenFile(), 'utf8'));
+            expect(seen[raw()]).toEqual({ utime: blockchain.now, lt: (await net.snapshot(rollup.address)).lt.toString() });
+        }, 120_000);
+
+        it('снимок из будущего (позже часов машины больше чем на maxFutureSkew) — сбой, в l1-seen.json не записан', async () => {
+            const honest = await net.snapshot(rollup.address);
+            expect((await submitter().contractState()).utime).toBe(honest.utime);
+            net.control.lag.set(raw(), { ...honest, utime: honest.utime + 601 });
+            await expect(submitter().contractState()).rejects.toThrow(/^снимок счёта .* на время \d+ — позже часов машины \(\d+\) больше чем на 600 с/);
+            expect(JSON.parse(readFileSync(seenFile(), 'utf8'))[raw()].utime).toBe(honest.utime);
+            // Предел — параметр; ровно на пределе снимок годен.
+            net.control.lag.set(raw(), { ...honest, utime: honest.utime + 30 });
+            await expect(submitter({ maxFutureSkew: 29 }).contractState()).rejects.toThrow('больше чем на 29 с');
+            expect((await submitter({ maxFutureSkew: 30 }).contractState()).utime).toBe(honest.utime + 30);
+            net.control.lag.clear();
+        }, 60_000);
+
+        it('l1-seen.json в прежнем формате (только время) читается; испорченный — отказ со ссылкой на README', async () => {
+            mkdirSync(path.join(dir, 'state'), { recursive: true });
+            writeFileSync(seenFile(), JSON.stringify({ [raw()]: blockchain.now! - 5 }));
+            expect((await submitter().contractState()).utime).toBe(blockchain.now);
+            writeFileSync(seenFile(), JSON.stringify({ [raw()]: { utime: 1, lt: 'x' } }));
+            expect(() => submitter()).toThrow(/l1-seen\.json: не таблица «адрес → \{ utime, lt \}» \(sequencer\/README\.md/);
+        }, 60_000);
     });
 
     it('кошелёк, сеть и ключ: чужой секвенсор — отказ; ключ не печатается; не testnet — отказ', async () => {

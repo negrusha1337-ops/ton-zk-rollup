@@ -225,6 +225,13 @@ export type TestnetSubmitterOptions = {
     expiryMargin?: number;
     /** Сколько раз перечитать снимок старее уже виденного (круг 21, 1); по умолчанию 20. */
     staleRereads?: number;
+    /**
+     * Насколько время снимка может быть позже часов машины, с (круг 22, 2); позже — ответ негоден
+     * (сбой шага), в l1-seen.json не пишется. По умолчанию 600.
+     */
+    maxFutureSkew?: number;
+    /** Часы машины, с; по умолчанию Date.now. */
+    now?: () => number;
     /** Перепроверка своей блокировки каталога — перед каждой отправкой (круг 21, 5в). */
     assertHeld?: () => void;
     log?: (line: string) => void;
@@ -238,6 +245,28 @@ export class StaleSnapshot extends Error {}
 /** Ожидание по состоянию не дождалось изменения за `pollAttempts` опросов. */
 class PollTimeout extends Error {}
 
+/** Наибольшее виденное по адресу: время снимка и lt последней транзакции счёта (круг 22, 1). */
+type Seen = { utime: number; lt: bigint };
+
+const NOTHING_SEEN: Seen = { utime: 0, lt: 0n };
+
+/** Не старее ли снимок виденного: и время, и lt — не меньше. */
+const notOlder = (snapshot: Seen, floor: Seen): boolean => snapshot.utime >= floor.utime && snapshot.lt >= floor.lt;
+
+const newest = (a: Seen, b: Seen): Seen => ({ utime: Math.max(a.utime, b.utime), lt: a.lt > b.lt ? a.lt : b.lt });
+
+/**
+ * Запись l1-seen.json: { utime, lt } (lt — десятичной строкой). Число — формат до круга 22 (только
+ * время), читается с lt 0.
+ */
+function parseSeen(file: string, value: unknown): Seen {
+    if (Number.isInteger(value)) return { utime: value as number, lt: 0n };
+    const entry = value as { utime?: unknown; lt?: unknown } | null;
+    if (typeof entry === 'object' && entry !== null && Number.isInteger(entry.utime) && typeof entry.lt === 'string' && /^\d+$/.test(entry.lt))
+        return { utime: entry.utime as number, lt: BigInt(entry.lt) };
+    throw new Error(`${file}: не таблица «адрес → { utime, lt }» (sequencer/README.md: что делать, если файл испорчен)`);
+}
+
 /**
  * Отправщик в testnet. Сообщения — переводы кошелька секвенсора (WALLET_MNEMONIC) на контракт с
  * суммами из wrappers/rollupValues.ts. Каждое ожидание — по состоянию контракта и кошелька (снимки
@@ -246,39 +275,45 @@ class PollTimeout extends Error {}
  *
  * Снимки монотонны (круг 21, пункт 1): у toncenter за балансировщиком следующий ответ может прийти
  * от отстающего сервера — с прежним seqno кошелька и прежним хешем данных, что дало бы дубль порции
- * или сообщение с негодным seqno. Поэтому по каждому адресу помнится наибольшее время снимка (в
- * процессе и в stateDir/l1-seen.json — переживает перезапуск), и снимок старее него перечитывается.
+ * или сообщение с негодным seqno. Поэтому по каждому адресу помнится наибольшее время снимка и
+ * наибольший lt последней транзакции счёта (круг 22, 1: в пределах одной секунды отстающий сервер
+ * отвечает тем же временем) — в процессе и в stateDir/l1-seen.json (переживает перезапуск); снимок
+ * старее по любому из двух перечитывается. Снимок из будущего (позже часов машины больше чем на
+ * `maxFutureSkew`) — сбой шага, не запоминается (круг 22, 2): иначе он закрыл бы все честные снимки.
  */
 export class TestnetSubmitter implements BatchSubmitter {
     private readonly outboxFile: string;
     private readonly seenFile: string;
-    private readonly seen: Map<string, number>;
+    private readonly seen: Map<string, Seen>;
 
     constructor(private readonly options: TestnetSubmitterOptions) {
         this.outboxFile = path.join(options.stateDir, 'outbox.json');
         this.seenFile = path.join(options.stateDir, 'l1-seen.json');
-        this.seen = new Map(Object.entries(this.readSeen()));
+        this.seen = this.readSeen();
     }
 
     private log(line: string) {
         this.options.log?.(`отправщик: ${line}`);
     }
 
-    private readSeen(): Record<string, number> {
-        if (!existsSync(this.seenFile)) return {};
+    private readSeen(): Map<string, Seen> {
+        if (!existsSync(this.seenFile)) return new Map();
         const parsed = JSON.parse(readFileSync(this.seenFile, 'utf8')) as unknown;
-        if (typeof parsed !== 'object' || parsed === null || Object.values(parsed).some((value) => !Number.isInteger(value)))
-            throw new Error(`${this.seenFile}: не таблица «адрес → время снимка»`);
-        return parsed as Record<string, number>;
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+            throw new Error(`${this.seenFile}: не таблица «адрес → { utime, lt }» (sequencer/README.md: что делать, если файл испорчен)`);
+        return new Map(Object.entries(parsed).map(([address, value]) => [address, parseSeen(this.seenFile, value)]));
     }
 
-    /** Запомнить время снимка: в процессе и на диске (наибольшее из записанного и нового). */
-    private remember(key: string, utime: number): void {
-        if (utime <= (this.seen.get(key) ?? 0)) return;
-        this.seen.set(key, utime);
-        const merged = { ...this.readSeen() };
-        for (const [address, time] of this.seen) merged[address] = Math.max(merged[address] ?? 0, time);
-        writeAtomically(this.seenFile, JSON.stringify(merged, null, 1) + '\n');
+    /** Запомнить снимок: в процессе и на диске (наибольшее из записанного и нового). */
+    private remember(key: string, snapshot: Seen): void {
+        const before = this.seen.get(key) ?? NOTHING_SEEN;
+        const after = newest(before, snapshot);
+        if (after.utime === before.utime && after.lt === before.lt) return;
+        this.seen.set(key, after);
+        const merged = this.readSeen();
+        for (const [address, seen] of this.seen) merged.set(address, newest(merged.get(address) ?? NOTHING_SEEN, seen));
+        const table = Object.fromEntries([...merged].map(([address, seen]) => [address, { utime: seen.utime, lt: seen.lt.toString() }]));
+        writeAtomically(this.seenFile, JSON.stringify(table, null, 1) + '\n');
     }
 
     /** Снимок счёта не старее уже виденного по этому адресу; старее — перечитать (с паузой и пределом). */
@@ -286,15 +321,23 @@ export class TestnetSubmitter implements BatchSubmitter {
         const key = address.toRawString();
         const rereads = this.options.staleRereads ?? 20;
         for (let attempt = 0; ; attempt++) {
-            const floor = this.seen.get(key) ?? 0;
+            const floor = this.seen.get(key) ?? NOTHING_SEEN;
             const snapshot = await this.options.chain.account(address);
-            if (snapshot.utime >= floor) {
-                this.remember(key, snapshot.utime);
+            // Время из будущего — до сравнения и до записи (круг 22, 2).
+            const now = this.options.now?.() ?? Math.floor(Date.now() / 1000);
+            const skew = this.options.maxFutureSkew ?? 600;
+            if (snapshot.utime > now + skew)
+                throw new Error(
+                    `снимок счёта ${address.toString({ testOnly: true })} на время ${snapshot.utime} — позже часов машины (${now}) больше чем на ${skew} с: ` +
+                        'ответ сервера негоден (или часы машины отстают), в l1-seen.json не записан',
+                );
+            if (notOlder(snapshot, floor)) {
+                this.remember(key, snapshot);
                 return snapshot;
             }
             if (attempt >= rereads)
                 throw new StaleSnapshot(
-                    `снимок счёта ${address.toString({ testOnly: true })} на время ${snapshot.utime}, а уже виден снимок на ${floor}: ` +
+                    `снимок счёта ${address.toString({ testOnly: true })} на время ${snapshot.utime} (lt ${snapshot.lt}), а уже виден снимок на ${floor.utime} (lt ${floor.lt}): ` +
                         `${rereads + 1} ответов подряд от отстающего сервера; повтор шага продолжит без дубля`,
                 );
             await new Promise((resolve) => setTimeout(resolve, this.options.pollMs ?? 3000));
