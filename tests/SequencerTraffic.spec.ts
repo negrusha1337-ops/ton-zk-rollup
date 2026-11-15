@@ -273,6 +273,10 @@ describe('Нагрузка на сервис: депозиты, принудит
 
         describe('1: кошелёк нагрузки — не кошелёк сервиса, во всех режимах', () => {
             const saved = { ...process.env };
+            // `blueprint test` загружает .env проекта в окружение: тест его не видит и не трогает.
+            beforeEach(() => {
+                for (const name of ['SEQUENCER_MNEMONIC', 'SEQUENCER_WALLET_VERSION', 'WALLET_MNEMONIC']) delete process.env[name];
+            });
             afterEach(() => {
                 for (const name of ['SEQUENCER_MNEMONIC', 'SEQUENCER_WALLET_VERSION', 'WALLET_MNEMONIC']) {
                     if (saved[name] === undefined) delete process.env[name];

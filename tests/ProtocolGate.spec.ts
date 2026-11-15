@@ -39,6 +39,10 @@ const PENDING: Record<string, string> = {
         'проверяет пруф, построенный на другой машине (zkvm-evm/host/remote): без переменной REMOTE_PROOF_FIXTURE проверять нечего, набор — один todo с подсказкой',
     'tests/SequencerReth.spec.ts':
         'ждёт бинарников вне репозитория (reth v2.2.0, rsp, rollup-evm-host — PROVING.md), а не пруфов: todo только в ветке их отсутствия; набор поднимает настоящий узел и зовёт хост программы',
+    'tests/SequencerRemoteProver.spec.ts':
+        'ждёт артефактов схемы Groth16 (~/.sp1/circuits/groth16/v6.1.0) и ELF программы с мака: без них пруф с подставного сервера нечем проверить; todo только в ветке их отсутствия',
+    'tests/SequencerRound23.spec.ts':
+        'ждёт бинарников вне репозитория (reth v2.2.0, rollup-evm-host — PROVING.md) для проверки произвольного chainId узлом и хостом; todo только в ветке их отсутствия',
     'tests/SequencerProver.spec.ts':
         'ждёт артефактов схемы Groth16 вне репозитория (~/.sp1/circuits/groth16/v6.1.0): без них импорт пруфа нечем проверить; todo только в ветке их отсутствия',
 };

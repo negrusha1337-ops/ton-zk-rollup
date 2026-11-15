@@ -51,6 +51,10 @@ describe('круг 23', () => {
     describe('1: окружение сервиса — только SEQUENCER_MNEMONIC', () => {
         const NAMES = ['SEQUENCER_MNEMONIC', 'SEQUENCER_WALLET_VERSION', 'WALLET_MNEMONIC', 'WALLET_VERSION', 'TONCENTER_API_KEY'];
         const saved = { ...process.env };
+        // `blueprint test` загружает .env проекта в окружение: тест его не видит и не трогает.
+        beforeEach(() => {
+            for (const name of NAMES) delete process.env[name];
+        });
         afterEach(() => {
             for (const name of NAMES) {
                 if (saved[name] === undefined) delete process.env[name];
@@ -181,7 +185,8 @@ describe('круг 23', () => {
         const haveReth = existsSync(tools.reth);
         const haveHost = existsSync(tools.host);
 
-        (haveReth ? it : it.skip)('узел reth со случайным chainId: тот же GENESIS_HASH (checkGenesis при старте), eth_chainId — новый', async () => {
+        if (!haveReth) it.todo('узел reth со случайным chainId — ждёт .tools/reth/bin/reth (PROVING.md)');
+        else it('узел reth со случайным chainId: тот же GENESIS_HASH (checkGenesis при старте), eth_chainId — новый', async () => {
             const chainId = randomChainId(usedChainIds());
             const node = await startNode({ reth: tools.reth, dir: path.join(dir, 'node'), chainId, httpPort: 8771, authPort: 8775, p2pPort: 30611 });
             try {
@@ -192,7 +197,8 @@ describe('круг 23', () => {
             }
         }, 120_000);
 
-        (haveHost ? it : it.skip)('хост принимает произвольный chainId: вывод через мост, подписанный под него, годен по форме, под другой — нет', async () => {
+        if (!haveHost) it.todo('хост принимает произвольный chainId — ждёт zkvm-evm/target/release/rollup-evm-host (PROVING.md)');
+        else it('хост принимает произвольный chainId: вывод через мост, подписанный под него, годен по форме, под другой — нет', async () => {
             const chainId = randomChainId(usedChainIds());
             const bytes = signBridgeWithdrawal(newL2Account(), { chainId, nonce: 0, amountNano: 50_000_000n, recipientHash: 1n });
             const verdicts = await classifyForced({ host: tools.host, rsp: tools.rsp, executeInZkvm: false }, chainId, [bytes], path.join(dir, 'host'));

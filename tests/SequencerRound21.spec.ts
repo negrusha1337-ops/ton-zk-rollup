@@ -64,6 +64,9 @@ describe('круг 21: окружение дочерних, группы про�
 
     describe('3: мнемоника не уходит дочерним', () => {
         const saved = { ...process.env };
+        beforeEach(() => {
+            for (const name of ['WALLET_MNEMONIC', 'WALLET_VERSION', 'SEQUENCER_MNEMONIC', 'SEQUENCER_WALLET_VERSION', 'TONCENTER_API_KEY']) delete process.env[name];
+        });
         afterEach(() => {
             for (const name of ['WALLET_MNEMONIC', 'WALLET_VERSION', 'SEQUENCER_MNEMONIC', 'SEQUENCER_WALLET_VERSION', 'TONCENTER_API_KEY']) {
                 if (saved[name] === undefined) delete process.env[name];
