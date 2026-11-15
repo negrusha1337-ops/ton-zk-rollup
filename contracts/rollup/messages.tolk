@@ -61,7 +61,7 @@ struct (0x5242000b) DiscardBatchData {
 
 /// Пользователь → Rollup: депозит TON. Сумма депозита = приложенные монеты минус комиссия
 /// за место в очереди. Комиссия — DEPOSIT_FEE, пока очередь коротка, и удваивается на каждые
-/// QUEUE_FEE_STEP элементов, ждущих в текущем окне (get-метод queueFees).
+/// QUEUE_FEE_STEP необработанных элементов очереди (get-метод queueFees).
 struct (0x52420002) DepositTon {
   queryId: uint64
   /// Получатель на L2 (EVM-адрес).
@@ -80,7 +80,8 @@ struct (0x52420002) DepositTon {
 struct (0x52420005) ForceTransaction {
   queryId: uint64
   /// Байты подписанной транзакции EVM (EIP-2718) «змейкой»: в каждой ячейке целое число байт
-  /// и не больше одной ссылки на продолжение, не больше MAX_FORCED_TX_CELLS обычных ячеек.
+  /// и не больше одной ссылки на продолжение, не больше MAX_FORCED_TX_CELLS обычных ячеек и
+  /// не больше MAX_FORCED_TX_BYTES байт всего.
   l2Transaction: cell
 }
 

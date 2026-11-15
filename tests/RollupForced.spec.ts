@@ -10,6 +10,7 @@ import {
     forcedTransactionCell,
     forcedTransactionHash,
     forcedTransactionKeccak,
+    MAX_FORCED_TX_BYTES,
     MAX_FORCED_TX_CELLS,
     sha256Int,
 } from '../wrappers/rollupMath';
@@ -104,7 +105,7 @@ describe('Rollup: принудительные транзакции L2 на те
 
     it('ставит транзакцию в общую очередь с депозитами, в порядке прихода', async () => {
         const first = transactionBytes(0xa1);
-        const second = transactionBytes(0xa2, 300);
+        const second = transactionBytes(0xa2, 250);
         const result = await force(first);
         expect(result.transactions).toHaveTransaction({ from: user.address, to: rollup.address, success: true });
         await rollup.sendDeposit(user.getSender(), { l2Recipient: L2_RECIPIENT, value: toNano('1') });
@@ -139,14 +140,17 @@ describe('Rollup: принудительные транзакции L2 на те
     });
 
     it('хеш в очереди не зависит от нарезки байтов на ячейки', async () => {
-        const bytes = transactionBytes(0x33, 300);
+        const bytes = transactionBytes(0x33, 200);
         const expected = forcedTransactionHash(0n, bytes);
         const slicings: (number[] | undefined)[] = [
-            undefined, // по 127 байт
-            [100, 100, 100],
-            [1, 127, 127, 45],
-            [0, 127, 0, 127, 46, 0], // пустые ячейки в начале, середине и конце допустимы
-            new Array(60).fill(5),
+            undefined, // по 127 байт: 127 и 73
+            [100, 100],
+            [200 - 127, 127],
+            [1, 127, 72],
+            // Пустые ячейки в начале, середине и конце допустимы.
+            [0, 127, 73],
+            [127, 0, 73],
+            [127, 73, 0],
         ];
         const cells = new Set<string>();
         for (const pieces of slicings) {
@@ -160,32 +164,56 @@ describe('Rollup: принудительные транзакции L2 на те
         expect(cells.size).toBe(slicings.length);
         // Другие байты той же длины — другой хеш.
         const other = Buffer.from(bytes);
-        other[299] ^= 1;
+        other[199] ^= 1;
         await force(other);
         expect(await queuedHash()).not.toBe(expected);
     });
 
-    it('«змейка» из одной, из 64 и из 65 ячеек: предел — у контракта', async () => {
+    it('«змейка» из одной ячейки, из предельного числа и на одну больше: предел ячеек — у контракта', async () => {
         const limit = constants.maxForcedTxCells;
         expect(limit).toBe(MAX_FORCED_TX_CELLS);
-        // 65 ячеек — отказ, даже если байтов мало (по одному на ячейку).
+        // На ячейку больше предела — отказ, даже если байтов мало (по одному на ячейку).
         await malformed(byteSnake(transactionBytes(1, limit + 1), new Array(limit + 1).fill(1)));
-        await malformed(byteSnake(transactionBytes(1, (limit + 1) * 127)));
+        await malformed(byteSnake(Buffer.alloc(0), new Array(limit + 1).fill(0)));
 
         const one = transactionBytes(2, 127);
         expect((await force(one)).transactions).toHaveTransaction({ to: rollup.address, success: true });
         expect(await queuedHash()).toBe(forcedTransactionHash(0n, one));
-        // Ровно предел: 64 ячейки по 127 байт — 8 128 байт.
-        const longest = transactionBytes(3, limit * 127);
-        expect((await force(longest)).transactions).toHaveTransaction({ to: rollup.address, success: true });
-        expect(await queuedHash()).toBe(forcedTransactionHash(forcedTransactionHash(0n, one), longest));
-        // И 64 ячейки по одному байту.
+        // Ровно предел ячеек, по одному байту в каждой.
         const sparse = transactionBytes(4, limit);
         expect((await force(sparse, new Array(limit).fill(1))).transactions).toHaveTransaction({
             to: rollup.address,
             success: true,
         });
-        expect((await rollup.getDepositQueue()).head.count).toBe(3n);
+        expect(await queuedHash()).toBe(forcedTransactionHash(forcedTransactionHash(0n, one), sparse));
+        expect((await rollup.getDepositQueue()).head.count).toBe(2n);
+    });
+
+    it('длина в байтах: ровно предел принят при любой нарезке, на байт больше — отказ', async () => {
+        // Предел — тот же, что у программы zkVM (FORCED_TX_MAX_BYTES): транзакцию длиннее она
+        // пропустила бы, но за чтение её байтов заплатил бы прувер. Ячеек предел вмещает больше
+        // (три по 127 байт — 381 байт), поэтому байты считаются отдельно и точно.
+        const limit = constants.maxForcedTxBytes;
+        expect(limit).toBe(MAX_FORCED_TX_BYTES);
+        expect(limit).toBe(256);
+        expect(limit).toBeLessThan(constants.maxForcedTxCells * 127);
+        // На байт больше — при каждой нарезке, которая помещается в предел ячеек.
+        const tooLong = transactionBytes(5, limit + 1);
+        for (const pieces of [[127, 127, 3], [3, 127, 127], [86, 86, 85]]) {
+            await malformed(byteSnake(tooLong, pieces));
+        }
+        // Три полные ячейки: по ячейкам годится, по байтам — нет.
+        await malformed(byteSnake(transactionBytes(6, 381)));
+        // Упаковщик такого не собирает вовсе.
+        expect(() => forcedTransactionCell(tooLong)).toThrow('больше предела');
+
+        const longest = transactionBytes(7, limit);
+        let expected = 0n;
+        for (const pieces of [[127, 127, 2], [2, 127, 127], [86, 85, 85]]) {
+            expect((await force(longest, pieces)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+            expected = forcedTransactionHash(expected, longest);
+            expect(await queuedHash()).toBe(expected);
+        }
     });
 
     it('пустая транзакция формально допустима: программа её просто пропустит', async () => {
@@ -265,11 +293,11 @@ describe('Rollup: принудительные транзакции L2 на те
         });
     });
 
-    it('газ постановки в очередь укладывается в запас шага — на одной ячейке и на 64', async () => {
+    it('газ постановки в очередь укладывается в запас шага — на одной ячейке и на предельной длине', async () => {
         // Запас — у контракта (get-метод queueBudgets): из него считается плата при дорогом газе.
         // Замер на словаре очереди, заполненном до предела, — tests/RollupQueue.spec.ts.
         const { forceTransactionStepGas } = await rollup.getQueueBudgets();
-        for (const length of [122, constants.maxForcedTxCells * 127]) {
+        for (const length of [122, constants.maxForcedTxBytes]) {
             const result = await force(transactionBytes(1, length));
             expect(result.transactions).toHaveTransaction({ to: rollup.address, success: true });
             const gasUsed = Number(computePhaseOf(result.transactions, rollup.address).gasUsed);

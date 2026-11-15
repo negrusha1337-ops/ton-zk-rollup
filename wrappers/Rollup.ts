@@ -154,6 +154,16 @@ export const QueueEntryValue: DictionaryValue<QueueEntry> = {
     },
 };
 
+/** Раскладка записи о долге — обязана совпадать с OwedPayout в storage.tolk. */
+export const OwedPayoutValue: DictionaryValue<{ recipient: Address; amount: bigint }> = {
+    serialize(src, builder) {
+        builder.storeAddress(src.recipient).storeCoins(src.amount);
+    },
+    parse(src) {
+        return { recipient: src.loadAddress(), amount: src.loadCoins() };
+    },
+};
+
 /**
  * Неканоническое начальное состояние — ТОЛЬКО ДЛЯ ТЕСТОВ: проверить, что контракт с ним не
  * начинает работу, либо поставить очередь сразу на нужную отметку. Настоящее развёртывание —
@@ -165,6 +175,10 @@ export type PlantedState = {
     batchIndex?: bigint;
     queue?: Partial<QueueState>;
     queueItems?: Dictionary<bigint, QueueEntry>;
+    /** Хеши данных батчей (RollupState.pendingData): номер батча → накопительный хеш порций. */
+    pendingData?: Dictionary<bigint, bigint>;
+    /** Долги (RollupState.owed): ключ нуллификатора → кому и сколько. */
+    owed?: Dictionary<bigint, { recipient: Address; amount: bigint }>;
     /** Ключ уже «зафиксирован» (значение — эта ячейка): минуя FinalizeKey, который такое состояние отверг бы. */
     vkData?: Cell;
 };
@@ -200,10 +214,10 @@ export class Rollup implements Contract {
             .storeUint(planted.withdrawalsCount ?? 0n, 64) // счётчик выводов
             .storeUint(planted.batchIndex ?? 0n, 64)
             .storeRef(queue)
-            .storeBit(false) // pendingData: данных батчей ещё нет
+            .storeDict(planted.pendingData ?? null) // pendingData: данных батчей ещё нет
             .storeDict(planted.queueItems ?? null) // queueItems: очередь пуста
             .storeBit(false) // frozen
-            .storeBit(false) // owed: долгов нет
+            .storeDict(planted.owed ?? null) // owed: долгов нет
             .endCell();
         const keys = beginCell()
             .storeMaybeRef(planted.vkData ?? null) // vkData: ещё нет
@@ -230,6 +244,16 @@ export class Rollup implements Contract {
     static createPlanted(config: RollupConfig, planted: PlantedState, code: Cell, workchain = 0) {
         const init = { code, data: Rollup.buildData(config, planted) };
         return new Rollup(contractAddress(workchain, init), init);
+    }
+
+    /** Словарь данных батчей для подложенного состояния. */
+    static pendingDataDictionary(): Dictionary<bigint, bigint> {
+        return Dictionary.empty(Dictionary.Keys.BigUint(64), Dictionary.Values.BigUint(256));
+    }
+
+    /** Словарь долгов для подложенного состояния. */
+    static owedDictionary(): Dictionary<bigint, { recipient: Address; amount: bigint }> {
+        return Dictionary.empty(Dictionary.Keys.BigUint(256), OwedPayoutValue);
     }
 
     /** Словарь очереди L1 для подложенного состояния. */
@@ -535,6 +559,7 @@ export class Rollup implements Contract {
             maxForcedTxCells: stack.readNumber(),
             prunePerPush: stack.readNumber(),
             depositAmountLimit: stack.readBigNumber(),
+            maxForcedTxBytes: stack.readNumber(),
         };
     }
 

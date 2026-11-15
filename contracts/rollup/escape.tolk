@@ -31,9 +31,15 @@ fun oldestPendingDepositAt(state: RollupState, queue: DepositQueue): int {
     return 0;
   }
   val oldest = state.queueItems.get(queue.processedCount + 1);
-  // Записи необработанных элементов удаляет только возврат депозита, а он возможен лишь
-  // после заморозки, когда срок уже никого не интересует.
-  return oldest.isFound ? oldest.loadValue().queuedAt : 0;
+  if (!oldest.isFound) {
+    // Записи необработанных элементов удаляет только возврат депозита, а он возможен лишь
+    // после заморозки, когда срок уже никого не интересует. До заморозки записи не может не
+    // быть: молча вернуть ноль значило бы объявить очередь обработанной и навсегда запретить
+    // заморозку — отказ честнее.
+    assert (state.frozen) throw RollupErrors.QueueEntryMissing;
+    return 0;
+  }
+  return oldest.loadValue().queuedAt;
 }
 
 fun handleActivateEscapeHatch() {

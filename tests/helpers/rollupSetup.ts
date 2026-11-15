@@ -44,6 +44,7 @@ export type ProtocolConstants = {
     maxBatchQueueItems: number;
     maxTrackedItems: number;
     maxForcedTxCells: number;
+    maxForcedTxBytes: number;
     prunePerPush: number;
     depositAmountLimit: bigint;
     minMaxBlockAge: number;

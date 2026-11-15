@@ -1,5 +1,5 @@
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
-import { Cell, toNano } from '@ton/core';
+import { Address, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
 import { PlantedState, Rollup, RollupConfig, RollupErrors } from '../wrappers/Rollup';
@@ -107,6 +107,29 @@ describe('Rollup: генезис и параметры развёртывани�
                     const items = Rollup.queueItemsDictionary();
                     items.set(1n, { hashBefore: 0n, queuedAt: 1, receipt: null });
                     return items;
+                })(),
+            },
+        ],
+        [
+            // Долг выплачивается сообщением PayOwed кому угодно из записи — то есть из чужих
+            // депозитов (REVIEW.md, 14-3).
+            'в словаре долгов есть запись',
+            {
+                owed: (() => {
+                    const owed = Rollup.owedDictionary();
+                    owed.set(7n, { recipient: new Address(0, Buffer.alloc(32, 7)), amount: toNano('1000') });
+                    return owed;
+                })(),
+            },
+        ],
+        [
+            // Хеш данных для первого батча вошёл бы в его публичный вход.
+            'в словаре данных батчей есть запись',
+            {
+                pendingData: (() => {
+                    const pending = Rollup.pendingDataDictionary();
+                    pending.set(1n, 1n);
+                    return pending;
                 })(),
             },
         ],

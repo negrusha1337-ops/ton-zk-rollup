@@ -38,3 +38,15 @@ fun byteParts(root: cell, maxParts: int, errorCode: int): array<slice> {
   }
   return parts;
 }
+
+/// Суммарная длина срезов «змейки» в битах.
+@inline_ref
+fun totalBits(parts: array<slice>): int {
+  var bits = 0;
+  var index = 0;
+  while (index < parts.size()) {
+    bits += parts.get(index).remainingBitsCount();
+    index += 1;
+  }
+  return bits;
+}

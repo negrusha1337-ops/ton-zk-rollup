@@ -1,9 +1,9 @@
-import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
+import { Blockchain, createShardAccount, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Address, beginCell, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
 import { finalizeDummyKeys, mockProof, ProtocolConstants, readProtocolConstants, testConfig } from './helpers/rollupSetup';
-import { Rollup, RollupErrors } from '../wrappers/Rollup';
+import { PlantedState, Rollup, RollupConfig, RollupErrors } from '../wrappers/Rollup';
 import { forcedTransactionCell, merkleProofCell, sha256Int, withdrawalTree } from '../wrappers/rollupMath';
 import { FORCE_TRANSACTION_VALUE } from '../wrappers/rollupValues';
 
@@ -28,6 +28,17 @@ describe('Rollup: аварийный режим на тестовом двойн
     let user: SandboxContract<TreasuryContract>;
     let stranger: SandboxContract<TreasuryContract>;
     let rollup: SandboxContract<Rollup>;
+    let config: RollupConfig;
+
+    /** Контракт с подложенным состоянием и «зафиксированным» ключом — мимо сообщений. */
+    const plant = async (planted: PlantedState) => {
+        const contract = Rollup.createPlanted(config, { vkData: beginCell().endCell(), ...planted }, code);
+        await blockchain.setShardAccount(
+            contract.address,
+            createShardAccount({ address: contract.address, code, data: contract.init!.data, balance: toNano('5') }),
+        );
+        return blockchain.openContract(contract);
+    };
 
     /** Батч, обработавший очередь до элемента `upTo` (по умолчанию — до головы). */
     const submit = async (newStateRoot: bigint, upTo?: number, withdrawals: { root: bigint; count: bigint } = { root: 0n, count: 0n }) =>
@@ -79,18 +90,14 @@ describe('Rollup: аварийный режим на тестовом двойн
         sequencer = await blockchain.treasury('sequencer');
         user = await blockchain.treasury('user');
         stranger = await blockchain.treasury('stranger');
-        rollup = blockchain.openContract(
-            Rollup.createFromConfig(
-                testConfig(constants, {
-                    owner: owner.address,
-                    sequencer: sequencer.address,
-                    nullifierCode,
-                    chainId: CHAIN_ID,
-                    escapeTimeout: TIMEOUT,
-                }),
-                code,
-            ),
-        );
+        config = testConfig(constants, {
+            owner: owner.address,
+            sequencer: sequencer.address,
+            nullifierCode,
+            chainId: CHAIN_ID,
+            escapeTimeout: TIMEOUT,
+        });
+        rollup = blockchain.openContract(Rollup.createFromConfig(config, code));
         await rollup.sendDeploy(owner.getSender(), toNano('5'));
         await finalizeDummyKeys(rollup, owner);
     });
@@ -100,6 +107,33 @@ describe('Rollup: аварийный режим на тестовом двойн
             expect(await rollup.getEscapeState()).toEqual({ frozen: false, oldestPendingAt: 0, timeout: TIMEOUT });
             blockchain.now = START + 100 * TIMEOUT;
             await notDue();
+        });
+
+        it('необработанный элемент без записи в словаре — отказ кодом 7334, а не «срок не вышел»', async () => {
+            // Время постановки самого старого необработанного элемента берётся из его записи в
+            // словаре. До заморозки запись обязана быть: сообщениями её не удалить. Состояние
+            // подложено — в очереди один элемент, записи нет. Молчаливый ноль здесь означал бы
+            // «очередь обработана»: заморозить такой rollup было бы нельзя никогда (7314), а
+            // причина осталась бы невидимой.
+            rollup = await plant({ queue: { head: { count: 1n, hash: sha256Int(1n) } } });
+            expect(RollupErrors.queueEntryMissing).toBe(7334);
+            for (const now of [START, START + TIMEOUT + 1, START + 100 * TIMEOUT]) {
+                blockchain.now = now;
+                expect((await activate()).transactions).toHaveTransaction({
+                    to: rollup.address,
+                    success: false,
+                    exitCode: RollupErrors.queueEntryMissing,
+                });
+            }
+            // Та же очередь с записью на месте замораживается, когда выйдет срок.
+            const queuedAt = START + 200 * TIMEOUT;
+            const items = Rollup.queueItemsDictionary();
+            items.set(1n, { hashBefore: 0n, queuedAt, receipt: null });
+            rollup = await plant({ queue: { head: { count: 1n, hash: sha256Int(1n) } }, queueItems: items });
+            blockchain.now = queuedAt + TIMEOUT;
+            await notDue();
+            blockchain.now = queuedAt + TIMEOUT + 1;
+            await freezes();
         });
 
         it('срок считается от самого старого необработанного элемента', async () => {
@@ -247,6 +281,9 @@ describe('Rollup: аварийный режим на тестовом двойн
             expect(refund.transactions).toHaveTransaction({ from: rollup.address, to: user.address, value: amount });
             expect(await rollup.getDepositReceipt(1)).toBeNull();
             expect(await rollup.getQueueItem(1)).toBeNull();
+            // Запись самого старого необработанного элемента теперь удалена — законно: после
+            // заморозки срок никого не интересует, и состояние по-прежнему читается.
+            expect(await rollup.getEscapeState()).toEqual({ frozen: true, oldestPendingAt: 0, timeout: TIMEOUT });
 
             const again = await cancel(1);
             expect(again.transactions).toHaveTransaction({

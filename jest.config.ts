@@ -9,7 +9,8 @@ const config: Config = {
     // миллионы gas: стандартных 5 с под нагрузкой не хватает.
     testTimeout: 120_000,
     testEnvironment: '@ton/sandbox/jest-environment',
-    testPathIgnorePatterns: ['/node_modules/', '/dist/', '/circuits/build/', '/.tools/'],
+    // .claude/worktrees — рабочие копии агентов: их тесты относятся к другим веткам.
+    testPathIgnorePatterns: ['/node_modules/', '/dist/', '/circuits/build/', '/.tools/', '/.claude/'],
     reporters: ['default', ['@ton/sandbox/jest-reporter', {}]],
 };
 

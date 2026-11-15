@@ -1,15 +1,18 @@
 {
   "source": "Измерено в @ton/sandbox тестом tests/RollupQueue.spec.ts на двойнике (contracts/rollup_mock.tolk); не редактировать вручную",
-  "note": "Шаги очереди L1 протокола v2 на словаре очереди, заполненном до предела: в словаре maxTrackedItems − 1 записей, постановка убирает две прежние и добавляет одну. depositFullQueue — депозит; forceTransactionFullQueue — принудительная транзакция из maxForcedTxCells ячеек по 127 байт; forceTransactionOneCell — она же из одной ячейки на пустой очереди. mockSubmitBatchAtHead и mockSubmitBatchMidQueue — батч ДВОЙНИКА (без проверки пруфа) с отметкой на голове очереди и в её середине на том же словаре: разница — цена поиска записи в словаре, которую настоящий батч заплатит сверх проверки пруфа. pruneFiftyEntries — уборка 50 записей одним сообщением. Запасы шагов (depositStepGas, forceTransactionStepGas) — из get-метода queueBudgets.",
+  "note": "Шаги очереди L1 протокола v2 на словаре очереди, заполненном до предела: в словаре maxTrackedItems − 1 записей с номерами подряд, постановка убирает две прежние и добавляет одну. Номера подобраны под САМУЮ ГЛУБОКУЮ вставку: новая запись — последний лист полного поддерева (номер 2^14 − 1), путь к ней проходит все 13 развилок словаря; убираемые записи лежат так же глубоко. depositFullQueue — депозит; forceTransactionFullQueue — принудительная транзакция наибольшей длины (maxForcedTxBytes байт в maxForcedTxCells ячейках); depositShallowInsert и forceTransactionShallowInsert — те же шаги на словаре того же размера, где новая запись ложится у корня (номера с единицы; так мерилось до круга 14); forceTransactionOneCell — принудительная транзакция из одной ячейки на пустой очереди. mockSubmitBatchAtHead и mockSubmitBatchMidQueue — батч ДВОЙНИКА (без проверки пруфа) с отметкой на голове очереди и в её середине на том же словаре: разница — цена поиска записи в словаре, которую настоящий батч заплатит сверх проверки пруфа. pruneFiftyEntries — уборка 50 записей одним сообщением. Запасы шагов (depositStepGas, forceTransactionStepGas) — из get-метода queueBudgets.",
   "maxTrackedItems": 8192,
-  "maxForcedTxCells": 64,
+  "maxForcedTxCells": 3,
+  "maxForcedTxBytes": 256,
   "maxBatchQueueItems": 32,
   "depositStepGas": 40000,
-  "forceTransactionStepGas": 110000,
-  "depositFullQueue": 24848,
-  "forceTransactionFullQueue": 83037,
-  "mockSubmitBatchMidQueue": 10574,
-  "mockSubmitBatchAtHead": 8806,
-  "pruneFiftyEntries": 343754,
-  "forceTransactionOneCell": 8832
+  "forceTransactionStepGas": 50000,
+  "depositFullQueue": 32748,
+  "forceTransactionFullQueue": 36303,
+  "depositShallowInsert": 24948,
+  "forceTransactionShallowInsert": 28503,
+  "mockSubmitBatchMidQueue": 10767,
+  "mockSubmitBatchAtHead": 8906,
+  "pruneFiftyEntries": 345654,
+  "forceTransactionOneCell": 9718
 }

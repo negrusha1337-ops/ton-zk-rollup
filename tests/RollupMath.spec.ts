@@ -165,7 +165,7 @@ describe('Арифметика протокола v2', () => {
     });
 
     describe('принудительная транзакция: «змейка» и хеш элемента очереди', () => {
-        const bytes = Buffer.from(Array.from({ length: 400 }, (_, index) => (index * 37 + 11) & 255));
+        const bytes = Buffer.from(Array.from({ length: 250 }, (_, index) => (index * 37 + 11) & 255));
 
         it('элемент очереди — sha256(прежний ‖ метка ‖ keccak256(байты))', () => {
             const previous = sha256Int(42n);
@@ -186,18 +186,24 @@ describe('Арифметика протокола v2', () => {
                 }
                 return { bytes: Buffer.concat(parts), cells };
             };
-            expect(read(forcedTransactionCell(bytes))).toEqual({ bytes, cells: 4 });
-            expect(read(forcedTransactionCell(bytes, [1, 127, 0, 100, 172 - 100, 100]))).toEqual({ bytes, cells: 6 });
+            expect(read(forcedTransactionCell(bytes))).toEqual({ bytes, cells: 2 });
+            expect(read(forcedTransactionCell(bytes, [1, 127, 122]))).toEqual({ bytes, cells: 3 });
+            expect(read(byteSnake(bytes, [1, 127, 0, 100, 22, 0]))).toEqual({ bytes, cells: 6 });
             expect(read(forcedTransactionCell(Buffer.alloc(0)))).toEqual({ bytes: Buffer.alloc(0), cells: 1 });
             expect(read(forcedTransactionCell(Buffer.alloc(127, 1)))).toEqual({ bytes: Buffer.alloc(127, 1), cells: 1 });
             expect(read(forcedTransactionCell(Buffer.alloc(128, 1)))).toEqual({ bytes: Buffer.alloc(128, 1), cells: 2 });
         });
 
         it('упаковщик не собирает то, что контракт отвергнет', () => {
-            expect(MAX_FORCED_TX_BYTES).toBe(MAX_FORCED_TX_CELLS * 127);
+            // Предел в байтах помещается в предел ячеек, но не равен ему: он отдельный.
+            expect(MAX_FORCED_TX_BYTES).toBe(256);
+            expect(Math.ceil(MAX_FORCED_TX_BYTES / 127)).toBe(MAX_FORCED_TX_CELLS);
             expect(() => forcedTransactionCell(Buffer.alloc(MAX_FORCED_TX_BYTES))).not.toThrow();
-            expect(() => forcedTransactionCell(Buffer.alloc(MAX_FORCED_TX_BYTES + 1))).toThrow('больше предела');
-            expect(() => forcedTransactionCell(Buffer.alloc(65), new Array(65).fill(1))).toThrow('больше предела');
+            expect(() => forcedTransactionCell(Buffer.alloc(MAX_FORCED_TX_BYTES + 1))).toThrow('байт больше предела');
+            const tooManyCells = new Array(MAX_FORCED_TX_CELLS + 1).fill(1);
+            expect(() => forcedTransactionCell(Buffer.alloc(tooManyCells.length), tooManyCells)).toThrow(
+                'ячеек больше предела',
+            );
             expect(() => byteSnake(Buffer.alloc(10), [4, 5])).toThrow('не складываются');
             expect(() => byteSnake(Buffer.alloc(128), [128])).toThrow('не помещается');
         });

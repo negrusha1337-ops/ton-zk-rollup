@@ -133,9 +133,10 @@ describe('Rollup: очередь L1 с отметкой батча', () => {
             'rollup-queue-gas.json',
             {
                 source: 'Измерено в @ton/sandbox тестом tests/RollupQueue.spec.ts на двойнике (contracts/rollup_mock.tolk); не редактировать вручную',
-                note: 'Шаги очереди L1 протокола v2 на словаре очереди, заполненном до предела: в словаре maxTrackedItems − 1 записей, постановка убирает две прежние и добавляет одну. depositFullQueue — депозит; forceTransactionFullQueue — принудительная транзакция из maxForcedTxCells ячеек по 127 байт; forceTransactionOneCell — она же из одной ячейки на пустой очереди. mockSubmitBatchAtHead и mockSubmitBatchMidQueue — батч ДВОЙНИКА (без проверки пруфа) с отметкой на голове очереди и в её середине на том же словаре: разница — цена поиска записи в словаре, которую настоящий батч заплатит сверх проверки пруфа. pruneFiftyEntries — уборка 50 записей одним сообщением. Запасы шагов (depositStepGas, forceTransactionStepGas) — из get-метода queueBudgets.',
+                note: 'Шаги очереди L1 протокола v2 на словаре очереди, заполненном до предела: в словаре maxTrackedItems − 1 записей с номерами подряд, постановка убирает две прежние и добавляет одну. Номера подобраны под САМУЮ ГЛУБОКУЮ вставку: новая запись — последний лист полного поддерева (номер 2^14 − 1), путь к ней проходит все 13 развилок словаря; убираемые записи лежат так же глубоко. depositFullQueue — депозит; forceTransactionFullQueue — принудительная транзакция наибольшей длины (maxForcedTxBytes байт в maxForcedTxCells ячейках); depositShallowInsert и forceTransactionShallowInsert — те же шаги на словаре того же размера, где новая запись ложится у корня (номера с единицы; так мерилось до круга 14); forceTransactionOneCell — принудительная транзакция из одной ячейки на пустой очереди. mockSubmitBatchAtHead и mockSubmitBatchMidQueue — батч ДВОЙНИКА (без проверки пруфа) с отметкой на голове очереди и в её середине на том же словаре: разница — цена поиска записи в словаре, которую настоящий батч заплатит сверх проверки пруфа. pruneFiftyEntries — уборка 50 записей одним сообщением. Запасы шагов (depositStepGas, forceTransactionStepGas) — из get-метода queueBudgets.',
                 maxTrackedItems: constants.maxTrackedItems,
                 maxForcedTxCells: constants.maxForcedTxCells,
+                maxForcedTxBytes: constants.maxForcedTxBytes,
                 maxBatchQueueItems: constants.maxBatchQueueItems,
                 depositStepGas: budgets.depositStepGas,
                 forceTransactionStepGas: budgets.forceTransactionStepGas,
@@ -144,6 +145,8 @@ describe('Rollup: очередь L1 с отметкой батча', () => {
             [
                 'depositFullQueue',
                 'forceTransactionFullQueue',
+                'depositShallowInsert',
+                'forceTransactionShallowInsert',
                 'forceTransactionOneCell',
                 'mockSubmitBatchAtHead',
                 'mockSubmitBatchMidQueue',
@@ -359,56 +362,191 @@ describe('Rollup: очередь L1 с отметкой батча', () => {
         });
     });
 
+    describe('счётчик убранных записей и целостность словаря (REVIEW.md, 14-5)', () => {
+        it('батч не трогает счётчик убранных записей: уборка продолжается с того же места', async () => {
+            const hashes = [0n];
+            await enqueue(6, hashes);
+            accepted(await submit(roots(sha256Int(2n), 3))); // обработаны 1–3
+            await enqueue(1, hashes); // 7: убирает 1 и 2
+            expect((await rollup.getDepositQueue()).prunedCount).toBe(2n);
+
+            // Батч с отметкой и в середине очереди, и на голове: счётчик убранных — прежний.
+            accepted(await submit(roots(sha256Int(3n), 5)));
+            expect((await rollup.getDepositQueue()).prunedCount).toBe(2n);
+            accepted(await submit(roots(sha256Int(4n), 7)));
+            expect((await rollup.getDepositQueue()).prunedCount).toBe(2n);
+            expect((await stored()).items.keys()).toEqual([3n, 4n, 5n, 6n, 7n]);
+
+            // Обнулись счётчик — следующая постановка «убирала» бы уже убранные 1 и 2, а записи
+            // 3 и 4 остались бы в словаре навсегда.
+            await enqueue(1, hashes); // 8: убирает 3 и 4
+            expect((await stored()).items.keys()).toEqual([5n, 6n, 7n, 8n]);
+            expect((await rollup.getDepositQueue()).prunedCount).toBe(4n);
+            // И явная уборка добирает остальное ровно до отметки processed.
+            accepted(await rollup.sendPruneDepositReceipts(user.getSender(), { count: 100, value: toNano('0.05') }));
+            expect((await stored()).items.keys()).toEqual([8n]);
+            expect((await rollup.getDepositQueue()).prunedCount).toBe(7n);
+        });
+
+        it('предел записей считается от счётчика убранных, а не от отметки обработанного', async () => {
+            // Предел — про память контракта: сколько записей лежит в словаре, обработанных и нет.
+            // Состояние подложено и сообщениями недостижимо (от генезиса неубранных записей больше
+            // предела не накопить: постановка растит словарь, только когда мусора в нём нет, а
+            // тогда оба счёта совпадают). Тест закрепляет саму формулу: необработанных всего три,
+            // но неубранных — на пять больше предела, и после попутной уборки двух записей места
+            // всё ещё нет.
+            const limit = BigInt(constants.maxTrackedItems);
+            const head = limit + 5n;
+            rollup = await plant({
+                queue: {
+                    head: { count: head, hash: 1n },
+                    processed: { count: head - 3n, hash: 2n },
+                    prunedCount: 0n,
+                },
+            });
+            const refused = await deposit();
+            rejected(refused, RollupErrors.queueStorageFull);
+            expect((await stored()).head.count).toBe(head);
+            expect((await stored()).prunedCount).toBe(0n);
+
+            // Уборка освобождает место: неубранных стало на одну меньше предела.
+            accepted(await rollup.sendPruneDepositReceipts(user.getSender(), { count: 6, value: toNano('0.05') }));
+            expect((await stored()).prunedCount).toBe(6n);
+            accepted(await deposit());
+            expect((await stored()).head.count).toBe(head + 1n);
+        });
+
+        it('батч с отметкой в середине очереди отказывает кодом 7334, если записи в словаре нет', async () => {
+            // Запись элемента N + 1 при N < head обязана существовать: по ней берётся хеш очереди
+            // в точке N. Сообщениями её не удалить (необработанные записи убирает только возврат
+            // депозита после заморозки), поэтому состояние подложено: пять элементов, записи
+            // третьего нет.
+            const items = Rollup.queueItemsDictionary();
+            for (const index of [1n, 2n, 4n, 5n]) {
+                items.set(index, { hashBefore: sha256Int(100n + index), queuedAt: START, receipt: null });
+            }
+            rollup = await plant({ queue: { head: { count: 5n, hash: sha256Int(200n) } }, queueItems: items });
+            expect(RollupErrors.queueEntryMissing).toBe(7334);
+            rejected(await submit(roots(sha256Int(2n), 2)), RollupErrors.queueEntryMissing);
+            expect((await stored()).processed.count).toBe(0n);
+            // Соседние отметки, записи которых на месте, принимаются: отказ — именно из-за дыры.
+            const snapshot = blockchain.snapshot();
+            accepted(await submit(roots(sha256Int(2n), 1)));
+            expect((await stored()).processed).toEqual({ count: 1n, hash: sha256Int(102n) });
+            await blockchain.loadFrom(snapshot);
+            accepted(await submit(roots(sha256Int(2n), 3)));
+            expect((await stored()).processed).toEqual({ count: 3n, hash: sha256Int(104n) });
+            // На голове очереди запись не нужна вовсе.
+            await blockchain.loadFrom(snapshot);
+            accepted(await submit(roots(sha256Int(2n), 5)));
+            expect((await stored()).processed).toEqual({ count: 5n, hash: sha256Int(200n) });
+        });
+    });
+
     describe('газ на словаре, заполненном до предела', () => {
-        /** Словарь из `count` записей и очередь, в которой почти всё обработано, но ничего не убрано. */
-        const fullQueue = async (unprocessed: bigint) => {
+        /**
+         * Словарь из maxTrackedItems − 1 записей с номерами подряд и очередь, в которой почти всё
+         * обработано, но ничего не убрано. `pruned` — сколько записей «уже убрано», то есть с
+         * какого номера начинается словарь.
+         *
+         * Цена вставки зависит от того, где в словаре ляжет новая запись. С номерами от единицы
+         * новая запись (номер 2^13) ложится у самого корня — это самый дешёвый случай. Самый
+         * дорогой — номер, у которого все младшие биты единицы: запись становится последним
+         * листом заполненного поддерева, и путь к ней проходит все развилки. Поэтому по умолчанию
+         * словарь начинается так, чтобы следующий номер был 2^14 − 1.
+         */
+        const fullQueue = async (unprocessed: bigint, pruned = deepestBase()) => {
             const count = BigInt(constants.maxTrackedItems) - 1n;
             const items = Rollup.queueItemsDictionary();
-            for (let index = 1n; index <= count; index++) {
+            for (let index = pruned + 1n; index <= pruned + count; index++) {
                 items.set(index, {
                     hashBefore: sha256Int(index),
                     queuedAt: START,
                     receipt: index % 3n === 0n ? null : { depositor: user.address, amount: toNano('1') },
                 });
             }
+            const head = pruned + count;
             return plant({
                 queue: {
-                    head: { count, hash: sha256Int(count + 1n) },
-                    processed: { count: count - unprocessed, hash: sha256Int(count - unprocessed + 1n) },
+                    head: { count: head, hash: sha256Int(head + 1n) },
+                    processed: { count: head - unprocessed, hash: sha256Int(head - unprocessed + 1n) },
+                    prunedCount: pruned,
                 },
                 queueItems: items,
             });
         };
-
-        it('депозит и принудительная транзакция в 64 ячейки укладываются в запасы газа шагов', async () => {
-            rollup = await fullQueue(3n);
+        /** Сколько записей «убрано», чтобы следующая постановка получила номер из одних единиц. */
+        const deepestBase = () => {
+            const tracked = BigInt(constants.maxTrackedItems);
+            // Наименьшее число вида 2^k − 1, не меньшее 2 · maxTrackedItems − 1: словарь занимает
+            // всё поддерево под старшим битом, кроме последнего листа.
+            let next = 1n;
+            while (next < 2n * tracked - 1n) next = next * 2n + 1n;
+            return next - tracked;
+        };
+        const longestTransaction = () => {
+            // Самая длинная допустимая транзакция: maxForcedTxBytes байт в maxForcedTxCells ячейках.
+            const bytes = Buffer.alloc(MAX_FORCED_TX_BYTES);
+            for (let index = 0; index < bytes.length; index++) bytes[index] = (index * 131 + 7) & 255;
+            expect(bytes.length).toBe(constants.maxForcedTxBytes);
+            expect(forcedTransactionCell(bytes).depth() + 1).toBe(constants.maxForcedTxCells);
+            return bytes;
+        };
+        /**
+         * Депозит и принудительная транзакция наибольшей длины на полном словаре; возвращает их
+         * газ. Каждый шаг — на своём свежем словаре: иначе глубокая вставка досталась бы только
+         * первому из них.
+         */
+        const queueSteps = async (pruned: bigint) => {
+            rollup = await fullQueue(3n, pruned);
             const before = await stored();
             expect(before.items.size).toBe(constants.maxTrackedItems - 1);
+            expect(before.prunedCount).toBe(pruned);
+            const firstNewIndex = before.head.count + 1n;
+            /** Убраны две записи, добавлена одна — с ожидаемым номером и хешем очереди. */
+            const pushed = async (headHash: bigint) => {
+                const after = await stored();
+                expect(after.items.size).toBe(constants.maxTrackedItems - 2);
+                expect(after.prunedCount).toBe(pruned + 2n);
+                expect(after.items.keys().at(-1)).toBe(firstNewIndex);
+                expect(after.head).toEqual({ count: firstNewIndex, hash: headHash });
+            };
 
             const deposited = await deposit();
             accepted(deposited);
-            gas.depositFullQueue = Number(computePhaseOf(deposited.transactions, rollup.address).gasUsed);
-            // Убраны две записи, добавлена одна.
-            expect((await stored()).items.size).toBe(constants.maxTrackedItems - 2);
-            expect((await stored()).prunedCount).toBe(2n);
-            expect(gas.depositFullQueue).toBeLessThanOrEqual(budgets.depositStepGas);
+            const depositGas = Number(computePhaseOf(deposited.transactions, rollup.address).gasUsed);
+            await pushed(depositHash(before.head.hash, L2_RECIPIENT, toNano('1') - BASE_DEPOSIT_FEE));
 
-            // Самая длинная допустимая транзакция: maxForcedTxCells ячеек по 127 байт.
-            const bytes = Buffer.alloc(MAX_FORCED_TX_BYTES);
-            for (let index = 0; index < bytes.length; index++) bytes[index] = (index * 131 + 7) & 255;
-            const cell = forcedTransactionCell(bytes);
+            rollup = await fullQueue(3n, pruned);
+            const bytes = longestTransaction();
             const forced = await rollup.sendForceTransaction(user.getSender(), {
-                l2Transaction: cell,
+                l2Transaction: forcedTransactionCell(bytes),
                 value: FORCE_TRANSACTION_VALUE,
             });
             accepted(forced);
-            gas.forceTransactionFullQueue = Number(computePhaseOf(forced.transactions, rollup.address).gasUsed);
+            const forceGas = Number(computePhaseOf(forced.transactions, rollup.address).gasUsed);
+            await pushed(forcedTransactionHash(before.head.hash, bytes));
+            return { depositGas, forceGas, firstNewIndex };
+        };
+
+        it('депозит и принудительная транзакция наибольшей длины укладываются в запасы газа — на самой глубокой вставке', async () => {
+            const { depositGas, forceGas, firstNewIndex } = await queueSteps(deepestBase());
+            // Номер новой записи — из одних единиц: последний лист заполненного поддерева.
+            expect(firstNewIndex & (firstNewIndex + 1n)).toBe(0n);
+            expect(firstNewIndex).toBeGreaterThan(BigInt(constants.maxTrackedItems));
+            gas.depositFullQueue = depositGas;
+            gas.forceTransactionFullQueue = forceGas;
+            expect(gas.depositFullQueue).toBeLessThanOrEqual(budgets.depositStepGas);
             expect(gas.forceTransactionFullQueue).toBeLessThanOrEqual(budgets.forceTransactionStepGas);
-            const after = await stored();
-            expect(after.head.hash).toBe(
-                forcedTransactionHash(depositHash(before.head.hash, L2_RECIPIENT, toNano('1') - BASE_DEPOSIT_FEE), bytes),
-            );
-            expect(after.prunedCount).toBe(4n);
+        });
+
+        it('вставка у корня словаря дешевле глубокой: прежний замер шёл на ней', async () => {
+            const shallow = await queueSteps(0n);
+            gas.depositShallowInsert = shallow.depositGas;
+            gas.forceTransactionShallowInsert = shallow.forceGas;
+            const deep = await queueSteps(deepestBase());
+            expect(deep.depositGas).toBeGreaterThan(shallow.depositGas);
+            expect(deep.forceGas).toBeGreaterThan(shallow.forceGas);
         });
 
         it('поиск записи в полном словаре: батч с отметкой в середине против батча на голове', async () => {
@@ -425,10 +563,11 @@ describe('Rollup: очередь L1 с отметкой батча', () => {
 
         it('уборка пятидесяти записей одним сообщением', async () => {
             rollup = await fullQueue(3n);
+            const before = await stored();
             const pruned = await rollup.sendPruneDepositReceipts(user.getSender(), { count: 50, value: toNano('0.1') });
             accepted(pruned);
             gas.pruneFiftyEntries = Number(computePhaseOf(pruned.transactions, rollup.address).gasUsed);
-            expect((await stored()).prunedCount).toBe(50n);
+            expect((await stored()).prunedCount).toBe(before.prunedCount + 50n);
             expect((await stored()).items.size).toBe(constants.maxTrackedItems - 1 - 50);
         });
 

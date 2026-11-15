@@ -52,7 +52,7 @@ export const ESCAPE_SERVICE_VALUE = toNano('0.002');
 export const LATE_DEPOSIT_VALUE = toNano('0.06');
 /**
  * Принудительная транзакция L2: контракт берёт плату 0,05 TON; сверху — газ постановки в
- * очередь: до 83 тыс. gas на «змейке» в 64 ячейки (bench/rollup-queue-gas.json), около
- * 0,0055 TON при цене газа 66,67 нанотон.
+ * очередь: до 36,3 тыс. gas на транзакции наибольшей длины при полном словаре очереди
+ * (bench/rollup-queue-gas.json), около 0,0024 TON при цене газа 66,67 нанотон.
  */
-export const FORCE_TRANSACTION_VALUE = toNano('0.056');
+export const FORCE_TRANSACTION_VALUE = toNano('0.055');

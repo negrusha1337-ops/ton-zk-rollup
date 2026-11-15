@@ -215,9 +215,13 @@ export const batchDataHash = (chunks: Cell[]) => chunks.reduce(dataHashStep, 0n)
 /** Метка принудительной транзакции в хеше очереди — как FORCED_TRANSACTION_MARKER в контракте. */
 export const FORCED_TRANSACTION_MARKER = 1n << 255n;
 /** Предел длины «змейки» в ячейках — как MAX_FORCED_TX_CELLS в контракте (get-метод queueLimits). */
-export const MAX_FORCED_TX_CELLS = 64;
-/** Наибольшая транзакция, которая помещается в «змейку»: 64 ячейки по 127 байт. */
-export const MAX_FORCED_TX_BYTES = MAX_FORCED_TX_CELLS * DATA_CELL_BYTES;
+export const MAX_FORCED_TX_CELLS = 3;
+/**
+ * Предел длины принудительной транзакции в байтах — как MAX_FORCED_TX_BYTES в контракте
+ * (get-метод queueLimits) и FORCED_TX_MAX_BYTES в программе zkVM. Три ячейки вмещают больше
+ * (381 байт): предел в байтах — отдельный и точный.
+ */
+export const MAX_FORCED_TX_BYTES = 256;
 
 /**
  * Байтовая строка «змейкой» ячеек: куски заданной длины по порядку, каждый следующий — по
@@ -249,9 +253,13 @@ export function byteSnake(data: Buffer, pieces?: number[]): Cell {
 
 /**
  * Принудительная транзакция как «змейка»: байты подписанной транзакции EVM (EIP-2718), не
- * больше MAX_FORCED_TX_CELLS ячеек. Нарезка на хеш в очереди не влияет.
+ * больше MAX_FORCED_TX_BYTES байт и MAX_FORCED_TX_CELLS ячеек. Нарезка на хеш в очереди не
+ * влияет. То, что контракт отвергнет, не собирает (для тестов отказа — byteSnake).
  */
 export function forcedTransactionCell(transaction: Buffer, pieces?: number[]): Cell {
+    if (transaction.length > MAX_FORCED_TX_BYTES) {
+        throw new Error(`forcedTransactionCell: ${transaction.length} байт больше предела ${MAX_FORCED_TX_BYTES}`);
+    }
     const cellCount = pieces?.length ?? Math.max(1, Math.ceil(transaction.length / DATA_CELL_BYTES));
     if (cellCount > MAX_FORCED_TX_CELLS) {
         throw new Error(`forcedTransactionCell: ${cellCount} ячеек больше предела ${MAX_FORCED_TX_CELLS}`);
