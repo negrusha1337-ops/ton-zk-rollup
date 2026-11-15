@@ -6,6 +6,7 @@ import {
     QueuedItem,
     QueueItem,
     QueueMark,
+    QueueLagError,
     QueueMismatchError,
     QueueSource,
     QueueWindow,
@@ -97,6 +98,8 @@ export class ContractQueueSource implements QueueSource {
         private readonly limits: SnakeLimits,
         /** Читать и уже обработанные контрактом элементы (только для осмотра из командной строки). */
         private readonly allowBelowProcessed = false,
+        /** Повторы, если сообщений меньше, чем элементов у контракта (отставание индексатора). */
+        private readonly lag: { retries: number; pauseMs: number } = { retries: 0, pauseMs: 0 },
     ) {}
 
     async read(from: QueueMark, cursor: MessageCursor | null, max: number): Promise<QueueWindow> {
@@ -120,7 +123,16 @@ export class ContractQueueSource implements QueueSource {
         const hashes = await chainHashes(this.view, from, upTo, head);
         // Без курсора счёт идёт с начала истории контракта: первые from.count сообщений очереди
         // пропускаются. Номер от этого не становится «на веру»: следующие сверяются по хешу.
-        const messages = await this.queueMessages(cursor, cursor ? 0 : from.count, upTo - from.count);
+        const wanted = upTo - from.count;
+        let messages = await this.queueMessages(cursor, cursor ? 0 : from.count, wanted);
+        for (let retry = 0; messages.length < wanted && retry < this.lag.retries; retry++) {
+            await new Promise((resolve) => setTimeout(resolve, this.lag.pauseMs));
+            messages = await this.queueMessages(cursor, cursor ? 0 : from.count, wanted);
+        }
+        if (messages.length < wanted)
+            throw new QueueLagError(
+                `у контракта элементы очереди до №${upTo}, а сообщений после отметки ${from.count} найдено ${messages.length} из ${wanted}: источник сообщений отстаёт или потерял сообщение`,
+            );
         const items = await matchQueueItems(
             from,
             hashes,

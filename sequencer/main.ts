@@ -1,6 +1,6 @@
 import { Address } from '@ton/core';
 import { rateLimiter, TestnetQueueSource } from './queue/toncenter';
-import { QueueMismatchError } from './queue/types';
+import { QueueLagError, QueueMismatchError } from './queue/types';
 
 // Сборщик блоков из командной строки (ts-node). В этом шаге — только чтение очереди L1 контракта
 // в testnet: отправщика батчей и прувера для сети ещё нет, полный цикл идёт в Sandbox
@@ -10,7 +10,8 @@ import { QueueMismatchError } from './queue/types';
 //   npx ts-node sequencer/main.ts queue <адрес контракта> [--from=<номер>] [--max=<число>]
 //
 // Печатает отметки контракта и элементы очереди после отметки (по умолчанию — после
-// обработанного контрактом), каждый сверенный с хешем цепочки очереди. Расхождение — код 2.
+// обработанного контрактом), каждый сверенный с хешем цепочки очереди. Расхождение — код 2,
+// отставание индексатора (сообщений ещё нет) — код 3.
 
 const usage = 'npx ts-node sequencer/main.ts queue <адрес контракта> [--from=<номер>] [--max=<число>]';
 
@@ -66,5 +67,5 @@ async function main() {
 
 main().catch((error) => {
     console.error(error instanceof Error ? error.message : error);
-    process.exit(error instanceof QueueMismatchError ? 2 : 1);
+    process.exit(error instanceof QueueMismatchError ? 2 : error instanceof QueueLagError ? 3 : 1);
 });

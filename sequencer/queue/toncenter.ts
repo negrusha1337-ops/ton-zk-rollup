@@ -68,12 +68,17 @@ export class ToncenterFeed implements MessageFeed {
         private readonly base = TESTNET_V3,
     ) {}
 
+    /**
+     * Сообщения строго после курсора. Курсор сверяется по хешу, как в SandboxFeed: запрос — с
+     * его lt включительно, и первой обязана прийти ровно транзакция курсора (lt на счёте
+     * уникален, но курсор из чужого состояния либо от другой истории иначе прошёл бы молча).
+     */
     async after(after: { lt: bigint; hash: string } | null, limit: number): Promise<L1Message[]> {
         const query = new URLSearchParams({
             account: this.address.toRawString(),
             sort: 'asc',
-            limit: String(limit),
-            ...(after ? { start_lt: (after.lt + 1n).toString() } : {}),
+            limit: String(after ? limit + 1 : limit),
+            ...(after ? { start_lt: after.lt.toString() } : {}),
         });
         const page = await retrying(async () => {
             await this.limit();
@@ -84,7 +89,12 @@ export class ToncenterFeed implements MessageFeed {
             if (!response.ok) throw new Error(`toncenter v3 /transactions ответил ${response.status}`);
             return ((await response.json()) as { transactions?: V3Transaction[] }).transactions ?? [];
         });
-        return v3Messages(page);
+        const messages = v3Messages(page);
+        if (!after) return messages;
+        const [first, ...rest] = messages;
+        if (!first || first.lt !== after.lt || first.hash !== after.hash)
+            throw new Error(`в истории контракта у toncenter нет транзакции курсора lt ${after.lt}, ${after.hash}`);
+        return rest;
     }
 }
 
@@ -124,7 +134,12 @@ export class TestnetQueueSource extends ContractQueueSource {
         const limit = options.limit ?? rateLimiter(options.apiKey ? 9 : 1);
         const client = options.client ?? new TonClient({ endpoint: TESTNET_V2, apiKey: options.apiKey });
         const view = testnetRollupView(client, address, limit);
-        super(view, new ToncenterFeed(address, limit, options.apiKey), limits, options.allowBelowProcessed ?? false);
+        // Индексатор отстаёт от блокчейна на секунды: элемент, который контракт уже знает, а
+        // индексатор ещё нет, — повтор с ожиданием, а не расхождение.
+        super(view, new ToncenterFeed(address, limit, options.apiKey), limits, options.allowBelowProcessed ?? false, {
+            retries: 5,
+            pauseMs: 3000,
+        });
         this.contract = view;
     }
 }
