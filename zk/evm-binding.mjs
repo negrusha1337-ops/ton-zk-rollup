@@ -23,8 +23,6 @@ const SOURCE_ROOTS = [
     'zkvm-evm/lib/src',
     'zkvm-evm/program',
     'zkvm-evm/vendor/rsp-mpt',
-    'zkvm/Cargo.toml',
-    'zkvm/lib',
 ];
 const SOURCE_EXTENSIONS = ['.rs', '.toml', '.lock'];
 

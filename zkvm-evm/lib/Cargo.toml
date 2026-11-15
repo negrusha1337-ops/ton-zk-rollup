@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rollup-stf.workspace = true
 serde.workspace = true
+sha2.workspace = true
 itertools.workspace = true
 
 rsp-client-executor.workspace = true
@@ -31,3 +31,9 @@ alloy-rlp.workspace = true
 [dev-dependencies]
 bincode.workspace = true
 serde_json.workspace = true
+# Игрушечный реестр: только сторож совпадения перенесённых типов и хешей (src/tests.rs).
+rollup-stf.workspace = true
+# Подписи тестовых транзакций.
+k256.workspace = true
+# Независимый построитель дерева и доказательств для тестов дополнения свидетеля (src/reveal.rs).
+alloy-trie = { version = "0.9.4", default-features = false }

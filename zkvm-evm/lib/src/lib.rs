@@ -1,68 +1,104 @@
-//! Батч rollup'а на EVM: один блок EVM, исполненный Reth, и те же восемь слов публичных
-//! значений, которые проверяет контракт на TON (`zkvm/lib`, `contracts/rollup/`).
+//! Батч rollup'а на EVM, протокол версии 2 (`PROTOCOL-V2.md`): один блок EVM, исполненный Reth,
+//! и одиннадцать слов публичных значений, которые проверяет контракт на TON
+//! (`contracts/rollup/logic.tolk`, `batchDigest`).
 //!
-//! Что означают слова для EVM:
+//! Слова:
 //!
-//!   chainId             — идентификатор цепочки; им подписана каждая транзакция блока
-//!   prevStateRoot       — ХЕШ ЗАГОЛОВКА РОДИТЕЛЯ (не корень состояния)
-//!   newStateRoot        — ХЕШ ЗАГОЛОВКА БЛОКА
-//!   batchHash           — накопительный хеш порций данных; порции — RLP блока целиком
-//!   prevWithdrawalsRoot — корень дерева выводов до блока
-//!   withdrawalsRoot     — корень дерева выводов после блока
-//!   prevDepositHash     — накопительный хеш очереди L1 до блока
-//!   newDepositHash      — он же после блока
+//!   0  chainId              — идентификатор цепочки; им подписана каждая транзакция блока
+//!   1  prevStateRoot        — ХЕШ ЗАГОЛОВКА РОДИТЕЛЯ (не корень состояния)
+//!   2  newStateRoot         — ХЕШ ЗАГОЛОВКА БЛОКА
+//!   3  batchHash            — накопительный хеш порций данных; порции — RLP блока целиком
+//!   4  prevWithdrawalsRoot  — корень дерева выводов до блока
+//!   5  withdrawalsRoot      — корень дерева выводов после блока
+//!   6  prevDepositHash      — накопительный хеш очереди L1 до отрезка, обработанного блоком
+//!   7  newDepositHash       — он же после отрезка
+//!   8  prevWithdrawalsCount — число листьев дерева выводов до блока
+//!   9  withdrawalsCount     — оно же после блока
+//!   10 blockTimestamp       — время блока; контракт сверяет его со временем L1
 //!
 //! Почему хеш блока, а не корень состояния. Блок проверяется относительно заголовка родителя
 //! (номер, время, базовая комиссия, лимит газа), а этот заголовок даёт доказывающий. Если бы
 //! контракт хранил только корень состояния, секвенсор мог бы подставить родителя с любыми
 //! номером и временем при том же корне. Хеш заголовка обязывает ко всему заголовку сразу, а
-//! через него — и к корню состояния.
+//! через него — и к корню состояния. Первый родитель — генезис: его хеш — константа протокола
+//! в контракте (`GENESIS_HASH`), вместе с ним закреплён и счёт моста.
 //!
-//! Правила цепочки (набор хардфорков) зашиты в программу — `chain_config`. В RSP их задаёт вход
-//! доказывающего и в публичные значения они не попадают; здесь поля `genesis`,
-//! `custom_beneficiary` и `opcode_tracking` входа блока не читаются вовсе.
+//! Правила цепочки (набор хардфорков по Cancun) зашиты в программу — `chain_config`. В RSP их
+//! задаёт вход доказывающего; здесь поля `genesis`, `custom_beneficiary` и `opcode_tracking`
+//! входа блока не читаются вовсе. Поля заголовка, которые правила Ethereum оставляют сборщику
+//! блока, закреплены (`check_header_policy`): лимит газа, `mix_hash`, `extra_data`, корень
+//! beacon-блока. Свободен только получатель чаевых — это доход секвенсора.
 //!
-//! Депозиты L1→L2 — список зачислений блока (EIP-4895, «withdrawals» в терминах Ethereum): EVM
-//! начисляет их без транзакций. Список обязан совпасть с очередью L1 элемент в элемент.
-//! Выводы L2→L1 — успешные переводы на `BRIDGE_ADDRESS` с получателем TON в данных.
+//! Очередь L1→L2. Блок обрабатывает отрезок очереди — не больше `MAX_BATCH_QUEUE_ITEMS`
+//! элементов, по порядку. Докуда обработано, программа не знает и не коммитит: контракт сам
+//! берёт хеш очереди в заявленной точке, и батч годен, только если он равен слову 7.
+//!   * Депозиты — список зачислений блока (EIP-4895, «withdrawals» в терминах Ethereum): EVM
+//!     начисляет их без транзакций, в конце блока. Список обязан совпасть с депозитами отрезка
+//!     элемент в элемент.
+//!   * Принудительные транзакции (`forced.rs`, `execute.rs`) — только вывод через мост с малым
+//!     пределом газа. Исполняются первыми, в порядке очереди; действительная обязана стоять в
+//!     блоке на своём месте, недействительная пропускается. Зачисления блока применяются после
+//!     транзакций: принудительная транзакция видит депозиты только прежних батчей.
 //!
-//! Чего здесь НЕТ (спайк):
-//!   * принудительных транзакций L2: батч с таким элементом очереди недоказуем
-//!     (`ForcedTransactionsNotSupported`), то есть защиты от цензуры транзакций пока нет;
-//!   * выводов из контрактов (только прямой перевод на адрес моста);
-//!   * проверки, что по адресу моста нет кода и что в генезисе нет необеспеченных балансов:
-//!     и то и другое задаётся генезисом, сверка генезиса — на пользователе;
-//!   * привязки времени блока ко времени L1: время обязано только расти, и блок со временем
-//!     у верхней границы остановил бы цепочку;
-//!   * аварийного выхода для состояния EVM.
+//! Выводы L2→L1 — логи моста-предустановки (`bridge.rs`), в порядке блока; дерево выводов —
+//! с дозаписью, во входе его фронтир и счётчик (`withdrawals.rs`).
+//!
+//! Чего здесь НЕТ:
+//!   * принудительного вызова произвольного контракта и принудительного перевода — только
+//!     вывод через мост: это гарантия «свои монеты с обычного счёта можно вывести в обход
+//!     секвенсора», а не «любую транзакцию можно провести»;
+//!   * программы аварийного выхода: баланс обычного счёта после заморозки выходит без пруфа —
+//!     контракт сам проверяет доказательство счёта против заголовка блока (`ForceExitEvm`);
+//!     монеты на контрактах L2 и токены при заморозке теряются;
+//!   * нескольких блоков в батче;
+//!   * правил после Cancun: пересборка байткода (`witness.rs`) и список типов транзакций
+//!     рассчитаны на Cancun и при переходе на Prague меняются вместе.
 use std::{fmt, sync::Arc};
 
-use alloy_consensus::{Block, Transaction, TxType};
+use alloy_consensus::{Block, Header, Transaction, TxType};
 use alloy_eips::eip4895::Withdrawal;
 use alloy_genesis::ChainConfig;
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use reth_chainspec::{ChainSpec, NamedChain};
 use reth_ethereum_primitives::TransactionSigned;
-use rollup_stf::{batch_data_hash, deposit_hash, withdrawals_root, MAX_DATA_CHUNK_BYTES, MAX_WITHDRAWALS};
 use rsp_client_executor::io::EthClientExecutorInput;
 use rsp_primitives::genesis::Genesis;
 use serde::{Deserialize, Serialize};
 
+pub mod bridge;
 mod execute;
+pub mod forced;
+pub mod genesis;
+pub mod protocol;
+pub mod reveal;
 #[cfg(test)]
 mod tests;
+pub mod withdrawals;
 pub mod witness;
 
-pub use execute::{execute_block, ExecutedBlock};
-pub use rollup_stf::{Deposit, Hash, PublicValues, QueueItem, WithdrawalLeaf};
+pub use bridge::{BRIDGE_ADDRESS, BRIDGE_CODE, BRIDGE_CODE_HASH, WEI_PER_NANOTON, WITHDRAWAL_TOPIC};
+pub use execute::ExecutedBlock;
+pub use forced::{ForcedOutcome, InvalidReason, SkipReason};
+pub use genesis::{genesis_header, GENESIS_HASH, GENESIS_STATE_ROOT};
+pub use protocol::{
+    batch_data_hash, deposit_hash, forced_transaction_hash, queue_item_hash, Deposit, Hash, PublicValues, QueueItem,
+    WithdrawalLeaf, MAX_DATA_CHUNK_BYTES,
+};
+pub use withdrawals::{Frontier, FrontierError, WithdrawalTree, MAX_WITHDRAWALS, WITHDRAWAL_TREE_DEPTH};
 
-/// Адрес моста L2→L1: 20 байт строки «ton-zk-rollup-bridge». Ключа к нему нет ни у кого, поэтому
-/// переведённое на него остаётся там навсегда — это и есть сжигание при выводе.
-pub const BRIDGE_ADDRESS: Address = Address::new(*b"ton-zk-rollup-bridge");
+/// Лимит газа блока: закреплён, равен лимиту генезиса. Со свободным лимитом секвенсор мог бы
+/// сползанием лимита сделать принудительные транзакции «не помещающимися».
+pub const GAS_LIMIT: u64 = 30_000_000;
 
-/// 1 нанотон на L1 = 1 gwei на L2: у монеты L2 18 знаков, как у ETH, и 1 TON = 1 целая монета.
-/// Зачисления EIP-4895 считаются в gwei, так что депозит ложится в них без пересчёта.
-pub const WEI_PER_NANOTON: u64 = 1_000_000_000;
+/// Предел газа принудительной транзакции: вызов моста стоит около 23,3 тыс. gas (21 000 +
+/// данные + код моста). С таким пределом `MAX_BATCH_QUEUE_ITEMS` принудительных транзакций
+/// заведомо помещаются в блок, и ошибка «не помещается по газу блока» недостижима.
+pub const FORCED_TX_GAS_CAP: u64 = 40_000;
+
+/// Сколько элементов очереди L1 блок может обработать — как MAX_BATCH_QUEUE_ITEMS в
+/// contracts/rollup/logic.tolk. Секвенсора нельзя заставить взять больше, и сам он больше
+/// взять не может: цена пруфа батча ограничена сверху.
+pub const MAX_BATCH_QUEUE_ITEMS: usize = 32;
 
 /// Всё, что нужно для одного батча. Для zkVM это приватный вход.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -73,13 +109,15 @@ pub struct EvmBatchInput {
     pub block: EthClientExecutorInput,
     /// Накопительный хеш очереди L1 на момент предыдущего батча.
     pub prev_deposit_hash: Hash,
-    /// Элементы очереди L1, которые блок обязан обработать, в порядке очереди.
+    /// Отрезок очереди L1, который обрабатывает блок, в порядке очереди.
     pub queue_items: Vec<QueueItem>,
     /// Порции данных батча в том виде и порядке, в каком они опубликованы в TON. Их склейка
     /// обязана быть RLP блока.
     pub data_chunks: Vec<Vec<u8>>,
-    /// Все выводы предыдущих батчей, по порядку номеров листьев.
-    pub prior_withdrawals: Vec<WithdrawalLeaf>,
+    /// Фронтир дерева выводов до блока (`withdrawals.rs`).
+    pub withdrawals_frontier: Frontier,
+    /// Число листьев дерева выводов до блока.
+    pub withdrawals_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,22 +130,37 @@ pub enum EvmBatchError {
     DataChunkTooLarge,
     /// Склейка порций данных — не RLP этого блока.
     DataMismatch,
-    /// В очереди L1 принудительная транзакция: в спайке не поддержано.
-    ForcedTransactionsNotSupported,
-    /// Число зачислений в блоке не равно числу элементов очереди.
+    /// В отрезке очереди больше MAX_BATCH_QUEUE_ITEMS элементов.
+    TooManyQueueItems(usize),
+    /// Число зачислений в блоке не равно числу депозитов отрезка очереди.
     DepositCountMismatch { block: usize, queue: usize },
-    /// Зачисление с этим номером не совпало с элементом очереди.
+    /// Зачисление с этим номером не совпало с депозитом очереди.
     DepositMismatch(usize),
-    /// Сумма депозита не помещается в зачисление (64 бита gwei).
+    /// Сумма депозита не помещается в зачисление (64 бита gwei). Контракт таких не принимает.
     DepositTooLarge(usize),
+    /// Принудительная транзакция (номер среди принудительных отрезка) действительна, а в блоке
+    /// на её месте стоит другая либо ничего: секвенсор её цензурирует.
+    ForcedTransactionOmitted(usize),
+    /// Принудительная транзакция не помещается по газу блока: отрезок надо было закончить раньше.
+    ForcedTransactionDoesNotFit(usize),
+    /// Отказ revm по принудительной транзакции вне закрытого перечня причин пропуска.
+    ForcedTransactionRefusal(usize, String),
+    /// Поле заголовка, закреплённое правилами rollup'а, имеет другое значение.
+    HeaderPolicy(&'static str),
     /// Транзакция без `chainId` в подписи: её можно было бы повторить в другой цепочке.
     UnprotectedTransaction(usize),
     /// В блоке blob-транзакция либо ненулевой расход или избыток blob-газа: блобов у rollup'а нет.
     BlobsNotSupported,
     /// Тип транзакции вне списка допустимых (обычная, EIP-2930, EIP-1559).
     UnsupportedTransactionType(usize),
+    /// Фронтир дерева выводов во входе негоден.
+    WithdrawalFrontier(FrontierError),
     /// В дереве выводов кончились листья.
     TooManyWithdrawals,
+    /// В блоке есть лог моста, а код счёта моста в состоянии родителя — не код моста.
+    BridgeCodeMismatch,
+    /// Лог моста не той формы, которую пишет его код.
+    MalformedBridgeLog,
     /// Во входе нет заголовка родителя.
     MissingParentHeader,
     /// Свидетель состояния или цепочка заголовков не сошлись.
@@ -125,8 +178,6 @@ pub enum EvmBatchError {
     Execution(String),
     /// Корень состояния после исполнения не равен корню в заголовке.
     MismatchedStateRoot { computed: Hash, header: Hash },
-    /// Квитанций меньше, чем транзакций.
-    ReceiptCountMismatch,
 }
 
 impl fmt::Display for EvmBatchError {
@@ -201,59 +252,44 @@ fn check_block_data(encoded: &[u8], chunks: &[Vec<u8>]) -> Result<(), EvmBatchEr
     Ok(())
 }
 
-/// Сверяет зачисления блока с очередью L1 и возвращает накопительный хеш очереди после них.
+/// Сверяет отрезок очереди L1 с блоком и возвращает накопительный хеш очереди после отрезка.
 ///
-/// Зачисление i обязано быть ровно депозитом i из очереди: тот же получатель, та же сумма
-/// (нанотоны = gwei), номер зачисления — его место в блоке, номер валидатора — ноль. Лишнее
-/// зачисление — это монеты из воздуха, пропущенное — украденный депозит; ни то ни другое не
-/// даёт хеш очереди, который ждёт контракт, но проверка здесь явная и не полагается на это.
-pub fn check_deposits(
+/// Депозиты отрезка обязаны совпасть с зачислениями блока: зачисление i — ровно i-й депозит
+/// отрезка (тот же получатель, та же сумма, нанотоны = gwei), номер зачисления — его место в
+/// блоке, номер валидатора — ноль. Лишнее зачисление — это монеты из воздуха, пропущенное —
+/// украденный депозит; ни то ни другое не даёт хеш очереди, который ждёт контракт, но проверка
+/// здесь явная и не полагается на это. Принудительные транзакции входят в хеш своими байтами;
+/// что с ними стало в блоке, решает исполнение (`execute.rs`).
+pub fn check_queue(
     credits: &[Withdrawal],
     queue_items: &[QueueItem],
     prev_deposit_hash: &Hash,
 ) -> Result<Hash, EvmBatchError> {
-    if credits.len() != queue_items.len() {
-        return Err(EvmBatchError::DepositCountMismatch {
-            block: credits.len(),
-            queue: queue_items.len(),
-        });
+    if queue_items.len() > MAX_BATCH_QUEUE_ITEMS {
+        return Err(EvmBatchError::TooManyQueueItems(queue_items.len()));
+    }
+    let deposits = queue_items.iter().filter(|item| matches!(item, QueueItem::Deposit(_))).count();
+    if credits.len() != deposits {
+        return Err(EvmBatchError::DepositCountMismatch { block: credits.len(), queue: deposits });
     }
     let mut hash = *prev_deposit_hash;
-    for (index, (credit, item)) in credits.iter().zip(queue_items).enumerate() {
-        let QueueItem::Deposit(deposit) = item else {
-            return Err(EvmBatchError::ForcedTransactionsNotSupported);
-        };
-        let amount =
-            u64::try_from(deposit.amount).map_err(|_| EvmBatchError::DepositTooLarge(index))?;
-        if credit.index != index as u64 ||
-            credit.validator_index != 0 ||
-            credit.address != Address::from(deposit.l2_recipient) ||
-            credit.amount != amount
-        {
-            return Err(EvmBatchError::DepositMismatch(index));
+    let mut index = 0usize;
+    for item in queue_items {
+        if let QueueItem::Deposit(deposit) = item {
+            let credit = &credits[index];
+            let amount = u64::try_from(deposit.amount).map_err(|_| EvmBatchError::DepositTooLarge(index))?;
+            if credit.index != index as u64 ||
+                credit.validator_index != 0 ||
+                credit.address != Address::from(deposit.l2_recipient) ||
+                credit.amount != amount
+            {
+                return Err(EvmBatchError::DepositMismatch(index));
+            }
+            index += 1;
         }
-        hash = deposit_hash(&hash, deposit);
+        hash = queue_item_hash(&hash, item);
     }
     Ok(hash)
-}
-
-/// Заявка на вывод, если транзакция — перевод на мост по правилам: получатель — адрес моста,
-/// данные — ровно 32 байта (хеш получателя в TON), сумма ненулевая и кратна нанотону.
-/// Перевод на мост не по правилам вывода не создаёт: монеты остаются на адресе моста.
-/// Состоялся ли перевод, решает квитанция — см. `apply_evm_batch`.
-pub fn bridge_withdrawal(transaction: &TransactionSigned) -> Option<WithdrawalLeaf> {
-    if transaction.to() != Some(BRIDGE_ADDRESS) {
-        return None;
-    }
-    let data: &[u8] = transaction.input();
-    let recipient_hash = Hash::try_from(data).ok()?;
-    let value = transaction.value();
-    let unit = U256::from(WEI_PER_NANOTON);
-    if value.is_zero() || !(value % unit).is_zero() {
-        return None;
-    }
-    let amount = u128::try_from(value / unit).ok()?;
-    Some(WithdrawalLeaf { recipient_hash, amount })
 }
 
 /// Каждая транзакция блока обязана нести `chainId` в подписи (EIP-155 и новее). Совпадение
@@ -294,61 +330,122 @@ fn reject_unsupported_types(transactions: &[TransactionSigned]) -> Result<(), Ev
     }
 }
 
+/// Поля заголовка, которые правила Ethereum оставляют на усмотрение сборщика блока, а rollup
+/// закрепляет. Лимит газа — чтобы секвенсор не мог сползанием лимита вытеснить принудительные
+/// транзакции; `mix_hash` (он же `PREVRANDAO`) — ноль: случайности на L2 нет, и честнее ноль,
+/// чем значение по выбору секвенсора; `extra_data` и корень beacon-блока — пусто и ноль, чтобы
+/// у заголовка не было свободных полей кроме получателя чаевых.
+fn check_header_policy(header: &Header) -> Result<(), EvmBatchError> {
+    if header.gas_limit != GAS_LIMIT {
+        return Err(EvmBatchError::HeaderPolicy("gas_limit"));
+    }
+    if header.mix_hash != B256::ZERO {
+        return Err(EvmBatchError::HeaderPolicy("mix_hash"));
+    }
+    if !header.extra_data.is_empty() {
+        return Err(EvmBatchError::HeaderPolicy("extra_data"));
+    }
+    if header.parent_beacon_block_root != Some(B256::ZERO) {
+        return Err(EvmBatchError::HeaderPolicy("parent_beacon_block_root"));
+    }
+    Ok(())
+}
+
+/// Итог батча с подробностями — для хоста и тестов. Программа коммитит только `values`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchOutcome {
+    pub values: PublicValues,
+    /// Что стало с каждой принудительной транзакцией отрезка, в порядке очереди.
+    pub forced: Vec<ForcedOutcome>,
+    /// Выводы блока в порядке дозаписи в дерево.
+    pub withdrawals: Vec<WithdrawalLeaf>,
+    /// Фронтир дерева выводов после блока — вход следующего батча.
+    pub withdrawals_frontier: Frontier,
+}
+
 /// Применяет батч: проверяет блок целиком и возвращает публичные значения.
 pub fn apply_evm_batch(input: EvmBatchInput) -> Result<PublicValues, EvmBatchError> {
-    let EvmBatchInput { chain_id, block, prev_deposit_hash, queue_items, data_chunks, prior_withdrawals } =
-        input;
+    process_evm_batch(input).map(|outcome| outcome.values)
+}
+
+/// То же с подробностями.
+pub fn process_evm_batch(input: EvmBatchInput) -> Result<BatchOutcome, EvmBatchError> {
+    process_with_gas_cap(input, FORCED_TX_GAS_CAP)
+}
+
+/// Предел газа принудительной транзакции — параметром только ради теста ошибки «не помещается
+/// по газу блока»: с пределом протокола она недостижима.
+pub(crate) fn process_with_gas_cap(input: EvmBatchInput, forced_gas_cap: u64) -> Result<BatchOutcome, EvmBatchError> {
+    let EvmBatchInput {
+        chain_id,
+        block,
+        prev_deposit_hash,
+        queue_items,
+        data_chunks,
+        withdrawals_frontier,
+        withdrawals_count,
+    } = input;
     let chain_spec = chain_spec(chain_id)?;
 
     // Данные батча: то, что опубликовано в TON, — это сам блок.
-    let batch_hash =
-        batch_data_hash(&data_chunks).map_err(|_| EvmBatchError::DataChunkTooLarge)?;
+    let batch_hash = batch_data_hash(&data_chunks).map_err(|_| EvmBatchError::DataChunkTooLarge)?;
     check_block_data(&alloy_rlp::encode(&block.current_block), &data_chunks)?;
 
     let body = &block.current_block.body;
     reject_unprotected(&body.transactions)?;
     reject_blobs(&block.current_block)?;
     reject_unsupported_types(&body.transactions)?;
+    check_header_policy(&block.current_block.header)?;
+    let block_timestamp = block.current_block.header.timestamp;
 
-    // Депозиты: зачисления блока против очереди L1.
+    // Очередь L1: депозиты отрезка против зачислений блока, хеш очереди после отрезка.
     let credits: &[Withdrawal] = match &body.withdrawals {
         Some(withdrawals) => &withdrawals.0,
         None => &[],
     };
-    let new_deposit_hash = check_deposits(credits, &queue_items, &prev_deposit_hash)?;
+    let new_deposit_hash = check_queue(credits, &queue_items, &prev_deposit_hash)?;
 
-    // Кандидаты в выводы: место транзакции в блоке и лист. Окончательно — после исполнения.
-    let candidates: Vec<(usize, WithdrawalLeaf)> = body
-        .transactions
+    // Дерево выводов до блока: его корень и счётчик контракт подставит свои.
+    let mut tree = WithdrawalTree::from_input(withdrawals_frontier, withdrawals_count)
+        .map_err(EvmBatchError::WithdrawalFrontier)?;
+    let prev_withdrawals_root = tree.root();
+
+    // Блок: принудительные транзакции отрезка — первыми.
+    let forced: Vec<&[u8]> = queue_items
         .iter()
-        .enumerate()
-        .filter_map(|(index, transaction)| bridge_withdrawal(transaction).map(|leaf| (index, leaf)))
+        .filter_map(|item| match item {
+            QueueItem::ForcedTransaction(bytes) => Some(bytes.as_slice()),
+            QueueItem::Deposit(_) => None,
+        })
         .collect();
+    let executed = execute::execute_block(chain_spec, block, &forced, forced_gas_cap)?;
 
-    let executed = execute_block(chain_spec, block)?;
-
-    // Выводы: только состоявшиеся переводы. Неуспешная транзакция монет не перевела — вывод по
-    // ней был бы выплатой на L1 без сжигания на L2.
-    let prev_withdrawals_root = withdrawals_root(&prior_withdrawals);
-    let mut leaves = prior_withdrawals;
-    for (index, leaf) in candidates {
-        let receipt = executed.receipts.get(index).ok_or(EvmBatchError::ReceiptCountMismatch)?;
-        if receipt.success {
-            leaves.push(leaf);
-        }
+    // Выводы: логи моста. Лог от имени моста — доказательство вывода, только если по адресу
+    // моста лежит код моста.
+    let withdrawals = bridge::bridge_withdrawals(&executed.receipts).map_err(|_| EvmBatchError::MalformedBridgeLog)?;
+    if !withdrawals.is_empty() && executed.bridge_code_hash != Some(Some(BRIDGE_CODE_HASH)) {
+        return Err(EvmBatchError::BridgeCodeMismatch);
     }
-    if leaves.len() as u64 > MAX_WITHDRAWALS {
-        return Err(EvmBatchError::TooManyWithdrawals);
+    for leaf in &withdrawals {
+        tree.append(leaf).map_err(|_| EvmBatchError::TooManyWithdrawals)?;
     }
 
-    Ok(PublicValues {
-        chain_id,
-        prev_state_root: executed.parent_hash.0,
-        new_state_root: executed.block_hash.0,
-        batch_hash,
-        prev_withdrawals_root,
-        withdrawals_root: withdrawals_root(&leaves),
-        prev_deposit_hash,
-        new_deposit_hash,
+    Ok(BatchOutcome {
+        values: PublicValues {
+            chain_id,
+            prev_state_root: executed.parent_hash.0,
+            new_state_root: executed.block_hash.0,
+            batch_hash,
+            prev_withdrawals_root,
+            withdrawals_root: tree.root(),
+            prev_deposit_hash,
+            new_deposit_hash,
+            prev_withdrawals_count: withdrawals_count,
+            withdrawals_count: tree.count(),
+            block_timestamp,
+        },
+        forced: executed.forced,
+        withdrawals,
+        withdrawals_frontier: *tree.frontier(),
     })
 }

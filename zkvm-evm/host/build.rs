@@ -57,7 +57,7 @@ fn main() {
 
     // `locked` — сборка строго по zkvm-evm/program/Cargo.lock. `--remap-path-prefix` убирает из
     // ELF пути этой машины (места паник): каталог cargo и корень репозитория — исходники
-    // zkvm-evm/lib и zkvm/lib лежат вне рабочего пространства гостя и попадают в ELF полным
+    // zkvm-evm/lib и копия rsp-mpt лежат вне рабочего пространства гостя и попадают в ELF полным
     // путём. Те же флаги обязаны стоять в verify-elf.sh.
     let cargo_home = std::env::var("CARGO_HOME").expect("cargo задаёт CARGO_HOME сборочным скриптам");
     build_program_with_args(

@@ -5379,8 +5379,10 @@ dependencies = [
  "alloy-genesis",
  "alloy-primitives",
  "alloy-rlp",
+ "alloy-trie",
  "bincode",
  "itertools 0.13.0",
+ "k256",
  "reth-chainspec",
  "reth-ethereum-primitives",
  "reth-evm",
@@ -5395,6 +5397,7 @@ dependencies = [
  "rsp-primitives",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -5404,6 +5407,7 @@ dependencies = [
  "alloy-primitives",
  "bincode",
  "clap",
+ "revm",
  "rollup-evm",
  "rsp-client-executor",
  "serde",
