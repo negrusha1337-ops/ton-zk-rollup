@@ -35,6 +35,8 @@ const UNCHECKED: Record<string, string> = {
 const PENDING: Record<string, string> = {
     'tests/RollupEvmRethProof.spec.ts': 'ждёт пруфов SP1 протокола v2 для блоков цепочки Reth (строятся только по команде пользователя)',
     'tests/ProgramBinding.spec.ts': 'todo только если фикстур пруфов игрушечного реестра нет вовсе; сейчас они есть, и тесты идут',
+    'tests/RollupEvmRemoteProof.spec.ts':
+        'проверяет пруф, построенный на другой машине (zkvm-evm/host/remote): без переменной REMOTE_PROOF_FIXTURE проверять нечего, набор — один todo с подсказкой',
     'tests/SequencerReth.spec.ts':
         'ждёт бинарников вне репозитория (reth v2.2.0, rsp, rollup-evm-host — PROVING.md), а не пруфов: todo только в ветке их отсутствия; набор поднимает настоящий узел и зовёт хост программы',
 };
