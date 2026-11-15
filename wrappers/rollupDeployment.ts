@@ -123,6 +123,46 @@ export function deploymentMismatches(
     return problems;
 }
 
+/**
+ * Границы, на которые согласен ПРОВЕРЯЮЩИЙ: их задаёт он сам, не контракт и не развернувший.
+ * Срок заморозки и возраст блока входят в начальные данные контракта, поэтому адресная сверка
+ * (`deploymentMismatches`) подставляет те, что сообщает контракт, — приемлемы ли они, решают
+ * эти границы. Верхняя граница срока заморозки обязательна: контракт её не ставит, и срок в
+ * 2^32 − 1 секунд (136 лет) означал бы, что заморозить rollup и вернуть депозиты нельзя никогда.
+ */
+export type DeploymentBounds = {
+    /** Наименьший срок заморозки, секунд. */
+    minEscapeTimeout: number;
+    /** Наибольший срок заморозки, секунд. */
+    maxEscapeTimeout: number;
+    /** Наибольший возраст блока L2, секунд. */
+    maxBlockAge: number;
+};
+
+/** Расхождения параметров развёрнутого контракта с границами проверяющего; пустой список — приемлемы. */
+export function deploymentBoundMismatches(
+    deployment: Pick<OnchainRollup['deployment'], 'escapeTimeout' | 'maxBlockAge'>,
+    bounds: DeploymentBounds,
+): string[] {
+    for (const [name, value] of Object.entries(bounds)) {
+        if (!Number.isInteger(value) || value <= 0) throw new Error(`deploymentBoundMismatches: ${name} — не целое положительное число секунд`);
+    }
+    if (bounds.minEscapeTimeout > bounds.maxEscapeTimeout) {
+        throw new Error('deploymentBoundMismatches: наименьший срок заморозки больше наибольшего');
+    }
+    const problems: string[] = [];
+    if (deployment.escapeTimeout < bounds.minEscapeTimeout) {
+        problems.push(`срок заморозки ${deployment.escapeTimeout} с меньше требуемых ${bounds.minEscapeTimeout} с`);
+    }
+    if (deployment.escapeTimeout > bounds.maxEscapeTimeout) {
+        problems.push(`срок заморозки ${deployment.escapeTimeout} с больше допустимых ${bounds.maxEscapeTimeout} с`);
+    }
+    if (deployment.maxBlockAge > bounds.maxBlockAge) {
+        problems.push(`наибольший возраст блока ${deployment.maxBlockAge} с больше допустимых ${bounds.maxBlockAge} с`);
+    }
+    return problems;
+}
+
 /** Снимок развёрнутого контракта для сверки. */
 export async function readOnchainRollup(rollup: {
     address: Address;

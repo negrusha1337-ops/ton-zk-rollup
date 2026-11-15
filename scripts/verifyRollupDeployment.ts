@@ -5,11 +5,11 @@ import { compile, NetworkProvider } from '@ton/blueprint';
 import { currentEvmSourcesSha256, loadEvmProgramKeys, loadEvmRollupKey, loadRethExpected } from '../wrappers/evmProofs';
 import { PROTOCOL_VERSION } from '../wrappers/protocolVersion';
 import { Rollup } from '../wrappers/Rollup';
-import { deploymentMismatches, readOnchainRollup } from '../wrappers/rollupDeployment';
+import { deploymentBoundMismatches, deploymentMismatches, readOnchainRollup } from '../wrappers/rollupDeployment';
 
 // Сверка развёрнутого rollup-контракта протокола v2: тот ли это контракт и тот ли в нём ключ.
 //
-//   npx blueprint run verifyRollupDeployment --testnet <адрес> <chainId> <мин. срок, с> <макс. возраст блока, с> [sequencer=<адрес>] [owner=<адрес>]
+//   npx blueprint run verifyRollupDeployment --testnet <адрес> <chainId> <мин. срок, с> <макс. срок, с> <макс. возраст блока, с> [sequencer=<адрес>] [owner=<адрес>]
 //
 // Скрипт ничего не отправляет (Blueprint всё равно спросит способ отправки — подойдёт любой).
 //
@@ -18,6 +18,8 @@ import { deploymentMismatches, readOnchainRollup } from '../wrappers/rollupDeplo
 //   • адрес контракта;
 //   • chainId — иначе это может быть двойник другого rollup'а с тем же ключом;
 //   • наименьший срок заморозки, на который он согласен (контракт допускает от часа);
+//   • наибольший срок заморозки, на который он согласен. Контракт верхней границы не ставит:
+//     со сроком в 2^32 − 1 секунд rollup нельзя заморозить, а депозит вернуть, никогда;
 //   • наибольший возраст блока L2, на который он согласен (контракт допускает от получаса до
 //     срока заморозки): на столько время L2 может отставать от времени L1;
 //   • по желанию — кто секвенсор и кто владелец. Без этих аргументов скрипт их только печатает.
@@ -51,17 +53,21 @@ export async function run(provider: NetworkProvider, args: string[]) {
     const named = new Map(
         args.filter((arg) => arg.includes('=')).map((arg) => arg.split('=', 2) as [string, string]),
     );
-    const [addressText, chainIdText, minTimeoutText, maxAgeText] = positional;
-    if (!addressText || !chainIdText || !minTimeoutText || !maxAgeText) {
+    const [addressText, chainIdText, minTimeoutText, maxTimeoutText, maxAgeText] = positional;
+    if (positional.length !== 5 || !addressText || !chainIdText || !minTimeoutText || !maxTimeoutText || !maxAgeText) {
         throw new Error(
-            'Нужны: <адрес> <chainId> <мин. срок заморозки, с> <макс. возраст блока, с> [sequencer=<адрес>] [owner=<адрес>]. ' +
-                'Все четыре значения проверяющий задаёт сам — см. комментарий в начале скрипта.',
+            'Нужны: <адрес> <chainId> <мин. срок заморозки, с> <макс. срок заморозки, с> <макс. возраст блока, с> ' +
+                '[sequencer=<адрес>] [owner=<адрес>]. Все пять значений проверяющий задаёт сам — см. комментарий в начале скрипта.',
         );
     }
     const expectedChainId = BigInt(chainIdText);
     const minTimeout = Number(minTimeoutText);
+    const maxTimeout = Number(maxTimeoutText);
     const maxAge = Number(maxAgeText);
-    if (!Number.isInteger(minTimeout) || minTimeout <= 0) throw new Error('Срок заморозки — целое число секунд');
+    if (!Number.isInteger(minTimeout) || minTimeout <= 0) throw new Error('Наименьший срок заморозки — целое число секунд');
+    if (!Number.isInteger(maxTimeout) || maxTimeout < minTimeout) {
+        throw new Error('Наибольший срок заморозки — целое число секунд, не меньше наименьшего');
+    }
     if (!Number.isInteger(maxAge) || maxAge <= 0) throw new Error('Возраст блока — целое число секунд');
 
     const rollup = provider.open(Rollup.createFromAddress(Address.parse(addressText)));
@@ -92,12 +98,9 @@ export async function run(provider: NetworkProvider, args: string[]) {
         code: await compile('Rollup'),
         key,
     });
-    if (deployment.escapeTimeout < minTimeout) {
-        problems.push(`срок заморозки ${deployment.escapeTimeout} с меньше требуемых ${minTimeout} с`);
-    }
-    if (deployment.maxBlockAge > maxAge) {
-        problems.push(`наибольший возраст блока ${deployment.maxBlockAge} с больше допустимых ${maxAge} с`);
-    }
+    problems.push(
+        ...deploymentBoundMismatches(deployment, { minEscapeTimeout: minTimeout, maxEscapeTimeout: maxTimeout, maxBlockAge: maxAge }),
+    );
     // Ключ для сверки обязан быть ключом программы нынешнего протокола.
     if (key.file.protocolVersion !== PROTOCOL_VERSION) {
         problems.push(`key.json выведен для протокола v${key.file.protocolVersion}, контракт — протокола v${PROTOCOL_VERSION}`);
@@ -127,7 +130,7 @@ export async function run(provider: NetworkProvider, args: string[]) {
     ui.write(`Владелец:        ${deployment.owner.toString()} (${given('owner')})`);
     ui.write(`Секвенсор:       ${deployment.sequencer.toString()} (${given('sequencer')})`);
     ui.write(`chainId:         ${deployment.chainId} (ожидался ${expectedChainId})`);
-    ui.write(`Срок заморозки:  ${deployment.escapeTimeout} с (требовалось не меньше ${minTimeout})`);
+    ui.write(`Срок заморозки:  ${deployment.escapeTimeout} с (требовалось от ${minTimeout} до ${maxTimeout})`);
     ui.write(`Возраст блока:   до ${deployment.maxBlockAge} с (допускалось не больше ${maxAge})`);
     ui.write(`Генезис:         0x${onchain.genesisHash.toString(16)} (константа кода; ожидался 0x${expectedGenesis.toString(16)} — генезис цепочки L2)`);
     ui.write(`Ключ батчей:     0x${onchain.keyHash.toString(16)}`);

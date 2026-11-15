@@ -8,7 +8,7 @@ import { Bn254Groth16Verifier, KeySlots, KeyUpload } from '../wrappers/Bn254Grot
 import { currentEvmSourcesSha256, loadEvmProgramKeys, loadEvmRollupKey, loadRethExpected } from '../wrappers/evmProofs';
 import { PROTOCOL_VERSION } from '../wrappers/protocolVersion';
 import { PlantedState, Rollup, RollupConfig, RollupErrors, RollupOpcodes, VerifierErrors } from '../wrappers/Rollup';
-import { deploymentMismatches, readOnchainRollup } from '../wrappers/rollupDeployment';
+import { deploymentBoundMismatches, deploymentMismatches, readOnchainRollup } from '../wrappers/rollupDeployment';
 import { forcedTransactionCell, sha256Int } from '../wrappers/rollupMath';
 import {
     DEPLOY_VALUE,
@@ -239,6 +239,37 @@ describe('Rollup: ключи и развёртывание на настояще
                 'наибольший возраст блока не тот',
             ]);
             expect(check(await deployedWith({ nullifierCode: fakeNullifier }))).toEqual([ADDRESS, 'код нуллификатора не тот']);
+
+            // Срок заморозки без верхней границы: контракт фиксирует ключ и со сроком в 2^32 − 1
+            // секунд, а адресная сверка, которой срок подставлен со слов самого контракта (так
+            // делает scripts/verifyRollupDeployment.ts), ничего не замечает. Называют подмену
+            // только границы проверяющего — обязательный аргумент скрипта.
+            const bounds = { minEscapeTimeout: constants.minEscapeTimeout, maxEscapeTimeout: 30 * 24 * 3600, maxBlockAge: MAX_BLOCK_AGE_SECONDS };
+            const NEVER = 2 ** 32 - 1;
+            const unfreezable = await deployedWith({ escapeTimeout: NEVER });
+            expect(unfreezable.deployment.escapeTimeout).toBe(NEVER);
+            expect(check(unfreezable, { ...config, escapeTimeout: NEVER })).toEqual([]);
+            expect(deploymentBoundMismatches(unfreezable.deployment, bounds)).toEqual([
+                `срок заморозки ${NEVER} с больше допустимых ${bounds.maxEscapeTimeout} с`,
+            ]);
+            // Границы — включительно, и каждая названа по имени.
+            const honest = { escapeTimeout: ESCAPE_TIMEOUT_SECONDS, maxBlockAge: MAX_BLOCK_AGE_SECONDS };
+            expect(deploymentBoundMismatches(honest, bounds)).toEqual([]);
+            expect(deploymentBoundMismatches(honest, { ...bounds, minEscapeTimeout: ESCAPE_TIMEOUT_SECONDS, maxEscapeTimeout: ESCAPE_TIMEOUT_SECONDS })).toEqual([]);
+            expect(deploymentBoundMismatches(honest, { ...bounds, maxEscapeTimeout: ESCAPE_TIMEOUT_SECONDS - 1 })).toEqual([
+                `срок заморозки ${ESCAPE_TIMEOUT_SECONDS} с больше допустимых ${ESCAPE_TIMEOUT_SECONDS - 1} с`,
+            ]);
+            expect(
+                deploymentBoundMismatches(honest, { ...bounds, minEscapeTimeout: ESCAPE_TIMEOUT_SECONDS + 1, maxEscapeTimeout: NEVER }),
+            ).toEqual([`срок заморозки ${ESCAPE_TIMEOUT_SECONDS} с меньше требуемых ${ESCAPE_TIMEOUT_SECONDS + 1} с`]);
+            expect(deploymentBoundMismatches(honest, { ...bounds, maxBlockAge: MAX_BLOCK_AGE_SECONDS })).toEqual([]);
+            expect(deploymentBoundMismatches(honest, { ...bounds, maxBlockAge: MAX_BLOCK_AGE_SECONDS - 1 })).toEqual([
+                `наибольший возраст блока ${MAX_BLOCK_AGE_SECONDS} с больше допустимых ${MAX_BLOCK_AGE_SECONDS - 1} с`,
+            ]);
+            // Границы без верхнего срока, с нулём или перевёрнутые — ошибка вызова, а не «сошлось».
+            expect(() => deploymentBoundMismatches(honest, { ...bounds, maxEscapeTimeout: Number.NaN })).toThrow(/maxEscapeTimeout/);
+            expect(() => deploymentBoundMismatches(honest, { ...bounds, maxEscapeTimeout: 0 })).toThrow(/maxEscapeTimeout/);
+            expect(() => deploymentBoundMismatches(honest, { ...bounds, minEscapeTimeout: bounds.maxEscapeTimeout + 1 })).toThrow(/больше наибольшего/);
 
             // Другой генезис в начальных данных: контракт сам не фиксирует с ним ключ.
             const otherGenesis = await uploadedWith({ genesisStateRoot: constants.genesisHash + 1n });
