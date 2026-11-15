@@ -5,7 +5,7 @@ import { Address, fromNano, toNano } from '@ton/core';
 import { loadEvmRollupKey } from '../wrappers/evmProofs';
 import { PROTOCOL_VERSION } from '../wrappers/protocolVersion';
 import { PUBLISH_DATA_VALUE, SUBMIT_BATCH_VALUE } from '../wrappers/rollupValues';
-import { childEnv, installSignalHandlers, ShuttingDown } from './children';
+import { childEnv, childrenLog, installSignalHandlers, shuttingDown, ShuttingDown } from './children';
 import { DEFAULT_EXPECTED_CHECK_TIME, startBudgetProblem } from './deadline';
 import { startNode } from './node';
 import { DEFAULT_CIRCUITS_DIR, ProofRejected } from './proofImport';
@@ -16,7 +16,7 @@ import { rateLimiter, TestnetQueueSource } from './queue/toncenter';
 import { QueueLagError } from './queue/types';
 import { DEFAULT_EXPECTED_PROOF_TIME, DEFAULT_PROGRAM_KEYS, DEFAULT_SUBMIT_MARGIN, Sequencer, SequencerConfig, SequencerStop } from './service';
 import { DEFAULT_STATE_DIR, lockStateDir, StateDirBusy } from './state';
-import { TestnetSubmitter } from './submitter';
+import { StaleSnapshot, TestnetSubmitter } from './submitter';
 import { rollupOn, SequencerWallet, TESTNET_GLOBAL_ID, TonChain, ToncenterChain } from './ton';
 
 // Сервис-секвенсор против контракта в testnet (команды `check` и `run` в main.ts).
@@ -27,7 +27,8 @@ import { rollupOn, SequencerWallet, TESTNET_GLOBAL_ID, TonChain, ToncenterChain 
 //   run   — те же проверки, затем узел reth, очередь toncenter, LocalProver, TestnetSubmitter и
 //           шаги сервиса в цикле (`serve`). Остановка, где нужен человек (SequencerStop, отказ и
 //           сбой прувера, негодный пруф, чужая блокировка каталога) — код 2 и строка «ОСТАНОВКА»,
-//           и при старте, и в цикле; повторяется только сбой сети и индексатора.
+//           и при старте, и в цикле; повторяется только сбой сети и индексатора. Остановка по
+//           сигналу — код 1 и «прервано», что бы ни бросил прерванный шаг (круг 22, 4).
 
 const ROOT = path.join(__dirname, '..');
 /** Меньше этого на кошельке секвенсора — отказ: не хватит и на один батч с комиссиями. */
@@ -190,6 +191,8 @@ export async function check(options: TestnetOptions, print: (line: string) => vo
 /** `run`: проверки, затем узел и шаги сервиса в цикле. Возвращает код выхода. */
 export async function run(options: TestnetOptions, print: (line: string) => void): Promise<number> {
     installSignalHandlers();
+    // Сбои гашения дочерних из обработчиков exit — в журнал сервиса (круг 22, 3).
+    childrenLog.write = print;
     const { chain, wallet, limit } = await connect(options);
     const network = await checkTestnet({ chain, rollup: options.rollup, wallet, now: () => Math.floor(Date.now() / 1000), expectedProofTime: options.expectedProofTime });
     const local = await checkLocal(options);
@@ -255,36 +258,79 @@ const needsHuman = (error: unknown): error is Error =>
     error instanceof ProofRejected ||
     error instanceof StateDirBusy;
 
+/** Подряд StaleSnapshot до остановки, с (круг 22, 4): отстающий сервер — не сбой сети. */
+export const DEFAULT_STALE_LIMIT_SECONDS = 30 * 60;
+
 /**
  * Цикл сервиса: старт и шаги. Возвращает код выхода: 2 — остановка, где нужен человек (строка
- * «ОСТАНОВКА: …»), 1 — остановка по сигналу. Сбой сети и индексатора повторяется; подряд
- * `maxFailures` (10) — тоже остановка. Сервис закрывается в любом случае.
+ * «ОСТАНОВКА: …»), 1 — остановка по сигналу (строка «прервано: …»). Сбой сети и индексатора
+ * повторяется; подряд `maxFailures` (10) — тоже остановка. Отстающие снимки toncenter
+ * (StaleSnapshot) считаются отдельно — по времени: подряд дольше `staleLimitSeconds` (30 мин) —
+ * остановка. Сервис закрывается в любом случае.
+ *
+ * Круг 22, 4: идёт остановка по сигналу — шаг прерван, и брошенное им (импорт пруфа, погашенный
+ * сигналом, отвечает ProofRejected) — не причина звать человека. Поэтому сигнал проверяется
+ * раньше needsHuman.
  */
 export async function serve(
     service: Pick<Sequencer, 'start' | 'step' | 'close'>,
-    options: { pollSeconds: number; maxFailures?: number },
+    options: {
+        pollSeconds: number;
+        maxFailures?: number;
+        staleLimitSeconds?: number;
+        /** Часы, мс; по умолчанию Date.now. */
+        now?: () => number;
+        /** Идёт ли остановка по сигналу; по умолчанию shuttingDown (children.ts). */
+        stopping?: () => string | null;
+    },
     print: (line: string) => void,
 ): Promise<number> {
     const pause = (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
     const stop = (error: Error) => (print(`ОСТАНОВКА: ${error.message}`), 2);
+    const stopping = options.stopping ?? shuttingDown;
+    const now = options.now ?? Date.now;
+    /** Прерван сигналом: код 1. null — нет. */
+    const interrupted = (error: unknown): number | null => {
+        const signal = stopping();
+        if (signal === null && !(error instanceof ShuttingDown)) return null;
+        print(`прервано${signal ? ` по сигналу ${signal}` : ''}: ${(error as Error).message}`);
+        return 1;
+    };
     const maxFailures = options.maxFailures ?? 10;
+    const staleLimit = options.staleLimitSeconds ?? DEFAULT_STALE_LIMIT_SECONDS;
     try {
         try {
             await service.start();
         } catch (error) {
+            const code = interrupted(error);
+            if (code !== null) return code;
             if (needsHuman(error)) return stop(error);
-            if (error instanceof ShuttingDown) return 1;
             throw error;
         }
         let failures = 0;
+        let staleSince: number | null = null;
         for (;;) {
             try {
                 const result = await service.step();
                 failures = 0;
+                staleSince = null;
                 if (result.kind === 'waiting' || result.kind === 'idle') await pause(options.pollSeconds);
             } catch (error) {
+                const code = interrupted(error);
+                if (code !== null) return code;
                 if (needsHuman(error)) return stop(error);
-                if (error instanceof ShuttingDown) return 1;
+                if (error instanceof StaleSnapshot) {
+                    // Отстающий сервер toncenter: ждать дольше, чем сбой сети, но не вечно.
+                    staleSince ??= now();
+                    const seconds = Math.floor((now() - staleSince) / 1000);
+                    print(`снимки toncenter отстают (${seconds} с подряд): ${error.message}`);
+                    if (seconds >= staleLimit) {
+                        print(`ОСТАНОВКА: снимки toncenter отстают ${seconds} с подряд (предел ${staleLimit} с) — нужен человек`);
+                        return 2;
+                    }
+                    await pause(options.pollSeconds);
+                    continue;
+                }
                 // Сеть, индексатор, сбой отправки: шаг повторяется; подряд много — остановка.
                 failures++;
                 print(`шаг не удался (${failures} подряд): ${(error as Error).message}${error instanceof QueueLagError ? ' — индексатор отстаёт' : ''}`);

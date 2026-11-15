@@ -18,6 +18,9 @@ import { ChildProcess } from 'child_process';
 // (прувер, gnark), и SIGTERM одному сторожу оставлял их сиротами. Такой дочерний запускается
 // своей группой процессов (`detached: true`, `track(child, { group: true })`), и сигнал идёт всей
 // группе (`signalChild`); после выхода главы группы оставшимся в ней — SIGKILL.
+//
+// Круг 22, пункт 3: обработчики `exit` (дочернего и процесса) не бросают — сбой kill (EPERM и др.)
+// уходит в журнал (`childrenLog`): исключение там роняло бы сервис посреди шага.
 
 const live = new Set<ChildProcess>();
 /** Дочерние, запущенные своей группой процессов: сигнал — всей группе. */
@@ -47,13 +50,30 @@ export function signalChild(child: ChildProcess, signal: NodeJS.Signals): void {
     child.kill(signal);
 }
 
-/** SIGKILL тем, кто остался в группе после выхода её главы. Группы нет — ничего. */
+/**
+ * Куда пишутся сбои, которые бросать некуда (круг 22, 3): обработчики `exit` дочернего и процесса.
+ * Сервис направляет в свой журнал; по умолчанию — stderr. Тесты подменяют.
+ */
+export const childrenLog = { write: (line: string): void => void process.stderr.write(`${line}\n`) };
+
+/** Сбой в обработчике `exit` — в журнал, не исключением: брошенное там роняет процесс. */
+function reportExitFailure(what: string, error: unknown): void {
+    const code = (error as NodeJS.ErrnoException).code;
+    try {
+        childrenLog.write(`дочерние процессы: ${what} не удался (${code ?? (error as Error).message}) — проверьте, не остались ли процессы`);
+    } catch {
+        // Журнал недоступен: обработчик exit всё равно не бросает.
+    }
+}
+
+/** SIGKILL тем, кто остался в группе после выхода её главы. Группы нет — ничего; иной сбой — в журнал. */
 function killGroupLeftovers(child: ChildProcess): void {
     if (child.pid === undefined) return;
     try {
         process.kill(-child.pid, 'SIGKILL');
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH')
+            reportExitFailure(`SIGKILL оставшимся в группе ${child.pid} (pgrep -g ${child.pid})`, error);
     }
 }
 let handlersInstalled = false;
@@ -86,7 +106,16 @@ export async function terminateChildren(graceMs = signalGrace.ms): Promise<void>
     children.filter(running).forEach((child) => signalChild(child, 'SIGKILL'));
 }
 
-const killAll = () => live.forEach((child) => running(child) && signalChild(child, 'SIGKILL'));
+/** SIGKILL всем живым (обработчик exit процесса); сбой сигнала одному — в журнал, остальные гасятся. */
+export const killAll = () =>
+    live.forEach((child) => {
+        if (!running(child)) return;
+        try {
+            signalChild(child, 'SIGKILL');
+        } catch (error) {
+            reportExitFailure(`SIGKILL процессу ${child.pid} (${child.spawnfile})`, error);
+        }
+    });
 
 function onSignal(signal: NodeJS.Signals): void {
     if (stopping) {
