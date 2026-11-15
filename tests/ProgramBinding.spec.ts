@@ -1,6 +1,8 @@
 import { spawnSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
 import path from 'path';
+import { currentEvmSourcesSha256, loadEvmProgramKeys, loadEvmRollupKey, loadRethExpected, rethBindingProblems } from '../wrappers/evmProofs';
+import { PROTOCOL_VERSION } from '../wrappers/protocolVersion';
 import {
     currentSourcesSha256,
     fixtureProblems,
@@ -84,4 +86,74 @@ describe('Привязка ключей к исходникам программ
             expect(present.map(({ directory }) => directory)).toEqual(SP1_FIXTURES.map(({ directory }) => directory));
         });
     }
+});
+
+// Программа батча EVM протокола v2: звенья «исходники → program.json → key.json» и цепочка
+// блоков Reth, по которым решается, годны ли пруфы SP1 этих блоков (rethProofStatus). Сами
+// фикстуры здесь не правятся: функции подаются подменённые копии объектов.
+describe('Привязка цепочки Reth и ключа контракта к программе EVM', () => {
+    const honest = () => ({
+        program: { ...loadEvmProgramKeys() },
+        key: { ...loadEvmRollupKey().file },
+        expected: { ...loadRethExpected() },
+        sourcesSha256: currentEvmSourcesSha256(),
+    });
+    const flipped = (hex: string) => hex.slice(0, -1) + (hex.endsWith('0') ? '1' : '0');
+
+    it('нынешние program.json, key.json и expected.json сходятся с исходниками и между собой', () => {
+        expect(rethBindingProblems(honest())).toEqual([]);
+    });
+
+    it('каждое разошедшееся звено названо по имени', () => {
+        const base = honest();
+        const cases: [string, ReturnType<typeof honest>, string[]][] = [
+            [
+                'исходники изменились после --vkeys',
+                { ...base, sourcesSha256: flipped(base.sourcesSha256) },
+                ['fixtures/evm_batches/program.json описывает прежние исходники программы'],
+            ],
+            [
+                'key.json прежнего протокола',
+                { ...base, key: { ...base.key, protocolVersion: PROTOCOL_VERSION - 1 } },
+                [`key.json выведен для протокола v${PROTOCOL_VERSION - 1}, а нынешний — v${PROTOCOL_VERSION}`],
+            ],
+            [
+                'key.json выведен из других исходников',
+                { ...base, key: { ...base.key, sourcesSha256: flipped(base.key.sourcesSha256) } },
+                ['key.json выведен не из тех исходников программы, что записаны в program.json'],
+            ],
+            [
+                'key.json выведен из другого ключа программы',
+                { ...base, key: { ...base.key, programVKey: flipped(base.key.programVKey) } },
+                ['key.json выведен не из того ключа программы, что в program.json'],
+            ],
+            [
+                'key.json выведен для другого ELF',
+                { ...base, key: { ...base.key, programElfSha256: flipped(base.key.programElfSha256) } },
+                ['key.json выведен для другого ELF, чем записан в program.json'],
+            ],
+            [
+                'цепочка исполнена другим ELF',
+                { ...base, expected: { ...base.expected, programElfSha256: flipped(base.expected.programElfSha256) } },
+                ['цепочка Reth (expected.json) исполнена другим ELF, чем записан в program.json'],
+            ],
+            [
+                'цепочка прежнего протокола',
+                { ...base, expected: { ...base.expected, protocolVersion: PROTOCOL_VERSION - 1 } },
+                [`цепочка Reth (expected.json) — протокола v${PROTOCOL_VERSION - 1}, а нынешний — v${PROTOCOL_VERSION}`],
+            ],
+        ];
+        for (const [name, links, problems] of cases) {
+            expect({ name, problems: rethBindingProblems(links) }).toEqual({ name, problems });
+        }
+        // program.json с другими исходниками расходится сразу с двумя звеньями: с деревом и с key.json.
+        const stale = { ...base, program: { ...base.program, sourcesSha256: flipped(base.program.sourcesSha256) } };
+        expect(rethBindingProblems(stale)).toEqual([
+            'fixtures/evm_batches/program.json описывает прежние исходники программы',
+            'key.json выведен не из тех исходников программы, что записаны в program.json',
+        ]);
+        // Запись хеша ELF с префиксом 0x и без него — одно и то же.
+        const prefixed = { ...base, expected: { ...base.expected, programElfSha256: '0x' + base.expected.programElfSha256.replace(/^0x/, '') } };
+        expect(rethBindingProblems(prefixed)).toEqual([]);
+    });
 });

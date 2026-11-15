@@ -45,3 +45,16 @@ export function assertProtocolV1Script(script: string, protocolVersion: number =
         );
     }
 }
+
+/**
+ * Что делать набору тестов, которому нужны пруфы SP1 нынешнего протокола:
+ *   'todo' — пруфы в fixtures/ ещё прежнего протокола (`blocker` назван): набор ждёт;
+ *   'run'  — версии совпали и пруфы годны;
+ *   'fail' — версии совпали, а пруфы негодны. Это уже не ожидание, а поломка: флаг версии
+ *            поднимает тот, кто перестроил пруфы, и после этого негодный пруф (чужая цепочка,
+ *            другой ELF, другой ключ) обязан ронять набор, а не прятаться за todo.
+ */
+export function proofSuiteMode(blocker: string | null, proofsCurrent: boolean): 'run' | 'todo' | 'fail' {
+    if (blocker !== null) return 'todo';
+    return proofsCurrent ? 'run' : 'fail';
+}

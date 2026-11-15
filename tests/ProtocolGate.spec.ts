@@ -1,6 +1,12 @@
 import { readdirSync, readFileSync } from 'fs';
 import path from 'path';
-import { assertProtocolV1Script, PROOF_FIXTURES_PROTOCOL_VERSION, PROTOCOL_VERSION } from '../wrappers/protocolVersion';
+import {
+    assertProtocolV1Script,
+    PROOF_FIXTURES_PROTOCOL_VERSION,
+    proofFixturesBlocker,
+    proofSuiteMode,
+    PROTOCOL_VERSION,
+} from '../wrappers/protocolVersion';
 
 // Сторож смены протокола (REVIEW.md, 14-2 и 14-8).
 //
@@ -28,6 +34,15 @@ const PENDING: Record<string, string> = {
     'tests/ProgramBinding.spec.ts': 'todo только если фикстур пруфов игрушечного реестра нет вовсе; сейчас они есть, и тесты идут',
 };
 
+/**
+ * Файлы с условным пропуском теста — `(условие ? it : it.skip)(…)` — и почему он допустим.
+ * Условие обязано зависеть от фикстуры, а не от версии протокола.
+ */
+const CONDITIONAL_SKIPS: Record<string, string> = {
+    'tests/RollupEvmExit.spec.ts':
+        'случай «счёт для прогона в testnet» есть, только если генератору фикстуры дали адрес кошелька прогона (раздел testnet фикстуры)',
+};
+
 const sourcesIn = (directory: string): string[] =>
     readdirSync(path.join(ROOT, directory), { withFileTypes: true }).flatMap((entry) => {
         const relative = `${directory}/${entry.name}`;
@@ -50,6 +65,35 @@ describe('Смена протокола: что вправе оставатьс�
         expect(matching(/\b(?:it|test|describe)\.todo\(/)).toEqual(Object.keys(PENDING).sort());
         for (const reason of Object.values(PENDING)) expect(reason.length).toBeGreaterThan(20);
         expect(matching(/\b(?:it|test|describe)\.(?:skip|only)\(|\bx(?:it|describe|test)\(|\bfit\(|\bfdescribe\(/)).toEqual([]);
+        // Условный пропуск — `(условие ? it : it.skip)(…)`, `const maybe = условие ? it : it.skip` —
+        // прямым вызовом не выглядит: ловится любое упоминание skip и only у it, test и describe.
+        const SKIP_OR_ONLY = /\b(?:it|test|describe)\s*\.\s*(?:skip|only)\b|\[\s*['"`](?:skip|only)['"`]\s*\]/;
+        expect(matching(SKIP_OR_ONLY)).toEqual(Object.keys(CONDITIONAL_SKIPS).sort());
+        for (const reason of Object.values(CONDITIONAL_SKIPS)) expect(reason.length).toBeGreaterThan(20);
+        // Сам сторож такие записи видит: прямой пропуск, условный, через переменную, через индекс.
+        for (const sample of ['it.skip(', '(ready ? it : it.skip)(', 'const maybe = ok ? describe : describe.only;', "it['skip'](", 'test . only']) {
+            expect({ sample, caught: SKIP_OR_ONLY.test(sample) }).toEqual({ sample, caught: true });
+        }
+        for (const sample of ['it.each(', 'it.todo(', 'await skip(', 'onlyOwner']) {
+            expect({ sample, caught: SKIP_OR_ONLY.test(sample) }).toEqual({ sample, caught: false });
+        }
+    });
+
+    it('набор на пруфах ждёт (todo), только пока пруфы прежнего протокола; после подъёма версии негодный пруф — падение', () => {
+        // Решение — одна функция; ею пользуется tests/RollupEvmRethProof.spec.ts.
+        expect(proofSuiteMode('пруфы прежнего протокола', false)).toBe('todo');
+        expect(proofSuiteMode('пруфы прежнего протокола', true)).toBe('todo');
+        expect(proofSuiteMode(null, true)).toBe('run');
+        expect(proofSuiteMode(null, false)).toBe('fail');
+        // Причина ожидания есть ровно тогда, когда версии разные.
+        expect(proofFixturesBlocker() === null).toBe(PROOF_FIXTURES_PROTOCOL_VERSION === PROTOCOL_VERSION);
+        const suite = read('tests/RollupEvmRethProof.spec.ts');
+        // Набор берёт решение у этой функции, todo у него один — в ветке ожидания, а в ветке
+        // «негодны» стоит обычный тест, который бросает исключение.
+        expect(suite).toMatch(/const mode = proofSuiteMode\(blocker, status\.current\);/);
+        expect(suite.match(/\.todo\(/g)).toHaveLength(1);
+        expect(suite).toMatch(/mode === 'todo'\) \{[^}]*describe\(SUITE, \(\) => \{\s*it\.todo\(/);
+        expect(suite).toMatch(/\} else \{[^}]*describe\(SUITE, \(\) => \{\s*it\([^]*?throw new Error\(`пруфы объявлены пруфами протокола v2, но негодны/);
     });
 
     it('каждый скрипт протокола v1 первым делом отказывается стартовать', () => {

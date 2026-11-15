@@ -1,15 +1,16 @@
-import { Blockchain, BlockchainSnapshot, createShardAccount, SandboxContract, TreasuryContract } from '@ton/sandbox';
+import { Blockchain, BlockchainSnapshot, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Address, beginCell, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
 import { batchRootsOf, dataChunksOf, loadEvmProgramKeys, publicInputOf, publicValuesOf, RETH_CHAIN_BLOCKS } from '../wrappers/evmProofs';
-import { NullifierErrors, PlantedState, Rollup, RollupConfig, RollupErrors } from '../wrappers/Rollup';
+import { NullifierErrors, Rollup, RollupConfig, RollupErrors } from '../wrappers/Rollup';
 import {
     appendWithdrawalLeaf,
     batchDataHash,
     batchDigest,
     byteSnake,
     emptyWithdrawalFrontier,
+    forcedTransactionCell,
     MAX_FORCED_TX_BYTES,
     merkleProofCell,
     withdrawalFrontierRoot,
@@ -45,13 +46,14 @@ import { finalizeDummyKeys, mockProof, ProtocolConstants, readProtocolConstants,
 // словами, которые программа выдала в zkVM для этого блока (отчёты block-N.json). Приём этих
 // батчей по настоящему пруфу этим тестом НЕ доказан — tests/RollupEvmRethProof.spec.ts ждёт пруфов.
 //
-// Очередь ставится сообщениями для блоков 1–11. Отрезок блока 12 — 32 принудительные транзакции
-// по 8 128 байт (программа пропускает их по длине): с пределом длины в контракте такие в очередь
-// больше не попадают, поэтому блок 12 сверяется на подложенной очереди (см. тест ниже).
+// Очередь всех блоков цепочки ставится сообщениями: ни один её элемент не длиннее предела
+// контракта (256 байт), подложенных состояний здесь нет. Время L1 идёт от времени блоков цепочки
+// (expected.json): сценарий ставит его с запасом в будущее — на проверку и пруфы, — а блоки идут
+// через секунду друг за другом, так что вся цепочка помещается в одно окно maxBlockAge.
 const TIMEOUT = 3600;
 const NO_HINTS = beginCell().endCell();
-/** Последний блок, очередь которого можно поставить сообщениями. */
-const LAST_MESSAGE_BLOCK = 11;
+/** Последний блок цепочки: очередь каждого блока ставится сообщениями. */
+const LAST_MESSAGE_BLOCK = RETH_CHAIN_BLOCKS;
 /** Коды отказа проверки счёта EVM: enum EvmExitErrors в contracts/rollup/evm_exit.tolk. */
 const WRONG_BLOCK_HEADER = 7401;
 
@@ -166,7 +168,7 @@ describe('Rollup: полный цикл на блоках узла Reth, про�
         expect(rethReports.some((report) => report.queueItems === 0)).toBe(true);
     });
 
-    it('арифметика вне контракта совпадает с программой на всех двенадцати блоках: очередь, выводы, данные, дайджест', () => {
+    it('арифметика вне контракта совпадает с программой на всех блоках цепочки: очередь, выводы, данные, дайджест', () => {
         let frontier = emptyWithdrawalFrontier();
         let count = 0n;
         for (let number = 1; number <= RETH_CHAIN_BLOCKS; number++) {
@@ -198,7 +200,7 @@ describe('Rollup: полный цикл на блоках узла Reth, про�
         expect(rethReports.some((report) => BigInt(report.publicValues.prevWithdrawalsCount) > 0n)).toBe(true);
     });
 
-    it('контракт требует для каждого из блоков 1–11 ровно тот публичный вход, что программа выдала в zkVM', async () => {
+    it('контракт требует для каждого блока цепочки ровно тот публичный вход, что программа выдала в zkVM', async () => {
         expect(inputs.map((input) => input.block)).toEqual(Array.from({ length: LAST_MESSAGE_BLOCK }, (_, index) => index + 1));
         for (const { block, required, proven } of inputs) {
             expect({ block, required }).toEqual({ block, required: proven });
@@ -221,63 +223,120 @@ describe('Rollup: полный цикл на блоках узла Reth, про�
         }
     });
 
-    it('блок 12: его очередь сообщениями больше не поставить, а на подложенной очереди публичный вход совпадает', async () => {
-        await restore(LAST_MESSAGE_BLOCK);
+    it('время блоков цепочки: первый — заданный сценарием, каждый следующий на секунду позже; батч принимается только в окне блока', async () => {
+        const times = rethExpected.blocks.map((block) => block.timestamp);
+        expect(times[0]).toBe(rethExpected.firstBlockTimestamp);
+        expect(times[times.length - 1]).toBe(rethExpected.lastBlockTimestamp);
+        expect(rethExpected.firstBlockTimestamp).toBeGreaterThanOrEqual(rethExpected.generatedAt);
+        for (let index = 1; index < times.length; index++) expect(times[index] - times[index - 1]).toBe(1);
+        // Вся цепочка умещается в наименьшее окно, с которым контракт фиксирует ключ.
+        expect(times[times.length - 1] - times[0]).toBeLessThan(constants.minMaxBlockAge);
+
+        // Блок 1 на свежем контракте, время L1 — ровно время блока: батч принят (граница
+        // включительно); тот же батч с временем блока на секунду позже «сейчас» — «из будущего».
+        // (Песочница не даёт вести время назад, поэтому раньше времени блока здесь не встать;
+        // обе границы по секунде на обычных батчах — tests/Rollup.spec.ts, «время блока».)
+        const maxBlockAge = (await rollup.getDeployment()).maxBlockAge;
+        const prepare = async (number: number, from: number) => {
+            await blockchain.loadFrom(afterBatch[number - 1]);
+            blockchain.now = Math.max(from, blockOf(Math.max(number - 1, 1)).timestamp + (number === 1 ? 0 : 60));
+            await enqueueUpTo(actors, blockOf(number).headAtBatch);
+            for (const data of dataChunksOf(reportOf(number))) {
+                await rollup.sendPublishData(owner.getSender(), { batchIndex: number, data, value: toNano('0.05') });
+            }
+            return batchRootsOf(reportOf(number));
+        };
+        const first = await prepare(1, blockOf(1).timestamp);
+        expect(blockchain.now).toBe(blockOf(1).timestamp);
+        expect((await submit({ ...first, blockTimestamp: first.blockTimestamp + 1n })).transactions).toHaveTransaction({
+            to: rollup.address,
+            success: false,
+            exitCode: RollupErrors.blockFromFuture,
+        });
+        expect((await submit(first)).transactions).toHaveTransaction({ to: rollup.address, success: true });
+
+        // Блок 2: ровно на границе возраста батч принят, секундой позже — «устарел» навсегда.
+        const block = blockOf(2);
+        for (const [delay, exitCode] of [[maxBlockAge + 1, RollupErrors.blockTooOld], [maxBlockAge, 0]] as const) {
+            const roots = await prepare(2, block.timestamp);
+            blockchain.now = block.timestamp + delay;
+            expect((await submit(roots)).transactions).toHaveTransaction({ to: rollup.address, success: exitCode === 0, exitCode });
+        }
+        expect((await rollup.getRollupState()).batchIndex).toBe(2);
+    });
+
+    it('блок 12: элементы наибольшей длины встают в очередь сообщениями; на байт длиннее контракт не берёт', async () => {
         const report = reportOf(12);
         const segment = rethExpected.queue.filter((item) => item.batch === 12);
         expect(segment).toHaveLength(constants.maxBatchQueueItems);
-        // Все элементы отрезка — принудительные транзакции длиннее предела; программа их пропустила.
         expect(report.forced).toHaveLength(segment.length);
+        // Каждый элемент отрезка — ровно предел контракта; каждый четвёртый включён (вывод со
+        // списком доступа), остальные — мусор, пропущенный программой.
+        const included = report.forced.filter((item) => item.outcome === 'included');
+        expect(included).toHaveLength(constants.maxBatchQueueItems / 4);
         for (const [index, item] of segment.entries()) {
             if (item.kind !== 'forced') throw new Error('в отрезке блока 12 ожидались только принудительные транзакции');
-            expect(hexBytes(item.bytes).length).toBeGreaterThan(MAX_FORCED_TX_BYTES);
-            expect(report.forced[index]).toEqual({ queueIndex: index, outcome: 'skipped', reason: 'TooLong' });
+            expect(hexBytes(item.bytes)).toHaveLength(MAX_FORCED_TX_BYTES);
+            expect(report.forced[index]).toEqual(
+                item.outcome === 'included'
+                    ? { queueIndex: index, outcome: 'included' }
+                    : { queueIndex: index, outcome: 'skipped', reason: 'Undecodable' },
+            );
         }
-        // Контракт такую транзакцию в очередь не берёт: отрезок блока 12 теперь недостижим, и
-        // пропуск по длине в программе остаётся защитой в глубину.
+        expect(report.withdrawals).toHaveLength(included.length);
+        // Батч 12 принят при подготовке — с очередью, поставленной сообщениями (тест публичного
+        // входа выше). На состоянии перед ним: тот же элемент в очередь встаёт, а удлинённый на
+        // байт — нет, и очередь от отказа не меняется.
+        await restore(11);
         const first = segment[0];
         if (first.kind !== 'forced') throw new Error('unreachable');
+        const fee = (await rollup.getQueueFees()).forceTransactionFee;
+        const before = (await rollup.getDepositQueue()).head;
         const refused = await rollup.sendForceTransaction(user.getSender(), {
-            l2Transaction: byteSnake(hexBytes(first.bytes)),
-            value: (await rollup.getQueueFees()).forceTransactionFee,
+            l2Transaction: byteSnake(Buffer.concat([hexBytes(first.bytes), Buffer.from([0])])),
+            value: fee,
         });
         expect(refused.transactions).toHaveTransaction({
             to: rollup.address,
             success: false,
             exitCode: RollupErrors.malformedForcedTransaction,
         });
-        expect((await rollup.getDepositQueue()).head.count).toBe(BigInt(blockOf(11).headAtBatch));
+        expect((await rollup.getDepositQueue()).head).toEqual(before);
+        const taken = await rollup.sendForceTransaction(user.getSender(), {
+            l2Transaction: forcedTransactionCell(hexBytes(first.bytes)),
+            value: fee,
+        });
+        expect(taken.transactions).toHaveTransaction({ to: rollup.address, success: true });
+        expect((await rollup.getDepositQueue()).head.count).toBe(before.count + 1n);
+    });
 
-        // Состояние после батча 11 с очередью блока 12 — подложено; хеш очереди посчитан вне
-        // контракта (той же формулой, что сверена с программой выше). Дайджест собирает контракт.
-        const previous = reportOf(11);
-        const head = blockOf(12).headAtBatch;
-        const planted: PlantedState = {
-            vkData: beginCell().endCell(),
-            withdrawalsRoot: BigInt(previous.publicValues.withdrawalsRoot),
-            withdrawalsCount: BigInt(previous.publicValues.withdrawalsCount),
-            batchIndex: 11n,
-            queue: {
-                head: { count: BigInt(head), hash: queueHashes[head] },
-                processed: { count: BigInt(previous.queueProcessedUpTo), hash: queueHashes[previous.queueProcessedUpTo] },
-                prunedCount: BigInt(previous.queueProcessedUpTo),
-            },
-        };
-        const twelfthConfig = { ...config, genesisStateRoot: BigInt(blockOf(11).hash) };
-        const contract = Rollup.createPlanted(twelfthConfig, planted, code);
-        await blockchain.setShardAccount(
-            contract.address,
-            createShardAccount({ address: contract.address, code, data: contract.init!.data, balance: toNano('1') }),
-        );
-        const twelfth = blockchain.openContract(contract);
-        blockchain.now = blockOf(12).timestamp + 60;
-        for (const data of dataChunksOf(report)) {
-            await twelfth.sendPublishData(owner.getSender(), { batchIndex: 12, data, value: toNano('0.05') });
+    it('вызовы моста с негодными подписями: в очередь контракта встают, программа их пропускает, батч принят', async () => {
+        // Контракт содержимое принудительной транзакции не разбирает: негодная подпись — дело
+        // программы. Блок 3 (он идёт в пруф) несёт по элементу на каждый вид; блок 13 — полный
+        // отрезок таких элементов. Оба батча приняты при подготовке с очередью из сообщений.
+        const kinds = ['rNotOnCurve', 'rZero', 'sZero', 'rOrder', 'rOrderPlusOne', 'rFieldModulus', 'rMax', 'sOrder', 'vFlipped', 'degenerate'];
+        for (const number of [3, 13]) {
+            const cases = rethExpected.badSignatures.filter((item) => item.block === number);
+            expect([...new Set(cases.map((item) => item.kind))].sort()).toEqual([...kinds].sort());
+            const report = reportOf(number);
+            for (const item of cases) {
+                const queued = rethExpected.queue[item.queueNumber - 1];
+                if (queued.kind !== 'forced') throw new Error('негодная подпись — у принудительной транзакции');
+                expect(queued.bytes).toBe(item.bytes);
+                expect(queued.batch).toBe(number);
+                expect(queued.outcome).toBe(item.expected);
+                // Исход со слов программы (нативный расчёт хоста; в zkVM блок исполнен с теми же
+                // публичными значениями).
+                const outcome = report.forced.find((forced) => forced.queueIndex === item.queueNumber - 1 - report.queueProcessedFrom);
+                expect(outcome).toEqual({
+                    queueIndex: item.queueNumber - 1 - report.queueProcessedFrom,
+                    outcome: 'skipped',
+                    reason: item.kind === 'vFlipped' ? 'Invalid(LackOfFunds)' : 'Signature',
+                });
+            }
+            expect(inputs[number - 1].required).toBe(inputs[number - 1].proven);
         }
-        const roots = batchRootsOf(report);
-        expect(await twelfth.getExpectedPublicInput(roots)).toBe(publicInputOf(report.publicValuesBytes));
-        expect((await submit(roots, twelfth)).transactions).toHaveTransaction({ to: twelfth.address, success: true });
-        expect((await twelfth.getRollupState()).stateRoot).toBe(BigInt(blockOf(12).hash));
+        expect(rethExpected.badSignatures.filter((item) => item.block === 13)).toHaveLength(constants.maxBatchQueueItems);
     });
 
     it('порядок очереди — часть протокола: те же элементы в другом порядке дают другой публичный вход', async () => {
@@ -311,7 +370,7 @@ describe('Rollup: полный цикл на блоках узла Reth, про�
         expect(await rollup.getExpectedPublicInput(batchRootsOf(report))).not.toBe(publicInputOf(report.publicValuesBytes));
     });
 
-    it('выводы через мост: листья блоков 2, 3 и 7 выплачиваются по доказательству против корня из батча, один раз', async () => {
+    it('выводы через мост: листья блоков 2, 3, 7 и 12 выплачиваются по доказательству против корня из батча, один раз', async () => {
         const withdrawWith = async (tree: ReturnType<typeof withdrawalTree>, leafIndex: number) => {
             const leaf = rethExpected.withdrawals[leafIndex];
             expect(leaf.leafIndex).toBe(leafIndex);
@@ -323,12 +382,17 @@ describe('Rollup: полный цикл на блоках узла Reth, про�
                 value: (await rollup.getMinimumValues()).withdraw,
             });
         };
-        // После батча 3 в дереве пять листьев; лист блока 7 ещё не существует.
+        // После батча 3 в дереве пять листьев; листья блоков 7 и 12 ещё не существуют.
+        const total = rethExpected.withdrawals.length;
+        const lastOfSeventh = withdrawalLeavesUpTo(7).length - 1;
+        expect(withdrawalLeavesUpTo(3)).toHaveLength(5);
+        expect(lastOfSeventh).toBe(5 + constants.maxBatchQueueItems - 1);
+        expect(rethExpected.withdrawals[total - 1].block).toBe(12);
         await restore(3);
         const early = withdrawalTree(withdrawalLeavesUpTo(3));
         const late = withdrawalTree(withdrawalLeavesUpTo(LAST_MESSAGE_BLOCK));
         expect((await rollup.getRollupState()).withdrawalsRoot).toBe(early.root);
-        const premature = await withdrawWith(late, 36);
+        const premature = await withdrawWith(late, lastOfSeventh);
         expect(premature.transactions).toHaveTransaction({ to: rollup.address, success: false, exitCode: RollupErrors.wrongMerkleProof });
         let paid = 0n;
         for (const leafIndex of [0, 4]) {
@@ -338,13 +402,13 @@ describe('Rollup: полный цикл на блоках узла Reth, про�
         }
         expect(await balanceOf(recipient)).toBe(paid);
 
-        // После батча 11 — все 37 листьев: старые листья выводятся по новому корню, новые — тоже.
+        // После последнего батча — все листья (5 + 32 + 8): старые выводятся по новому корню, новые — тоже.
         await restore(LAST_MESSAGE_BLOCK);
-        expect(rethExpected.withdrawals).toHaveLength(37);
+        expect(total).toBe(5 + constants.maxBatchQueueItems + constants.maxBatchQueueItems / 4);
         expect((await rollup.getRollupState()).withdrawalsRoot).toBe(late.root);
-        expect((await rollup.getRollupState()).withdrawalsCount).toBe(37n);
+        expect((await rollup.getRollupState()).withdrawalsCount).toBe(BigInt(total));
         paid = 0n;
-        for (const leafIndex of [0, 1, 2, 5, 36]) {
+        for (const leafIndex of [0, 1, 2, 5, lastOfSeventh, total - 1]) {
             const amount = BigInt(rethExpected.withdrawals[leafIndex].amount);
             expect((await withdrawWith(late, leafIndex)).transactions).toHaveTransaction({ from: rollup.address, to: recipient, value: amount });
             paid += amount;
@@ -356,7 +420,7 @@ describe('Rollup: полный цикл на блоках узла Reth, про�
             success: false,
             exitCode: RollupErrors.wrongMerkleProof,
         });
-        const again = await withdrawWith(late, 36);
+        const again = await withdrawWith(late, total - 1);
         expect(again.transactions).toHaveTransaction({ success: false, exitCode: NullifierErrors.alreadyClaimed });
         expect(await balanceOf(recipient)).toBe(paid);
     });
@@ -457,7 +521,7 @@ describe('Rollup: полный цикл на блоках узла Reth, про�
         expect(await rollup.getDepositReceipt(2)).toBeNull();
     });
 
-    it('очередь блоков 2–11 встаёт и на свежем контракте: сумма депозитов цепочки покрывает все её выплаты', async () => {
+    it('очередь всей цепочки встаёт и на свежем контракте: сумма депозитов цепочки покрывает все её выплаты', async () => {
         await restore(0);
         blockchain.now = blockOf(1).timestamp + 60;
         const deposited = await enqueueUpTo(actors, blockOf(LAST_MESSAGE_BLOCK).headAtBatch);

@@ -11,7 +11,7 @@ import {
     RETH_PROVEN_BLOCKS,
     rethProofStatus,
 } from '../wrappers/evmProofs';
-import { proofFixturesBlocker } from '../wrappers/protocolVersion';
+import { proofFixturesBlocker, proofSuiteMode } from '../wrappers/protocolVersion';
 import { NullifierErrors, Rollup, RollupErrors, VerifierErrors } from '../wrappers/Rollup';
 import { merkleProofCell, withdrawalTree } from '../wrappers/rollupMath';
 import {
@@ -54,11 +54,20 @@ const TX_GAS_LIMIT = 1_000_000;
 const SUITE = 'Rollup: пруфы SP1 блоков узла Reth, полный цикл';
 const status = rethProofStatus();
 const blocker = proofFixturesBlocker();
-if (blocker === null && status.current) {
+const mode = proofSuiteMode(blocker, status.current);
+if (mode === 'run') {
     describe(SUITE, suite);
-} else {
+} else if (mode === 'todo') {
+    // Пруфы в fixtures/ ещё прежнего протокола (PROOF_FIXTURES_PROTOCOL_VERSION не поднят).
     describe(SUITE, () => {
-        it.todo(`ждёт пруфов SP1 протокола v2 для блоков ${RETH_PROVEN_BLOCKS.join(', ')} цепочки Reth: ${blocker ?? status.reason}`);
+        it.todo(`ждёт пруфов SP1 протокола v2 для блоков ${RETH_PROVEN_BLOCKS.join(', ')} цепочки Reth: ${blocker}`);
+    });
+} else {
+    // Версия пруфов объявлена нынешней, а пруфы негодны: это падение, а не ожидание.
+    describe(SUITE, () => {
+        it(`пруфы SP1 блоков ${RETH_PROVEN_BLOCKS.join(', ')} цепочки Reth годны для нынешних программы, ключа и цепочки`, () => {
+            throw new Error(`пруфы объявлены пруфами протокола v2, но негодны: ${status.reason}`);
+        });
     });
 }
 

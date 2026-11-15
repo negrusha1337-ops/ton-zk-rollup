@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'fs';
 import path from 'path';
 import { Cell } from '@ton/core';
 import { Bn254Proof } from './Bn254Groth16Verifier';
+import { PROTOCOL_VERSION } from './protocolVersion';
 import { BatchRoots } from './Rollup';
 import { ExpectedRollupKey, RollupKeyFile, rollupKeyFromFile } from './rollupDeployment';
 import { BatchPublicValues, dataChunkCell } from './rollupMath';
@@ -144,7 +145,7 @@ function provenBatch(directory: string, report: EvmBatchReport): ProvenEvmBatch 
  */
 export const RETH_PROVEN_BLOCKS = [1, 2, 3];
 /** Сколько блоков в цепочке сценария (fixtures/evm_batches/reth/block-<N>.json). */
-export const RETH_CHAIN_BLOCKS = 12;
+export const RETH_CHAIN_BLOCKS = 15;
 const rethProofDirectory = (block: number) => `sp1_evm_reth${block}`;
 export const loadRethBatchReport = (block: number): EvmBatchReport => read('evm_batches', 'reth', `block-${block}.json`);
 
@@ -162,6 +163,12 @@ export type RethExpected = {
     /** Хеш заголовка генезиса цепочки: с ним обязана совпасть константа GENESIS_HASH контракта. */
     genesisHash: string;
     programElfSha256: string;
+    /** Когда сценарий запущен и время первого и последнего блока (unix); блоки идут через секунду. */
+    generatedAt: number;
+    firstBlockTimestamp: number;
+    lastBlockTimestamp: number;
+    /** Вызовы моста с негодными подписями: номер элемента очереди, вид и ожидаемый исход. */
+    badSignatures: { block: number; queueNumber: number; kind: string; bytes: string; expected: string; recoversTo: string | null }[];
     blocks: {
         number: number;
         note: string;
@@ -185,6 +192,40 @@ export type RethExpected = {
 export const loadRethExpected = (): RethExpected => read('evm_batches', 'reth', 'expected.json');
 
 /**
+ * Звенья цепочки привязки ДО пруфов: исходники → program.json → key.json и цепочка блоков
+ * (expected.json). Список расхождений; пустой — звенья сходятся. Чистая функция: тест подаёт
+ * ей подменённые копии объектов, не трогая фикстуры.
+ *   • program.json описывает нынешние исходники программы;
+ *   • key.json — ключ нынешнего протокола, выведен из тех же исходников, того же ключа
+ *     программы и того же ELF, что записаны в program.json;
+ *   • блоки цепочки исполнены тем же ELF (иначе пруфы и отчёты — от разных программ).
+ */
+export function rethBindingProblems(links: {
+    program: EvmProgramKeys;
+    key: Pick<RollupKeyFile, 'protocolVersion' | 'sourcesSha256' | 'programVKey' | 'programElfSha256'>;
+    expected: Pick<RethExpected, 'programElfSha256' | 'protocolVersion'>;
+    sourcesSha256: string;
+}): string[] {
+    const { program, key, expected, sourcesSha256 } = links;
+    const plain = (hex: string) => hex.replace(/^0x/, '');
+    const problems: string[] = [];
+    if (program.sourcesSha256 !== sourcesSha256) problems.push('fixtures/evm_batches/program.json описывает прежние исходники программы');
+    if (key.protocolVersion !== PROTOCOL_VERSION) {
+        problems.push(`key.json выведен для протокола v${key.protocolVersion}, а нынешний — v${PROTOCOL_VERSION}`);
+    }
+    if (key.sourcesSha256 !== program.sourcesSha256) problems.push('key.json выведен не из тех исходников программы, что записаны в program.json');
+    if (key.programVKey !== program.programVKey) problems.push('key.json выведен не из того ключа программы, что в program.json');
+    if (plain(key.programElfSha256) !== plain(program.programElfSha256)) problems.push('key.json выведен для другого ELF, чем записан в program.json');
+    if (expected.protocolVersion !== PROTOCOL_VERSION) {
+        problems.push(`цепочка Reth (expected.json) — протокола v${expected.protocolVersion}, а нынешний — v${PROTOCOL_VERSION}`);
+    }
+    if (plain(expected.programElfSha256) !== plain(program.programElfSha256)) {
+        problems.push('цепочка Reth (expected.json) исполнена другим ELF, чем записан в program.json');
+    }
+    return problems;
+}
+
+/**
  * Годны ли пруфы SP1 блоков Reth для сквозного теста и почему нет. Каждый запуск сценария даёт
  * новую цепочку: пруфы прежней цепочки не сойдутся по публичному входу.
  */
@@ -193,10 +234,14 @@ export function rethProofStatus(): { current: boolean; reason: string } {
         if (!existsSync(path.join(FIXTURES, ...required))) return { current: false, reason: `нет fixtures/${required.join('/')}` };
     }
     const program = loadEvmProgramKeys();
-    if (program.sourcesSha256 !== currentEvmSourcesSha256()) {
-        return { current: false, reason: 'fixtures/evm_batches/program.json описывает прежние исходники программы' };
-    }
     const key = read('evm_batches', 'key.json');
+    const binding = rethBindingProblems({
+        program,
+        key,
+        expected: loadRethExpected(),
+        sourcesSha256: currentEvmSourcesSha256(),
+    });
+    if (binding.length > 0) return { current: false, reason: binding.join('; ') };
     const problems: string[] = [];
     for (const block of RETH_PROVEN_BLOCKS) {
         const directory = rethProofDirectory(block);
@@ -208,7 +253,6 @@ export function rethProofStatus(): { current: boolean; reason: string } {
         const source = read(directory, 'source.json');
         const onchain = read(directory, 'onchain.json');
         const report = loadRethBatchReport(block);
-        if (key.programVKey !== program.programVKey) problem('ключ контракта выведен для другой программы');
         if (inputs[0] !== BigInt(program.programVKey)) problem('ключ программы не тот, что в program.json');
         if (inputs[2] !== 0n) problem('exitCode не ноль');
         if (inputs[3] !== BigInt(key.vkRoot)) problem('vkRoot не тот, что у закреплённого верификатора');
