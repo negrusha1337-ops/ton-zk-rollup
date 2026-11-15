@@ -5,7 +5,7 @@
   "maxForcedTxCells": 3,
   "maxForcedTxBytes": 256,
   "maxBatchQueueItems": 32,
-  "depositStepGas": 40000,
+  "depositStepGas": 45000,
   "forceTransactionStepGas": 50000,
   "depositFullQueue": 32748,
   "forceTransactionFullQueue": 36303,
