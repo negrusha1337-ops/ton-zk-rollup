@@ -1,0 +1,481 @@
+{
+  "source": "Сгенерировано zk/testnet-reth-report.mjs из транзакций testnet; не редактировать вручную",
+  "note": "Прогон в testnet полного цикла rollup на блоках узла Reth: депозиты на L1, три батча по Groth16-пруфам SP1, вывод через мост, заморозка, аварийные выходы двух счетов L2, возврат позднего депозита. Генезис цепочки пуст: все монеты L2 — из депозитов прогона. Честный сценарий, не проверка безопасности.",
+  "network": "testnet",
+  "contract": "EQCW7vpqX-b_69te9q-6VVSaIjwm-rusqGxM05lqinSPC1S7",
+  "genesisHash": "0x0598047b8adde700d2e815fe0c7436002f7c50ef32447aa4f4bf4c09e1a97789",
+  "transactions": 32,
+  "failed": 0,
+  "totalFeesNano": 213418434,
+  "valueReceivedNano": 1322522098,
+  "payouts": [
+    {
+      "what": "вывод через мост",
+      "amountNano": "100000000",
+      "count": 1
+    },
+    {
+      "what": "выход 0xa1ba30b3419d7b1da2a031ea6a38d4d377b678c2",
+      "amountNano": "389929008",
+      "count": 1
+    },
+    {
+      "what": "выход 0x40e3f9f4db87bd60244f0cbef8b5181f0cadfb98",
+      "amountNano": "300000000",
+      "count": 1
+    }
+  ],
+  "allPaidOnce": true,
+  "gas": {
+    "submitBatch": {
+      "testnet": [
+        950856,
+        950661,
+        950856
+      ],
+      "sandbox": [
+        950856,
+        950661,
+        950856
+      ],
+      "equal": true
+    },
+    "forceExitEvm": {
+      "testnet": [
+        71249,
+        71500
+      ],
+      "sandbox": [
+        71249,
+        71500
+      ],
+      "equal": true
+    },
+    "withdraw": {
+      "testnet": [
+        22944
+      ],
+      "sandbox": 22944
+    },
+    "publishData": {
+      "testnet": [
+        5056,
+        5056,
+        5056
+      ]
+    },
+    "deposit": {
+      "testnet": [
+        8566,
+        9766,
+        11086
+      ]
+    },
+    "activateEscapeHatch": {
+      "testnet": [
+        5259
+      ]
+    },
+    "cancelDeposit": {
+      "testnet": [
+        8075
+      ]
+    },
+    "payoutStep": {
+      "testnet": [
+        4417,
+        4417,
+        4417
+      ]
+    }
+  },
+  "steps": [
+    {
+      "step": "deploy",
+      "hash": "f752ef80c54571b78affaa9cdae112fae1ff63c0e6afb92c3e0ddf89d4fcda29",
+      "time": "2026-11-15T03:23:52.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 2186,
+      "totalFeesNano": 145734,
+      "valueNano": 50000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "70780f6497384a5efc2e58c40a22ab925687b564c38bcec26baa06486c3411d2",
+      "time": "2026-11-15T03:24:00.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 4555,
+      "totalFeesNano": 303673,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "00e739a6cfbaa4fcc3b6bf1f6dcb54b3a5b51888a0a1e743fdf4a071e71e2a6e",
+      "time": "2026-11-15T03:24:09.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 5603,
+      "totalFeesNano": 373543,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "3366f0a6138fe3f540b42c54b9091d12dd2403231475048060da168d380a6478",
+      "time": "2026-11-15T03:24:18.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6203,
+      "totalFeesNano": 413546,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "3826bb87ba5522a53dab09b12fe8abe7215c59a8450a77b79f4d4929ef482116",
+      "time": "2026-11-15T03:24:27.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6203,
+      "totalFeesNano": 413549,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "ebc8a939d224f5a62fbb74afa0b085d99aa3da2c22e90445ab8328b9fb11f51f",
+      "time": "2026-11-15T03:24:36.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6803,
+      "totalFeesNano": 453552,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "73fa971f0fae04f2037e9e800a9dd1b1fa8eeaac8aa4be7f09b0581957abf962",
+      "time": "2026-11-15T03:24:45.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6203,
+      "totalFeesNano": 413556,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "b2486b97f8e3b0e458a28e9debcaa49ea99e66bf3997c99cdb3d7df661713bbd",
+      "time": "2026-11-15T03:24:55.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6803,
+      "totalFeesNano": 453562,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "e1b7bb1b2215d6ffb84f120f48f70b8316a8eee1dc77d75e93e271f764649b84",
+      "time": "2026-11-15T03:25:04.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6803,
+      "totalFeesNano": 453562,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "0697133d453d4674be9b26ffe230d6669fe79d13b691c6d75141fb1de76b2940",
+      "time": "2026-11-15T03:25:14.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 7403,
+      "totalFeesNano": 493569,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "5099b05a9f153db8bd3563b04c55175591019d2c2a265229cb69d69d7acfe08d",
+      "time": "2026-11-15T03:25:23.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6203,
+      "totalFeesNano": 413569,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "1ac70d7ebe4195450bed3e6a762de4a54c73ad42624776af977d73d1cf5666c4",
+      "time": "2026-11-15T03:25:31.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6803,
+      "totalFeesNano": 453568,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "keyPart",
+      "hash": "5e1335a43205aaf4c63c0302b7220fe95c54e96eab6447dc557e0530b7cc236d",
+      "time": "2026-11-15T03:25:41.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 6803,
+      "totalFeesNano": 453580,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "setExitKey",
+      "hash": "18a2bc840fadced8cc7773c929b9346fd242afc582a08f0654ec0b8f04d5ab76",
+      "time": "2026-11-15T03:25:49.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 5816,
+      "totalFeesNano": 387773,
+      "valueNano": 3000000,
+      "out": []
+    },
+    {
+      "step": "keyFinalize",
+      "hash": "84f3e7b1ea372175aa51d24a714598e49d4aacf5bcdb03decb0e41d5e1163f3d",
+      "time": "2026-11-15T03:25:57.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 21596,
+      "totalFeesNano": 1439773,
+      "valueNano": 3000000,
+      "out": []
+    },
+    {
+      "step": "deposit",
+      "hash": "92e06d81a3901b0766489f4e33e3844d04fe001a1a8ba9bbd1f351296790332b",
+      "time": "2026-11-15T03:26:11.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 8566,
+      "totalFeesNano": 571135,
+      "valueNano": 510000000,
+      "out": []
+    },
+    {
+      "step": "publishData",
+      "hash": "dd654602c4690d6992f8cb1e323b8b8392fe5ab3bd7824b8ec9b32c2a796855b",
+      "time": "2026-11-15T03:26:20.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 5056,
+      "totalFeesNano": 337111,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "submitBatch",
+      "hash": "114ce84e83644fcb0e8be1ea0acb87bd10b3c0435a40513b8c94bacc879f80c5",
+      "time": "2026-11-15T03:26:30.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 950856,
+      "totalFeesNano": 63390454,
+      "valueNano": 72000000,
+      "out": []
+    },
+    {
+      "step": "deposit",
+      "hash": "15f8494b640e83e1d059e2fa93129168d3d52b23c360feb22e27c52fa2d27073",
+      "time": "2026-11-15T03:26:46.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 9766,
+      "totalFeesNano": 651145,
+      "valueNano": 310000000,
+      "out": []
+    },
+    {
+      "step": "publishData",
+      "hash": "4fc0d19214a4f75b18b170a47499bfb6d72ac86b4ce2597989e6e651d12e86a0",
+      "time": "2026-11-15T03:26:57.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 5056,
+      "totalFeesNano": 337121,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "submitBatch",
+      "hash": "83c8bb92af6319df78395ef5ad88f850c16c70310c290a6d33a518ab4ef4ca2c",
+      "time": "2026-11-15T03:27:08.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 950661,
+      "totalFeesNano": 63377459,
+      "valueNano": 72000000,
+      "out": []
+    },
+    {
+      "step": "publishData",
+      "hash": "aba4219ad1f96ee75ff7ccb7229f14d4e2a919b8ed939297beb2e293f36b77d2",
+      "time": "2026-11-15T03:27:20.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 5056,
+      "totalFeesNano": 337126,
+      "valueNano": 1000000,
+      "out": []
+    },
+    {
+      "step": "submitBatch",
+      "hash": "bb497dd2adf287bf1013b9675dc522b7127ff3d9c9ccaebf4f52e20681f8cdfc",
+      "time": "2026-11-15T03:27:33.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 950856,
+      "totalFeesNano": 63390468,
+      "valueNano": 72000000,
+      "out": []
+    },
+    {
+      "step": "withdraw",
+      "hash": "1e1ffd88cb87902bed3df7cb5fafd1b1c042cc682de71df47b0423000b22b922",
+      "time": "2026-11-15T03:27:52.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 22944,
+      "totalFeesNano": 1628224,
+      "valueNano": 6994339,
+      "out": [
+        {
+          "to": "1ba18f9cd65e7ade491b413e03b836b4f16afeb3a499b72d55614628dec5bdd3",
+          "valueNano": "5169137"
+        }
+      ]
+    },
+    {
+      "step": "nullifierClaimed",
+      "hash": "87d54222d6730f8e7ab66ab39b35c1fbe2c26e123b60d953723a6751d2f1b066",
+      "time": "2026-11-15T03:27:52.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 4417,
+      "totalFeesNano": 316689,
+      "valueNano": 4776602,
+      "out": [
+        {
+          "to": "508e0583958c68d9158a10427f75fc328bc94a3de7dd11bd96a95ed1b6fb8aee",
+          "valueNano": "100000000"
+        }
+      ]
+    },
+    {
+      "step": "deposit",
+      "hash": "289a1ce31dcdc4d2925ae68d41125c66c1f837ddad46d8caa6996c9134c3036f",
+      "time": "2026-11-15T03:28:34.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 11086,
+      "totalFeesNano": 739268,
+      "valueNano": 60000000,
+      "out": []
+    },
+    {
+      "step": "activateEscapeHatch",
+      "hash": "96f782151ff2219c3d94696f1ea371a1fb9ebe29ddba6b0a570564f7fd6d23e4",
+      "time": "2026-11-15T04:29:42.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 5259,
+      "totalFeesNano": 368048,
+      "valueNano": 2000000,
+      "out": []
+    },
+    {
+      "step": "forceExitEvm",
+      "hash": "ecbe7b08a719f795a27771fec12e814dcae92030d7c91464e8da54fca678cb72",
+      "time": "2026-11-15T04:29:56.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 71249,
+      "totalFeesNano": 4848534,
+      "valueNano": 37661008,
+      "out": [
+        {
+          "to": "68eb6f29c5cb3fa66e0d9a811162ace939fe670d0649ff0e3da6d64ef8f564ed",
+          "valueNano": "32615472"
+        }
+      ]
+    },
+    {
+      "step": "nullifierClaimed",
+      "hash": "d7e75ebdc25a49d3591aadf62cdf27b0a89cc8f5f7cfcaecd2d968b771e176f5",
+      "time": "2026-11-15T04:29:56.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 4417,
+      "totalFeesNano": 316689,
+      "valueNano": 32222937,
+      "out": [
+        {
+          "to": "508e0583958c68d9158a10427f75fc328bc94a3de7dd11bd96a95ed1b6fb8aee",
+          "valueNano": "389929008"
+        }
+      ]
+    },
+    {
+      "step": "forceExitEvm",
+      "hash": "f922dbd42c168ef247431c67a032683ae635bfc06ca4b02b649722bb98f85e60",
+      "time": "2026-11-15T04:30:39.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 71500,
+      "totalFeesNano": 4865405,
+      "valueNano": 37661008,
+      "out": [
+        {
+          "to": "b934ff36771a605abd2405f5999ae7be69297cf885d12f310618af11b3be1004",
+          "valueNano": "32598739"
+        }
+      ]
+    },
+    {
+      "step": "nullifierClaimed",
+      "hash": "6863d16f15356c22194b0883ebec3b710290d0f32628cd9f132ff164f2a7a995",
+      "time": "2026-11-15T04:30:39.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 4417,
+      "totalFeesNano": 316689,
+      "valueNano": 32206204,
+      "out": [
+        {
+          "to": "508e0583958c68d9158a10427f75fc328bc94a3de7dd11bd96a95ed1b6fb8aee",
+          "valueNano": "300000000"
+        }
+      ]
+    },
+    {
+      "step": "cancelDeposit",
+      "hash": "a331ebfec067d7fdbf672f359b0374b90dabf18a9b54e053daae3e0420801565",
+      "time": "2026-11-15T04:31:22.000Z",
+      "success": true,
+      "exitCode": 0,
+      "gasUsed": 8075,
+      "totalFeesNano": 560760,
+      "valueNano": 2000000,
+      "out": [
+        {
+          "to": "508e0583958c68d9158a10427f75fc328bc94a3de7dd11bd96a95ed1b6fb8aee",
+          "valueNano": "50000000"
+        }
+      ]
+    }
+  ]
+}
