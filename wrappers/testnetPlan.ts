@@ -384,3 +384,101 @@ export function payoutArrived(check: { before: bigint; after: bigint; sent: bigi
     if (check.tolerance >= check.amount) throw new Error('payoutArrived: допуск не меньше суммы выплаты — сверка ничего не значит');
     return check.after >= check.before - check.sent + check.amount - check.tolerance;
 }
+
+// --- нагрузка на сервис-секвенсор (scripts/sequencerTraffic.ts) ---
+
+/** Наименьший вывод через мост, нанотон: 0,05 TON (MIN_WITHDRAWAL_NANOTONS в zkvm-evm/lib/src/bridge.rs). */
+export const MIN_BRIDGE_WITHDRAWAL = 50_000_000n;
+/**
+ * Газ L2 принудительного вывода по наибольшей цене, нанотон: предел газа FORCED_TX_GAS_CAP
+ * (40 000) × maxFee 2 gwei (1 нанотон = 1 gwei). Столько обязано остаться на счёте L2 сверх вывода.
+ */
+export const FORCED_WITHDRAWAL_L2_GAS = 40_000n * 2n;
+
+/** Суммы одного депозита и одного принудительного вывода с его выплатой. */
+export type TrafficPrices = {
+    /** Сколько зачислится на L2 одним депозитом. */
+    depositAmount: bigint;
+    /** Плата за место депозита в очереди (getQueueFees). */
+    depositFee: bigint;
+    /** Сумма вывода через мост. */
+    withdrawAmount: bigint;
+    /** Всё, что прикладывается к ForceTransaction: плата за место и газ постановки. */
+    forceValue: bigint;
+    /** Сколько прикладывается к Withdraw (minimumValues контракта). */
+    withdrawValue: bigint;
+    /** Комиссия кошелька за одно сообщение (оценка сверху). */
+    walletFee: bigint;
+};
+
+export type TrafficPlan = {
+    /** Сколько раз за прогон наступит время действия (раз в `interval` секунд). */
+    ticks: number;
+    deposits: number;
+    withdrawals: number;
+    /** Сколько уйдёт с кошелька нагрузки за всё запланированное (с выплатами по выводам). */
+    spend: bigint;
+    /** Сколько вернётся выплатами по выводам. */
+    returns: bigint;
+    lost: bigint;
+    /** Бюджет кончится раньше времени: действий меньше, чем `ticks`. */
+    truncated: boolean;
+    /** Почему нагрузку с такими параметрами давать нельзя; пустой — можно. */
+    problems: string[];
+};
+
+/** Стоимость действий нагрузки: депозит; принудительный вывод вместе с Withdraw по его листу. */
+export const trafficCosts = (prices: TrafficPrices) => ({
+    deposit: prices.depositAmount + prices.depositFee + prices.walletFee,
+    withdrawal: prices.forceValue + prices.walletFee + prices.withdrawValue + prices.walletFee,
+});
+
+/**
+ * План нагрузки на сутки (или `duration` секунд): раз в `interval` секунд одно действие — депозит
+ * на новый счёт L2 либо, если есть счёт с уже обработанным депозитом и ключом, принудительный
+ * вывод с него через мост (каждый `withdrawEvery`-й депозит — со счёта, ключ которого хранится).
+ * План оптимистичен: депозит считается обработанным к следующему действию, так что выводов в нём
+ * наибольшее возможное число и стоимость — оценка сверху. Действия, не помещающиеся в бюджет,
+ * отбрасываются (`truncated`).
+ */
+export function trafficPlan(input: { interval: number; duration: number; budget: bigint; withdrawEvery: number; prices: TrafficPrices }): TrafficPlan {
+    const { interval, duration, budget, withdrawEvery, prices } = input;
+    const problems: string[] = [];
+    if (!Number.isInteger(interval) || interval < 60) problems.push(`интервал ${interval} с: не чаще раза в минуту (каждое действие ждёт подтверждения)`);
+    if (!Number.isInteger(duration) || duration < 1) problems.push(`длительность ${duration} с — не целое положительное число`);
+    if (!Number.isInteger(withdrawEvery) || withdrawEvery < 0) problems.push(`withdrawEvery ${withdrawEvery} — не целое неотрицательное число`);
+    if (prices.withdrawAmount < MIN_BRIDGE_WITHDRAWAL)
+        problems.push(`вывод ${prices.withdrawAmount} нанотон меньше наименьшего ${MIN_BRIDGE_WITHDRAWAL}: мост откатит вызов, листа не будет`);
+    if (prices.depositAmount < prices.withdrawAmount + FORCED_WITHDRAWAL_L2_GAS)
+        problems.push(`депозит ${prices.depositAmount} нанотон не покрывает вывод ${prices.withdrawAmount} и газ L2 ${FORCED_WITHDRAWAL_L2_GAS}: вывод программа пропустит (LackOfFunds)`);
+    const costs = trafficCosts(prices);
+    const ticks = problems.length > 0 ? 0 : Math.ceil(duration / interval);
+    let deposits = 0;
+    let withdrawals = 0;
+    let withdrawable = 0;
+    let spend = 0n;
+    let lastWasDeposit = false;
+    let truncated = false;
+    for (let tick = 0; tick < ticks; tick++) {
+        const withdraw: boolean = withdrawable > 0 && lastWasDeposit;
+        const cost = withdraw ? costs.withdrawal : costs.deposit;
+        if (spend + cost > budget) {
+            truncated = true;
+            break;
+        }
+        spend += cost;
+        if (withdraw) {
+            withdrawals++;
+            withdrawable--;
+        } else {
+            deposits++;
+            if (withdrawEvery > 0 && deposits % withdrawEvery === 0) withdrawable++;
+        }
+        lastWasDeposit = !withdraw;
+    }
+    const minimum = costs.deposit + (withdrawEvery > 0 ? costs.withdrawal : 0n);
+    if (problems.length === 0 && budget < minimum)
+        problems.push(`бюджет ${(Number(budget) / 1e9).toFixed(4)} TON меньше одного депозита${withdrawEvery > 0 ? ' и одного вывода' : ''} (${(Number(minimum) / 1e9).toFixed(4)} TON)`);
+    const returns = BigInt(withdrawals) * prices.withdrawAmount;
+    return { ticks, deposits, withdrawals, spend, returns, lost: spend - returns, truncated, problems };
+}

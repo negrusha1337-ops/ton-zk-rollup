@@ -127,11 +127,11 @@ describe('круг 21: окружение дочерних, группы про�
                 }
             }
             // Все известные запуски найдены: reth, хост и rsp, прувер, импорт, ssh/scp, проверка ключа
-            // (check и deploy).
+            // (check и deploy), подпись транзакций L2 нагрузки (evm-wallet.mjs, ключ — на stdin).
             expect(new Set(calls.map((call) => call.file))).toEqual(
                 new Set([
                     'sequencer/node.ts', 'sequencer/program.ts', 'sequencer/prover.ts', 'sequencer/proofImport.ts', 'sequencer/remoteProver.ts', 'sequencer/testnet.ts',
-                    'sequencer/deploy.ts',
+                    'sequencer/deploy.ts', 'sequencer/l2Keys.ts',
                 ]),
             );
             const unfiltered = calls.filter((call) => !/\benv(:\s*(childEnv\(|environment\(\))|\s*,)/.test(call.text));
