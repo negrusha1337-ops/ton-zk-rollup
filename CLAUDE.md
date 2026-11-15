@@ -294,7 +294,11 @@ npx blueprint run verifyRollupDeployment --testnet <адрес> <chainId> <ми�
   ДО того, как он станет проверенной вершиной, состояние в `.tools/sequencer/`; прувер и
   отправщик — интерфейсы с реализациями только для двойника. Порядок «свидетель до головы» и
   чего нет — `sequencer/README.md`. Форму принудительных сервис спрашивает у программы:
-  `rollup-evm-host --classify-forced`.
+  `rollup-evm-host --classify-forced`; сборку хоста сверяет с `program.json` через
+  `rollup-evm-host --identity` (при старте и по каждому отчёту). Судьбу принудительных — по
+  порядку (две одинаковые в отрезке законны, круг 18). Тесты сборщика без узла —
+  `tests/Sequencer{Units,Checks,Service,Queue,Submitter}.spec.ts`; каталог сквозного теста —
+  `.tools/sequencer-test/`, не каталог сервиса.
 - `contracts/bn254/` — программное спаривание BN254; `constants.tolk` генерируется
   `node zk/gen-bn254-constants.mjs`, эталонные векторы — `node zk/gen-bn254-vectors.mjs`,
   константы ключа, свидетель и подсказки — `node zk/gen-bn254-groth16-fixture.mjs [имя фикстуры]`;
