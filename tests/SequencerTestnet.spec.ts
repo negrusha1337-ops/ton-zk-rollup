@@ -18,7 +18,7 @@ import { BatchProof, jobKeyOf, LocalProver, Prover } from '../sequencer/prover';
 import { Interrupted, Sequencer, SequencerConfig } from '../sequencer/service';
 import { Batch, TestnetSubmitter, TestnetSubmitterOptions } from '../sequencer/submitter';
 import { assertTestnetEndpoint, SequencerWallet } from '../sequencer/ton';
-import { checkTestnet } from '../sequencer/testnet';
+import { checkTestnet, serve } from '../sequencer/testnet';
 import { fakeProveScript, rethJob } from './helpers/fakeProver';
 import { FAKE_CHAIN_ID, fakeNode, fakeQueue, fakeTools } from './helpers/fakeSequencerNode';
 import { blockOf, enqueueUpTo, reportOf } from './helpers/rethChain';
@@ -333,6 +333,11 @@ describe('TestnetSubmitter в Sandbox: настоящий контракт, ко
             const checkNow = (overrides = {}) =>
                 checkTestnet({ chain: net.chain, rollup: rollup.address, wallet, now: () => blockchain.now!, maxBlockAge: 1800, expectedProofTime: 600, ...overrides });
             expect((await checkNow()).problems).toEqual([]);
+            // Круг 21, 5а: кошелёк v4 — предупреждение (не отказ), v5r1 — без него.
+            const warning = /^ВНИМАНИЕ: кошелёк секвенсора v4 — рекомендуется WALLET_VERSION=v5r1 и отдельная мнемоника/;
+            expect((await checkNow()).lines).toContainEqual(expect.stringMatching(warning));
+            const v5 = await SequencerWallet.fromEnv({ WALLET_MNEMONIC: (await mnemonicNew()).join(' '), WALLET_VERSION: 'v5r1' });
+            expect((await checkNow({ wallet: v5 })).lines).not.toContainEqual(expect.stringMatching(warning));
             // Пруф по умолчанию (1800 с) в срок 1800 с не помещается; сеть не testnet; чужой кошелёк.
             expect((await checkNow({ expectedProofTime: 1800 })).problems).toEqual([expect.stringMatching(/^время проверки кандидата 300 с \+ время пруфа 1800 с/)]);
             net.control.globalId = -239;
@@ -343,6 +348,18 @@ describe('TestnetSubmitter в Sandbox: настоящий контракт, ко
                 'на кошельке 0 TON, нужно не меньше 0.2 TON',
             ]);
             expect(net.attempts).toHaveLength(sent);
+        }, 180_000);
+
+        (circuits ? it : it.skip)('круг 21, 2: негодный пруф (ProofRejected) в цикле run — код 2 и «ОСТАНОВКА», прувер не повторяется', async () => {
+            const fake = fakeProveScript(path.join(dir, 'fake'));
+            fake.behave({ proofOf: 1, corrupt: true });
+            blockchain.now = BLOCK.timestamp;
+            const prover = new LocalProver({ dir: path.join(dir, 'state', 'proofs'), script: fake.script });
+            const printed: string[] = [];
+            expect(await serve(service(prover), { pollSeconds: 0 }, (line) => printed.push(line))).toBe(2);
+            expect(printed.filter((line) => line.startsWith('ОСТАНОВКА: '))).toEqual([expect.stringMatching(/^ОСТАНОВКА: import-sp1-fixture\.mjs отказал/)]);
+            expect(fake.runs()).toHaveLength(1);
+            expect(net.attempts).toHaveLength(0);
         }, 180_000);
 
         it('А1 через отправщик testnet: батч мог уйти, а снимок контракта отстал — waiting; снимок догнал — пересборка', async () => {

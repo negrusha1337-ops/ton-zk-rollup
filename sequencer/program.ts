@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import path from 'path';
 import { EvmBatchReport } from '../wrappers/evmProofs';
-import { assertNotShuttingDown, track } from './children';
+import { assertNotShuttingDown, childEnv, track } from './children';
 
 // Вызовы программы батча: хост zkvm-evm (нативный расчёт той же библиотекой, что в zkVM) и
 // штатный rsp (вход блока: блок, заголовки предков и свидетель состояния от узла одним
@@ -34,7 +34,8 @@ export type ProcessResult = { code: number | null; signal?: string | null; stdou
  */
 export class ToolFailure extends Error {}
 
-const ENVIRONMENT = { ...process.env, SP1_PROVER: 'mock', RAYON_NUM_THREADS: '4' };
+/** Окружение хоста и rsp — без секретов сервиса (круг 21, пункт 3); собирается на каждый запуск. */
+const environment = () => childEnv({ SP1_PROVER: 'mock', RAYON_NUM_THREADS: '4' });
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const timeoutOf = (tools: ProgramTools) => tools.timeoutMs ?? (tools.executeInZkvm ? 30 : 10) * 60_000;
 
@@ -55,7 +56,7 @@ export function runNiced(
         return Promise.reject(error);
     }
     return new Promise((resolve, reject) => {
-        const child = track(spawn('nice', ['-n', '15', binary, ...args], { env: ENVIRONMENT }));
+        const child = track(spawn('nice', ['-n', '15', binary, ...args], { env: environment() }));
         const stdout: Buffer[] = [];
         const stderr: Buffer[] = [];
         child.stdout!.on('data', (chunk: Buffer) => stdout.push(chunk));

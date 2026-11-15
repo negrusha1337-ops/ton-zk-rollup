@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import { Cell } from '@ton/core';
 import { EvmBatchReport, publicInputOf } from '../wrappers/evmProofs';
-import { assertNotShuttingDown, track } from './children';
+import { assertNotShuttingDown, childEnv, track } from './children';
 import { jobKeyOf } from './jobKey';
 import type { BatchProof, ProverJob } from './prover';
 
@@ -62,7 +62,7 @@ export function rawProofProblems(raw: RawProof, job: ProverJob, keys: { programV
 function runScript(script: string, args: string[], timeoutMs: number): Promise<void> {
     assertNotShuttingDown(script);
     return new Promise((resolve, reject) => {
-        const child = track(spawn('nice', ['-n', '15', process.execPath, path.join(ROOT, 'zk', script), ...args], { cwd: ROOT }));
+        const child = track(spawn('nice', ['-n', '15', process.execPath, path.join(ROOT, 'zk', script), ...args], { cwd: ROOT, env: childEnv() }));
         const output: Buffer[] = [];
         child.stdout!.on('data', (chunk: Buffer) => output.push(chunk));
         child.stderr!.on('data', (chunk: Buffer) => output.push(chunk));

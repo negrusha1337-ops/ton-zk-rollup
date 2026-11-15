@@ -9,13 +9,18 @@ import { blockOf, reportOf } from './rethChain';
 //   codes  — коды выхода по запускам (0 — отдать пруф); кончились — 0;
 //   hang   — не выходить до SIGTERM (тогда — код 130, как trap сторожа);
 //   proofOf — номер блока, пруф которого отдать (чужой пруф);
-//   corrupt — испортить одно число пруфа (публичные значения прежние).
-// Журнал запусков — runs.json: начало и конец каждого запуска, переменные шардов из окружения.
+//   corrupt — испортить одно число пруфа (публичные значения прежние);
+//   spawnChild — запустить дочерний процесс с этой меткой в командной строке (живёт до 2 минут):
+//               как прувер у настоящего сторожа (круг 21, пункт 4: сироты после остановки). С hang
+//               на SIGTERM сторож ждёт выхода дочернего и только потом выходит с кодом 130 (как
+//               настоящий: trap гасит прувер) — дочерний сам SIGTERM не получает, его даёт группа.
+// Журнал запусков — runs.json: начало и конец каждого запуска, переменные шардов из окружения и
+// WALLET_MNEMONIC, если она дошла до сторожа (круг 21, пункт 3: не должна).
 
 const ROOT = path.join(__dirname, '..', '..');
 
-export type FakeProverBehaviour = { codes?: number[]; hang?: boolean; proofOf?: number; corrupt?: boolean; delayMs?: number };
-export type FakeProverRun = { input: string; start: number; end?: number; code?: number; elementThreshold?: string };
+export type FakeProverBehaviour = { codes?: number[]; hang?: boolean; proofOf?: number; corrupt?: boolean; delayMs?: number; spawnChild?: string };
+export type FakeProverRun = { input: string; start: number; end?: number; code?: number; elementThreshold?: string; walletMnemonic?: string };
 
 export function fakeProveScript(dir: string) {
     mkdirSync(dir, { recursive: true });
@@ -30,14 +35,16 @@ const args = process.argv.slice(2);
 const arg = (name) => args[args.indexOf(name) + 1];
 const b = JSON.parse(fs.readFileSync(${JSON.stringify(behaviourFile)}, 'utf8'));
 const runs = fs.existsSync(${JSON.stringify(runsFile)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(runsFile)}, 'utf8')) : [];
-const run = { input: path.basename(arg('--batch-input')), start: Date.now(), elementThreshold: process.env.ELEMENT_THRESHOLD };
+const run = { input: path.basename(arg('--batch-input')), start: Date.now(), elementThreshold: process.env.ELEMENT_THRESHOLD, walletMnemonic: process.env.WALLET_MNEMONIC };
 runs.push(run);
 const save = () => fs.writeFileSync(${JSON.stringify(runsFile)}, JSON.stringify(runs));
 save();
 const code = (b.codes || []).shift() ?? 0;
 fs.writeFileSync(${JSON.stringify(behaviourFile)}, JSON.stringify(b));
 const finish = (status) => { run.end = Date.now(); run.code = status; save(); process.exit(status); };
-if (b.hang) { process.on('SIGTERM', () => finish(130)); setInterval(() => {}, 1000); return; }
+const child = b.spawnChild ? require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)', b.spawnChild], { stdio: 'ignore' }) : null;
+const childExited = child ? new Promise((resolve) => child.once('exit', resolve)) : Promise.resolve();
+if (b.hang) { process.on('SIGTERM', () => childExited.then(() => finish(130))); setInterval(() => {}, 1000); return; }
 setTimeout(() => {
   if (code !== 0) { process.stderr.write('[сторож] код ' + code + '\\n'); return finish(code); }
   const block = b.proofOf ?? Number(/block-(\\d+)\\.bin$/.exec(arg('--batch-input'))[1]);

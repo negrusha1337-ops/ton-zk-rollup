@@ -3,7 +3,7 @@ import { randomBytes } from 'crypto';
 import { chmodSync, mkdirSync, writeFileSync } from 'fs';
 import path from 'path';
 import { BRIDGE_ADDRESS, BRIDGE_CODE, GENESIS_HASH, genesisJson } from './protocol';
-import { track } from './children';
+import { childEnv, track } from './children';
 import { NodeRpc, rpcClient } from './rpc';
 
 // Локальный узел reth v2.2.0 для сборщика: генезис протокола (мост-предустановка), JSON-RPC и
@@ -93,7 +93,7 @@ export async function startNode(options: NodeOptions): Promise<RunningNode> {
             '--log.file.directory',
             path.join(options.dir, 'logs'),
         ],
-        { stdio: 'ignore' },
+        { stdio: 'ignore', env: childEnv() },
     ));
     const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
     const rpcUrl = `http://127.0.0.1:${options.httpPort}`;

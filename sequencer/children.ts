@@ -12,8 +12,50 @@ import { ChildProcess } from 'child_process';
 // ожидания — SIGKILL всем дочерним и выход сразу (блокировку каталога снимает обработчик 'exit'
 // в lock.ts). С первого сигнала сервис в остановке: новые инструменты не запускаются (и
 // повторы после сбоя — тоже), запуск отвечает ShuttingDown.
+//
+// Круг 21, пункт 3: дочерним не передаются секреты сервиса (мнемоника кошелька, ключ API) —
+// окружение каждого запуска собирает `childEnv`. Пункт 4: сторож прувера запускает свои процессы
+// (прувер, gnark), и SIGTERM одному сторожу оставлял их сиротами. Такой дочерний запускается
+// своей группой процессов (`detached: true`, `track(child, { group: true })`), и сигнал идёт всей
+// группе (`signalChild`); после выхода главы группы оставшимся в ней — SIGKILL.
 
 const live = new Set<ChildProcess>();
+/** Дочерние, запущенные своей группой процессов: сигнал — всей группе. */
+const groups = new WeakSet<ChildProcess>();
+
+/** Переменные окружения сервиса, которые дочерним не передаются (круг 21, пункт 3). */
+export const SECRET_ENV = ['WALLET_MNEMONIC', 'TONCENTER_API_KEY'] as const;
+
+/** Окружение дочернего процесса: окружение сервиса и `extra`, без секретов (SECRET_ENV). */
+export function childEnv(extra: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+    for (const name of SECRET_ENV) delete env[name];
+    return env;
+}
+
+/** Сигнал дочернему, а запущенному группой — всей его группе (круг 21, пункт 4). */
+export function signalChild(child: ChildProcess, signal: NodeJS.Signals): void {
+    if (groups.has(child) && child.pid !== undefined) {
+        try {
+            process.kill(-child.pid, signal);
+            return;
+        } catch (error) {
+            // Группы уже нет (ESRCH) — сигнал самому процессу ниже.
+            if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+        }
+    }
+    child.kill(signal);
+}
+
+/** SIGKILL тем, кто остался в группе после выхода её главы. Группы нет — ничего. */
+function killGroupLeftovers(child: ChildProcess): void {
+    if (child.pid === undefined) return;
+    try {
+        process.kill(-child.pid, 'SIGKILL');
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+    }
+}
 let handlersInstalled = false;
 let stopping: string | null = null;
 
@@ -37,14 +79,14 @@ export function assertNotShuttingDown(what: string): void {
 export async function terminateChildren(graceMs = signalGrace.ms): Promise<void> {
     const children = [...live].filter(running);
     const exited = children.map((child) => new Promise<void>((resolve) => child.once('exit', () => resolve())));
-    children.forEach((child) => child.kill('SIGTERM'));
+    children.forEach((child) => signalChild(child, 'SIGTERM'));
     let timer: NodeJS.Timeout | undefined;
     await Promise.race([Promise.all(exited), new Promise((resolve) => (timer = setTimeout(resolve, graceMs)))]);
     clearTimeout(timer);
-    children.filter(running).forEach((child) => child.kill('SIGKILL'));
+    children.filter(running).forEach((child) => signalChild(child, 'SIGKILL'));
 }
 
-const killAll = () => live.forEach((child) => running(child) && child.kill('SIGKILL'));
+const killAll = () => live.forEach((child) => running(child) && signalChild(child, 'SIGKILL'));
 
 function onSignal(signal: NodeJS.Signals): void {
     if (stopping) {
@@ -63,11 +105,19 @@ function installHandlers() {
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(signal, onSignal);
 }
 
-/** Поставить процесс на учёт до его завершения. Во время остановки — сразу SIGKILL и ShuttingDown. */
-export function track(child: ChildProcess): ChildProcess {
+/**
+ * Поставить процесс на учёт до его завершения. Во время остановки — сразу SIGKILL и ShuttingDown.
+ * `group` — процесс запущен с `detached: true` (своя группа): сигналы — всей группе, а после его
+ * выхода оставшимся в группе — SIGKILL.
+ */
+export function track(child: ChildProcess, options: { group?: boolean } = {}): ChildProcess {
     installHandlers();
+    if (options.group) {
+        groups.add(child);
+        child.once('exit', () => killGroupLeftovers(child));
+    }
     if (stopping) {
-        child.kill('SIGKILL');
+        signalChild(child, 'SIGKILL');
         throw new ShuttingDown(`процесс ${child.spawnfile} не запускается: сервис останавливается по сигналу ${stopping}`);
     }
     live.add(child);

@@ -38,6 +38,7 @@ import {
     Rebuild,
     SequencerState,
     serialize,
+    StateDirBusy,
     StateDirLock,
     StateStore,
     writeAtomically,
@@ -137,6 +138,12 @@ export class Sequencer {
             this.close();
             throw error;
         }
+    }
+
+    /** Блокировка каталога состояния — всё ещё наша (отправщик — перед каждой отправкой, круг 21, 5в). */
+    assertLockHeld(): void {
+        if (!this.release) throw new StateDirBusy('сервис не держит блокировку каталога состояния (не запущен либо закрыт)');
+        this.release.assertHeld();
     }
 
     /** Снять блокировку каталога состояния. Экземпляр после этого не продвигается. */

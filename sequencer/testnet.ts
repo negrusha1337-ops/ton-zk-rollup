@@ -5,17 +5,17 @@ import { Address, fromNano, toNano } from '@ton/core';
 import { loadEvmRollupKey } from '../wrappers/evmProofs';
 import { PROTOCOL_VERSION } from '../wrappers/protocolVersion';
 import { PUBLISH_DATA_VALUE, SUBMIT_BATCH_VALUE } from '../wrappers/rollupValues';
-import { installSignalHandlers, ShuttingDown } from './children';
+import { childEnv, installSignalHandlers, ShuttingDown } from './children';
 import { DEFAULT_EXPECTED_CHECK_TIME, startBudgetProblem } from './deadline';
 import { startNode } from './node';
-import { DEFAULT_CIRCUITS_DIR } from './proofImport';
+import { DEFAULT_CIRCUITS_DIR, ProofRejected } from './proofImport';
 import { hostIdentity, identityMismatches, loadProgramKeys, ProgramTools } from './program';
 import { GENESIS_HASH } from './protocol';
 import { DEFAULT_PROVE_SCRIPT, DEFAULT_PROVER_ENV, LocalProver, ProverCancelled, ProverFailure, readEnvFile } from './prover';
 import { rateLimiter, TestnetQueueSource } from './queue/toncenter';
 import { QueueLagError } from './queue/types';
 import { DEFAULT_EXPECTED_PROOF_TIME, DEFAULT_PROGRAM_KEYS, DEFAULT_SUBMIT_MARGIN, Sequencer, SequencerConfig, SequencerStop } from './service';
-import { DEFAULT_STATE_DIR, lockStateDir } from './state';
+import { DEFAULT_STATE_DIR, lockStateDir, StateDirBusy } from './state';
 import { TestnetSubmitter } from './submitter';
 import { rollupOn, SequencerWallet, TESTNET_GLOBAL_ID, TonChain, ToncenterChain } from './ton';
 
@@ -25,7 +25,9 @@ import { rollupOn, SequencerWallet, TESTNET_GLOBAL_ID, TonChain, ToncenterChain 
 //           кошелёк (баланс), часы против L1, бюджет времени; локально — ключ программы против
 //           исходников (gen-evm-rollup-key --check), хост против program.json, прувер, узел;
 //   run   — те же проверки, затем узел reth, очередь toncenter, LocalProver, TestnetSubmitter и
-//           шаги сервиса в цикле. Остановка сервиса (SequencerStop) — код 2: нужен человек.
+//           шаги сервиса в цикле (`serve`). Остановка, где нужен человек (SequencerStop, отказ и
+//           сбой прувера, негодный пруф, чужая блокировка каталога) — код 2 и строка «ОСТАНОВКА»,
+//           и при старте, и в цикле; повторяется только сбой сети и индексатора.
 
 const ROOT = path.join(__dirname, '..');
 /** Меньше этого на кошельке секвенсора — отказ: не хватит и на один батч с комиссиями. */
@@ -86,6 +88,10 @@ export async function checkTestnet(options: {
         `кошелёк секвенсора ${options.wallet.address.toString({ testOnly: true })} (${options.wallet.version}): ${fromNano(wallet.balance)} TON, ` +
             `seqno ${wallet.seqno}${wallet.deployed ? '' : ', не развёрнут (развернётся первым сообщением)'}; батч стоит около ${fromNano(BATCH_COST_ESTIMATE)} TON`,
     );
+    // Круг 21, 5а: у v4 нет привязки подписи к сети (у v5r1 — global_id), а мнемоника в окружении
+    // сервиса — повод держать для секвенсора отдельный кошелёк.
+    if (options.wallet.version === 'v4')
+        lines.push('ВНИМАНИЕ: кошелёк секвенсора v4 — рекомендуется WALLET_VERSION=v5r1 и отдельная мнемоника только для секвенсора');
     if (wallet.balance < MIN_WALLET_BALANCE) problems.push(`на кошельке ${fromNano(wallet.balance)} TON, нужно не меньше ${fromNano(MIN_WALLET_BALANCE)} TON`);
     else if (wallet.balance < RECOMMENDED_WALLET_BALANCE) lines.push(`ВНИМАНИЕ: на кошельке меньше рекомендуемых ${fromNano(RECOMMENDED_WALLET_BALANCE)} TON`);
     return { lines, problems };
@@ -117,7 +123,7 @@ export async function checkLocal(options: TestnetOptions): Promise<CheckReport> 
     const lines: string[] = [];
     const problems: string[] = [];
     try {
-        execFileSync(process.execPath, [path.join(ROOT, 'zk', 'gen-evm-rollup-key.mjs'), '--check'], { cwd: ROOT, stdio: 'pipe' });
+        execFileSync(process.execPath, [path.join(ROOT, 'zk', 'gen-evm-rollup-key.mjs'), '--check'], { cwd: ROOT, stdio: 'pipe', env: childEnv() });
         lines.push('key.json сходится с исходниками программы и закреплённым верификатором (gen-evm-rollup-key --check)');
     } catch (error) {
         problems.push(`key.json не сходится с исходниками: ${String((error as { stderr?: Buffer }).stderr ?? error).trim().split('\n').pop()}`);
@@ -152,7 +158,7 @@ const nodeOptions = (options: TestnetOptions, chainId: bigint) => ({
 async function connect(options: TestnetOptions) {
     const limit = rateLimiter(options.apiKey ? 9 : 1);
     const chain = new ToncenterChain({ apiKey: options.apiKey, limit });
-    const wallet = await SequencerWallet.fromEnv();
+    const wallet = await SequencerWallet.fromProcessEnv();
     return { chain, wallet, limit };
 }
 
@@ -193,7 +199,19 @@ export async function run(options: TestnetOptions, print: (line: string) => void
         print('Сервис не запущен: сначала check.');
         return 1;
     }
-    const submitter = new TestnetSubmitter({ chain, rollup: options.rollup, wallet, stateDir: options.stateDir, log: print });
+    let service: Sequencer | null = null;
+    const submitter = new TestnetSubmitter({
+        chain,
+        rollup: options.rollup,
+        wallet,
+        stateDir: options.stateDir,
+        log: print,
+        // Перед каждой отправкой — своя ли ещё блокировка каталога (круг 21, 5в).
+        assertHeld: () => {
+            if (!service) throw new StateDirBusy('сервис ещё не создан: отправлять нечем');
+            service.assertLockHeld();
+        },
+    });
     const deployment = await submitter.deployment();
     const queueProbe = new TestnetQueueSource(options.rollup, { maxForcedTxCells: 0, maxForcedTxBytes: 0 }, { apiKey: options.apiKey, limit });
     const limits = await queueProbe.contract.getQueueLimits();
@@ -210,7 +228,7 @@ export async function run(options: TestnetOptions, print: (line: string) => void
         maxBlockAge: deployment.maxBlockAge,
         expectedProofTime: options.expectedProofTime,
     };
-    const service = new Sequencer(config, {
+    service = new Sequencer(config, {
         node: node.rpc,
         queue: new TestnetQueueSource(options.rollup, limits, { apiKey: options.apiKey, limit }),
         prover: new LocalProver({ dir: path.join(options.stateDir, 'proofs'), log: print }),
@@ -218,26 +236,60 @@ export async function run(options: TestnetOptions, print: (line: string) => void
         l1Now: () => submitter.l1Now(),
         log: print,
     });
-    const pause = (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
-    let failures = 0;
     try {
-        await service.start();
+        return await serve(service, { pollSeconds: options.pollSeconds }, print);
+    } finally {
+        await node.stop();
+    }
+}
+
+/**
+ * Где нужен человек: повтор не поможет (круг 21, пункты 2 и 5в). Негодный пруф (ProofRejected)
+ * повтор построил бы заново тем же входом — 15 минут и своп ради того же отказа; чужая
+ * блокировка каталога значит второй экземпляр сервиса.
+ */
+const needsHuman = (error: unknown): error is Error =>
+    error instanceof SequencerStop ||
+    error instanceof ProverFailure ||
+    error instanceof ProverCancelled ||
+    error instanceof ProofRejected ||
+    error instanceof StateDirBusy;
+
+/**
+ * Цикл сервиса: старт и шаги. Возвращает код выхода: 2 — остановка, где нужен человек (строка
+ * «ОСТАНОВКА: …»), 1 — остановка по сигналу. Сбой сети и индексатора повторяется; подряд
+ * `maxFailures` (10) — тоже остановка. Сервис закрывается в любом случае.
+ */
+export async function serve(
+    service: Pick<Sequencer, 'start' | 'step' | 'close'>,
+    options: { pollSeconds: number; maxFailures?: number },
+    print: (line: string) => void,
+): Promise<number> {
+    const pause = (seconds: number) => new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+    const stop = (error: Error) => (print(`ОСТАНОВКА: ${error.message}`), 2);
+    const maxFailures = options.maxFailures ?? 10;
+    try {
+        try {
+            await service.start();
+        } catch (error) {
+            if (needsHuman(error)) return stop(error);
+            if (error instanceof ShuttingDown) return 1;
+            throw error;
+        }
+        let failures = 0;
         for (;;) {
             try {
                 const result = await service.step();
                 failures = 0;
                 if (result.kind === 'waiting' || result.kind === 'idle') await pause(options.pollSeconds);
             } catch (error) {
-                if (error instanceof SequencerStop || error instanceof ProverFailure || error instanceof ProverCancelled) {
-                    print(`ОСТАНОВКА: ${error.message}`);
-                    return 2;
-                }
+                if (needsHuman(error)) return stop(error);
                 if (error instanceof ShuttingDown) return 1;
                 // Сеть, индексатор, сбой отправки: шаг повторяется; подряд много — остановка.
                 failures++;
                 print(`шаг не удался (${failures} подряд): ${(error as Error).message}${error instanceof QueueLagError ? ' — индексатор отстаёт' : ''}`);
-                if (failures >= 10) {
-                    print('ОСТАНОВКА: десять сбоев подряд — нужен человек');
+                if (failures >= maxFailures) {
+                    print(`ОСТАНОВКА: ${maxFailures} сбоев подряд — нужен человек`);
                     return 2;
                 }
                 await pause(options.pollSeconds);
@@ -245,6 +297,5 @@ export async function run(options: TestnetOptions, print: (line: string) => void
         }
     } finally {
         service.close();
-        await node.stop();
     }
 }

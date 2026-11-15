@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
 import { mkdirSync } from 'fs';
 import path from 'path';
-import { assertNotShuttingDown, track } from './children';
+import { assertNotShuttingDown, childEnv, track } from './children';
 import { jobKeyOf } from './jobKey';
 import { DEFAULT_CIRCUITS_DIR, importBatchProof, ImportOptions } from './proofImport';
 import { BatchProof, Prover, ProverFailure, ProverJob } from './prover';
@@ -38,7 +38,7 @@ export type RemoteProverOptions = {
 const spawnShell: Shell = (command, args) => {
     assertNotShuttingDown(command);
     return new Promise((resolve, reject) => {
-        const child = track(spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] }));
+        const child = track(spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env: childEnv() }));
         const chunks: Buffer[] = [];
         child.stdout!.on('data', (chunk: Buffer) => chunks.push(chunk));
         child.stderr!.on('data', (chunk: Buffer) => chunks.push(chunk));

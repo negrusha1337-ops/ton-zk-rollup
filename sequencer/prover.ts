@@ -2,7 +2,7 @@ import { ChildProcess, spawn } from 'child_process';
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'fs';
 import path from 'path';
 import { Bn254Proof } from '../wrappers/Bn254Groth16Verifier';
-import { assertNotShuttingDown, track } from './children';
+import { assertNotShuttingDown, childEnv, signalChild, track } from './children';
 import { jobKeyOf } from './jobKey';
 import { DEFAULT_CIRCUITS_DIR, importBatchProof, ImportOptions, ProofRejected } from './proofImport';
 import { deserialize, serialize, writeAtomically } from './state';
@@ -254,18 +254,19 @@ export class LocalProver implements Prover {
 
     private spawnGuard(job: ProverJob, rawProof: string): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
         assertNotShuttingDown('прувер');
-        const env = {
-            ...process.env,
-            ...readEnvFile(this.options.envFile ?? DEFAULT_PROVER_ENV),
-            ...this.options.extraEnv,
-        };
+        // Без секретов сервиса (круг 21, пункт 3).
+        const env = childEnv({ ...readEnvFile(this.options.envFile ?? DEFAULT_PROVER_ENV), ...this.options.extraEnv });
         const log = createWriteStream(path.join(this.jobDir(job), 'prove.log'), { flags: 'a' });
         return new Promise((resolve, reject) => {
             const child = track(
+                // Своя группа процессов (круг 21, пункт 4): отмена и остановка гасят и прувер, и всё,
+                // что запустил сторож, а не одного сторожа.
                 spawn(this.options.script ?? DEFAULT_PROVE_SCRIPT, ['--batch-input', job.batchInput, '--prove', '--proof-out', rawProof], {
                     env,
                     cwd: ROOT,
+                    detached: true,
                 }),
+                { group: true },
             );
             this.running.set(jobKeyOf(job), child);
             child.stdout!.pipe(log, { end: false });
@@ -289,12 +290,12 @@ export class LocalProver implements Prover {
             this.setStatus(job, { state: 'cancelled', attempts: this.status(job)?.attempts ?? 0, reason: 'блок пересобирается' });
         const child = this.running.get(key);
         if (!child) return;
-        // Сторож на SIGTERM гасит прувер (trap) и выходит; не успел — SIGKILL.
+        // SIGTERM — всей группе сторожа (и прувер, и его дочерние); не успели — SIGKILL группе.
         const exited = new Promise<void>((resolve) => child.once('close', () => resolve()));
-        child.kill('SIGTERM');
+        signalChild(child, 'SIGTERM');
         let timer: NodeJS.Timeout | undefined;
         const grace = new Promise<'timeout'>((resolve) => (timer = setTimeout(() => resolve('timeout'), this.options.cancelGraceMs ?? 15_000)));
-        if ((await Promise.race([exited, grace])) === 'timeout') child.kill('SIGKILL');
+        if ((await Promise.race([exited, grace])) === 'timeout') signalChild(child, 'SIGKILL');
         clearTimeout(timer);
         await exited;
         this.log(`блок ${job.number}: задание отменено, прувер погашен`);

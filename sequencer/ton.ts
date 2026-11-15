@@ -253,6 +253,18 @@ export class SequencerWallet {
         return new SequencerWallet(version, contract, sign);
     }
 
+    /**
+     * Кошелёк из окружения процесса; мнемоника после разбора удаляется из `process.env` (круг 21,
+     * пункт 3): дочерние процессы и всё, что читает окружение позже, её уже не увидят.
+     */
+    static async fromProcessEnv(): Promise<SequencerWallet> {
+        try {
+            return await SequencerWallet.fromEnv(process.env);
+        } finally {
+            delete process.env.WALLET_MNEMONIC;
+        }
+    }
+
     /** seqno и баланс кошелька на снимке (неразвёрнутый — seqno 0). */
     async state(snapshot: AccountSnapshot): Promise<{ seqno: number; balance: bigint; deployed: boolean }> {
         if (snapshot.state !== 'active') return { seqno: 0, balance: snapshot.balance, deployed: false };
