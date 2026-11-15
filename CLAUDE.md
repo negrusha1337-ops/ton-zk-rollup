@@ -266,6 +266,8 @@ python3 zkvm-evm/scenario/check-locks.py         # версии крейтов �
 python3 zk/rollup-mutation-check.py              # мутации контракта → bench/rollup-mutation-report.txt (около получаса; другие jest в это время не запускать)
 python3 zk/evm-exit-mutation-check.py            # мутации evm_exit.tolk → bench/evm-exit-mutation-report.txt
 node zk/gen-evm-exit-fixture.mjs                 # фикстура выхода счёта EVM (anvil в .tools/foundry; меняет файл целиком)
+npx jest --runInBand tests/SequencerReth.spec.ts   # сборщик блоков: узел Reth + хост + двойник в Sandbox (sequencer/README.md)
+npx ts-node sequencer/main.ts queue <адрес> [--from=N]   # очередь L1 контракта в testnet, сверенная с хешами (только чтение)
 npx blueprint run verifyRollupDeployment --testnet <адрес> <chainId> <мин. срок, с> <макс. срок, с> <макс. возраст блока, с> [sequencer=<адрес>] [owner=<адрес>]   # сверка развёрнутого контракта v2, ничего не шлёт
 ```
 
@@ -287,6 +289,12 @@ npx blueprint run verifyRollupDeployment --testnet <адрес> <chainId> <ми�
   `tests/RollupGenesis.spec.ts`).
 - `zkvm-evm/` — программа батча EVM v2, хост, сценарий Reth, мутации. `zkvm/` — игрушечный
   реестр v1, заморожен.
+- `sequencer/` — сборщик блоков как сервис (этап 2, шаг 1): очередь L1 из сообщений контракта
+  со сверкой по хешам, сборка через `testing_buildBlockV1`, проверка блока программой (хост)
+  ДО того, как он станет проверенной вершиной, состояние в `.tools/sequencer/`; прувер и
+  отправщик — интерфейсы с реализациями только для двойника. Порядок «свидетель до головы» и
+  чего нет — `sequencer/README.md`. Форму принудительных сервис спрашивает у программы:
+  `rollup-evm-host --classify-forced`.
 - `contracts/bn254/` — программное спаривание BN254; `constants.tolk` генерируется
   `node zk/gen-bn254-constants.mjs`, эталонные векторы — `node zk/gen-bn254-vectors.mjs`,
   константы ключа, свидетель и подсказки — `node zk/gen-bn254-groth16-fixture.mjs [имя фикстуры]`;
