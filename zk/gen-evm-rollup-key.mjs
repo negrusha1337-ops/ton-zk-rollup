@@ -8,18 +8,19 @@
 // привязан к хешу исходников — zk/evm-binding.mjs) и постоянных входов exitCode = 0, vkRoot,
 // nonce = 0. Результат: fixtures/evm_batches/key.json.
 //
-// КЛЮЧ ВЫХОДА — ЗАГЛУШКА. Контракт не фиксирует ключи без ключа программы аварийного выхода, а
-// такой программы для состояния EVM нет (находка 6-Б в REVIEW.md). Сюда подставлен ключ
-// программы выхода игрушечного реестра (fixtures/zkvm_batches/program.json): пруф выхода под
-// него для состояния EVM построить нельзя — слово состояния здесь хеш заголовка блока, а не
-// корень реестра. То есть у контракта с этим ключом аварийный выход НЕ РАБОТАЕТ; ключ годится
-// только для демонстрации приёма батча в Sandbox и testnet.
+// Протокол версии 2 (PROTOCOL-V2.md): ключ у контракта ОДИН — программы батча. Ключа программы
+// аварийного выхода нет: контракт v2 его не хранит и не требует при фиксации (шага SetExitKey
+// нет), баланс счёта после заморозки выходит без пруфа (ForceExitEvm). Прежняя заглушка — ключ
+// программы выхода игрушечного реестра — убрана вместе с зависимостью от fixtures/zkvm_batches.
+//
+// Поля exitKeyHash и exitIc0 в key.json оставлены НУЛЕВЫМИ только ради загрузчика
+// wrappers/evmProofs.ts (loadEvmRollupKey), который их ещё читает; ключа за ними нет. Убрать
+// вместе с правкой загрузчика.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { parseVerificationKey } from './bn254-onchain.mjs';
 import { EVM_FIXTURES, loadEvmProgramKeys } from './evm-binding.mjs';
-import { exitKeyCell, rollupKeyFor } from './gen-rollup-key.mjs';
-import { loadProgramKeys } from './program-binding.mjs';
+import { rollupKeyFor } from './gen-rollup-key.mjs';
 import {
     loadSp1Verifier,
     pinnedVersion,
@@ -31,33 +32,25 @@ import {
 const CIRCUIT_VERSION = 'v6.1.0';
 const KEY_FILE = path.join(EVM_FIXTURES, 'key.json');
 
-/** Ключ программы выхода игрушечного реестра — заглушка на месте ключа выхода EVM. */
-const placeholderExitVKey = () => loadProgramKeys({ requireFresh: false }).exitProgramVKey;
-
-function buildKeyFile(verifier, program, exitProgramVKey) {
+function buildKeyFile(verifier, program) {
     const batch = rollupKeyFor(verifier, program.programVKey);
-    const exit = rollupKeyFor(verifier, exitProgramVKey);
     if (batch.upload.table1Parts.length !== 0) throw new Error('У ключа контракта не должно быть второй таблицы');
-    const exitCell = exitKeyCell(batch.vkData, exit.upload.ic0);
-    if (!exitCell.hash().equals(exit.vkData.hash())) {
-        throw new Error('Ключ выхода, собранный из ключа батчей и своего IC0, не совпал с собранным напрямую');
-    }
     const hex = (cell) => '0x' + cell.hash().toString('hex');
     const boc = (cell) => cell.toBoc().toString('base64');
     return {
         source: 'Сгенерировано zk/gen-evm-rollup-key.mjs; не редактировать вручную',
-        note: 'Ключ rollup-контракта для программы батча EVM, выведенный из закреплённого верификатора SP1 и ключа программы, без пруфа. Ключ выхода — ЗАГЛУШКА (ключ программы выхода игрушечного реестра): аварийного выхода для состояния EVM нет.',
+        note: 'Ключ rollup-контракта (протокол версии 2) для программы батча EVM, выведенный из закреплённого верификатора SP1 и ключа программы, без пруфа. Ключа программы выхода в протоколе нет; поля exitKeyHash и exitIc0 — нулевые, оставлены для прежнего загрузчика.',
+        protocolVersion: 2,
         circuitVersion: verifier.circuitVersion,
         verifierHash: verifier.verifierHash,
         vkRoot: verifier.vkRoot,
         verifierConstantsSha256: verifier.constantsSha256,
         sourcesSha256: program.sourcesSha256,
         programVKey: program.programVKey,
-        exitProgramVKey,
-        exitKeyIsPlaceholder: true,
+        programElfSha256: program.programElfSha256,
         keyHash: hex(batch.vkData),
-        exitKeyHash: hex(exitCell),
-        exitIc0: exit.upload.ic0.map(String),
+        exitKeyHash: '0x0',
+        exitIc0: ['0', '0'],
         keyUpload: {
             ic0: batch.upload.ic0.map(String),
             alphaBetaBoc: boc(batch.upload.alphaBeta),
@@ -75,18 +68,17 @@ function generate() {
     if (verifier.circuitVersion !== CIRCUIT_VERSION) {
         throw new Error(`Ожидался верификатор ${CIRCUIT_VERSION}, в каталоге ${verifier.circuitVersion}`);
     }
-    const out = buildKeyFile(verifier, loadEvmProgramKeys(), placeholderExitVKey());
+    const out = buildKeyFile(verifier, loadEvmProgramKeys());
     mkdirSync(path.dirname(KEY_FILE), { recursive: true });
     writeFileSync(KEY_FILE, JSON.stringify(out) + '\n');
     console.log('Записано: fixtures/evm_batches/key.json');
     console.log(`  keyHash:     ${out.keyHash}`);
-    console.log(`  exitKeyHash: ${out.exitKeyHash} (заглушка)`);
     console.log(`  частей таблицы: ${out.keyUpload.table0PartsBoc.length}`);
 }
 
 /**
  * Сверка key.json: ключ схемы в нём — закреплённый, а всё остальное пересчитывается из него,
- * program.json программы EVM и ключа-заглушки и обязано совпасть. Возвращает список расхождений.
+ * program.json программы EVM и обязано совпасть. Возвращает список расхождений.
  */
 export function checkEvmKeyFile() {
     const stored = JSON.parse(readFileSync(KEY_FILE, 'utf8'));
@@ -102,7 +94,7 @@ export function checkEvmKeyFile() {
         vkRoot: pin.vkRoot,
         constantsSha256: pin.constantsSha256,
     };
-    const expected = buildKeyFile(verifier, loadEvmProgramKeys(), placeholderExitVKey());
+    const expected = buildKeyFile(verifier, loadEvmProgramKeys());
     return Object.keys({ ...expected, ...stored })
         .filter((field) => JSON.stringify(expected[field]) !== JSON.stringify(stored[field]))
         .map((field) => `поле ${field} не совпало с пересчитанным`);

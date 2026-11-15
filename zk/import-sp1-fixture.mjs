@@ -50,8 +50,9 @@ const KINDS = [
         elfField: 'exitProgramElfSha256',
         publicValuesBytes: 160,
     },
-    // Программа батча EVM (zkvm-evm/): свой program.json (fixtures/evm_batches/), те же восемь
-    // слов. Имя — sp1_evm_batch<номер блока>; пруф строит zkvm-evm/host --prove.
+    // Программа батча EVM (zkvm-evm/): свой program.json (fixtures/evm_batches/); публичные
+    // значения — одиннадцать слов протокола версии 2 (352 байта). Имя — sp1_evm_batch<номер
+    // блока>; пруф строит zkvm-evm/host --prove.
     {
         prefix: 'sp1_evm_batch',
         kind: 'batch',
@@ -59,7 +60,7 @@ const KINDS = [
         reportDirectory: 'contract',
         vkeyField: 'programVKey',
         elfField: 'programElfSha256',
-        publicValuesBytes: 256,
+        publicValuesBytes: 352,
     },
     // Та же программа на блоках узла Reth (zkvm-evm/scenario/reth-scenario.mjs): имя —
     // sp1_evm_reth<номер блока>, батч — fixtures/evm_batches/reth/block-<N>.json.
@@ -69,8 +70,8 @@ const KINDS = [
         evm: true,
         reportDirectory: 'reth',
         vkeyField: 'programVKey',
-        elfField: 'programElfSha256',
-        publicValuesBytes: 256,
+        elfField: 'programElfSha352',
+        publicValuesBytes: 352,
     },
 ];
 /**
