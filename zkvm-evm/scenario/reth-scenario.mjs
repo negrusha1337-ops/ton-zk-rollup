@@ -1,7 +1,11 @@
 // Сценарий на настоящем узле Reth: депозиты с L1 → блоки EVM → входы батчей и доказательство
 // счёта для аварийного выхода (фикстуры fixtures/evm_batches/reth/).
 //
-//   node zkvm-evm/scenario/reth-scenario.mjs
+//   node zkvm-evm/scenario/reth-scenario.mjs [адрес получателя выплат в TON]
+//
+// С адресом вывод через мост и оба аварийных выхода идут этому получателю (кошелёк будущего
+// прогона в testnet: согласие подписывается одноразовым ключом, переподписать его потом нельзя).
+// Без адреса получатели — ничьи адреса, годные только для Sandbox.
 //
 // Чем он отличается от anvil-scenario.sh. Генезис — с ПУСТЫМ состоянием: все монеты L2
 // появляются только из депозитов (REVIEW.md, 9-А). Блоки собирает сам сценарий через Engine API,
@@ -12,7 +16,13 @@
 // Блоки подобраны под правила очереди контракта: батч k обрабатывает то, что стояло в очереди
 // L1 на момент батча k−1.
 //   депозит 1 (счёт пользователя) → блок 1, пустой → депозит 2 → блок 2: зачисление депозита 1
-//   → блок 3: зачисление депозита 2, перевод и вывод через мост от пользователя.
+//   → блок 3: зачисление депозита 2, перевод и вывод через мост от пользователя
+//   → блок 4: пользователь создаёт контракт с тремя слотами хранилища
+//   → блок 5: контракт обнуляет один слот (REVIEW.md, 7-1).
+// Блок 5 — форма из находки 7-1: слоты подобраны так, что после удаления ключа в корневой ветке
+// дерева хранилища остаётся единственный потомок — ветка, и чтобы свернуть корень, её надо
+// раскрыть. Сценарий показывает, что свидетель узла её раскрывает и программа блок принимает;
+// что режим eth_getProof на таком блоке отказал бы, он НЕ проверяет.
 // Номер зачисления — его место в блоке, с нуля: Reth принимает любые номера, программа — нет.
 //
 // Ключ пользователя одноразовый (cast wallet new) и в файлы не попадает, поэтому каждый запуск
@@ -21,7 +31,7 @@
 // Блок становится головой и финальным сразу, а наш хост проверяет его уже после: недоказуемый
 // блок сценарий только обнаружит (и откажет), но не откатит. Инструменты вне репозитория (PROVING.md):
 // reth v2.2.0, cast (Foundry), rsp на коммите 5afe72eb; хост — zkvm-evm/target/release.
-// Нагрузка: узел, три исполнения блока в zkVM штатным rsp и три — нашим хостом, по одному.
+// Нагрузка: узел, пять исполнений блока в zkVM штатным rsp и пять — нашим хостом, по одному.
 import { execFileSync, spawn } from 'node:child_process';
 import { createHmac, randomBytes } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -29,6 +39,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
+import tonCore from '@ton/core';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TOOLS = process.env.EVM_TOOLS ?? path.join(ROOT, '.tools');
@@ -52,14 +63,25 @@ const AUTH = `http://127.0.0.1:${AUTH_PORT}`;
 const BRIDGE = '0x' + Buffer.from('ton-zk-rollup-bridge').toString('hex');
 const ZERO = '0x' + '00'.repeat(32);
 /** Депозиты в нанотонах (= gwei): что зачтётся на L2. */
-const USER_DEPOSIT = 2_000_000_000n;
-const OTHER_DEPOSIT = 1_500_000_000n;
-const OTHER = '0x' + '11'.repeat(20);
+const USER_DEPOSIT = 500_000_000n;
+const OTHER_DEPOSIT = 300_000_000n;
 const TRANSFER_TO = '0x' + '22'.repeat(20);
-const TRANSFER_WEI = 100_000_000_000_000_000n;
-/** Вывод через мост: 0,25 монеты получателю в TON с этим хешем адреса. */
-const WITHDRAW_WEI = 250_000_000_000_000_000n;
-const WITHDRAW_RECIPIENT = '0x' + '11'.repeat(32);
+const TRANSFER_WEI = 10_000_000_000_000_000n;
+/** Вывод через мост: 0,1 монеты. */
+const WITHDRAW_WEI = 100_000_000_000_000_000n;
+/** Получатель выплат в TON (basechain): заданный кошелёк либо ничьи адреса для Sandbox. */
+const payoutTo = process.argv[2] ? tonCore.Address.parse(process.argv[2]) : null;
+if (payoutTo && payoutTo.workChain !== 0) throw new Error('получатель выплат обязан быть в basechain');
+const WITHDRAW_RECIPIENT = payoutTo ? '0x' + payoutTo.hash.toString('hex') : '0x' + '11'.repeat(32);
+// Слоты 5 и 11: keccak ключей начинаются с одного полубайта (0) и расходятся на втором — под
+// корнем хранилища они дают ветку. Слот 2 — в другом полубайте (4): его и обнуляем.
+const KEPT_SLOTS = [5, 11];
+const DELETED_SLOT = 2;
+// Контракт: конструктор пишет единицу в три слота; код — «обнулить слот из первых 32 байт данных»
+// (PUSH1 0, PUSH1 0, CALLDATALOAD, SSTORE, STOP).
+const RUNTIME = '60006000355500';
+const INIT = [...KEPT_SLOTS, DELETED_SLOT].map((slot) => `6001${'60' + slot.toString(16).padStart(2, '0')}55`).join('');
+const CREATE_CODE = `0x${INIT}6007${'60' + (INIT.length / 2 + 12).toString(16).padStart(2, '0')}6000396007${'6000'}f3${RUNTIME}`;
 /** Метка согласия на аварийный выход — как EVM_EXIT_TAG в contracts/rollup/evm_exit.tolk. */
 const TAG = Buffer.from('ton-zk-rollup:evm-exit:v1');
 const ETH_PREFIX = Buffer.from('\x19Ethereum Signed Message:\n32');
@@ -220,9 +242,13 @@ try {
     const key = wallet.private_key ?? wallet.privateKey;
     const user = wallet.address.toLowerCase();
     if (!key || !user) fail('cast wallet new не выдал ключ и адрес');
+    // Второй счёт только получает депозит и ничего не делает: его баланс — ровно депозит.
+    const otherWallet = unwrap(JSON.parse(cast('wallet', 'new', '--json')))[0];
+    const otherKey = otherWallet.private_key ?? otherWallet.privateKey;
+    const other = otherWallet.address.toLowerCase();
     const deposits = [
         { l2Recipient: user, amount: USER_DEPOSIT },
-        { l2Recipient: OTHER, amount: OTHER_DEPOSIT },
+        { l2Recipient: other, amount: OTHER_DEPOSIT },
     ];
     const credit = ({ l2Recipient, amount }) => ({ address: l2Recipient, amount });
     const blocks = [await buildBlock([]), await buildBlock([credit(deposits[0])])];
@@ -244,12 +270,41 @@ try {
         const receipt = await call(HTTP, 'eth_getTransactionReceipt', [hash]);
         if (receipt?.status !== '0x1') fail('перевод на мост не состоялся');
     }
+    // Блоки 4 и 5: контракт с хранилищем и обнуление слота рядом с веткой (7-1).
+    const waitPending = async (count) => {
+        for (let attempt = 0; BigInt((await call(HTTP, 'txpool_status', [])).pending) < count; attempt++) {
+            if (attempt > 50) fail('транзакция не дошла до пула');
+            await sleep(200);
+        }
+    };
+    const createTx = cast('send', '--async', '--private-key', key, '--nonce', '2', '--gas-limit', '300000', '--gas-price', '2000000000',
+        '--priority-gas-price', '1000000000', '--rpc-url', HTTP, '--create', CREATE_CODE);
+    await waitPending(1n);
+    blocks.push(await buildBlock([]));
+    const created = await call(HTTP, 'eth_getTransactionReceipt', [createTx]);
+    if (created?.status !== '0x1' || !created.contractAddress) fail('контракт не создан');
+    const storageContract = created.contractAddress;
+    const slotAt = (slot, block) => call(HTTP, 'eth_getStorageAt', [storageContract, quantity(slot), block]);
+    for (const slot of [...KEPT_SLOTS, DELETED_SLOT]) if (BigInt(await slotAt(slot, '0x4')) !== 1n) fail('слот контракта не записан');
+    const clearTx = send(3, storageContract, 0n, '0x' + DELETED_SLOT.toString(16).padStart(64, '0'));
+    await waitPending(1n);
+    blocks.push(await buildBlock([]));
+    if ((await call(HTTP, 'eth_getTransactionReceipt', [clearTx]))?.status !== '0x1') fail('обнуление слота не состоялось');
+    if (BigInt(await slotAt(DELETED_SLOT, '0x5')) !== 0n) fail('слот не обнулён');
+    for (const slot of KEPT_SLOTS) if (BigInt(await slotAt(slot, '0x5')) !== 1n) fail('соседние слоты изменились');
+    // Форма дерева хранилища до удаления: в корневой ветке ровно два потомка, и сосед удаляемого
+    // ключа — ветка. Иначе блок 5 не тот случай, ради которого он заведён.
+    const slotKey = (slot) => keccak(word(BigInt(slot)));
+    if (new Set(KEPT_SLOTS.map((slot) => slotKey(slot)[0] >> 4)).size !== 1 || slotKey(DELETED_SLOT)[0] >> 4 === slotKey(KEPT_SLOTS[0])[0] >> 4) {
+        fail('слоты подобраны неверно: сосед удаляемого ключа не ветка');
+    }
 
     // --- входы батчей: свидетель от узла штатным rsp, затем наш хост (исполнение в zkVM без пруфа) ---
-    const queue = [[], [deposits[0]], [deposits[1]]];
+    const queue = [[], [deposits[0]], [deposits[1]], [], []];
+    const withdrawalLeaf = { recipientHash: WITHDRAW_RECIPIENT, amount: (WITHDRAW_WEI / 1_000_000_000n).toString() };
     let depositHash = ZERO;
     const reports = [];
-    for (let number = 1; number <= 3; number++) {
+    for (let number = 1; number <= blocks.length; number++) {
         run(RSP, [
             '--block-number', String(number), '--rpc-url', HTTP, '--genesis-path', genesisFile,
             '--cache-dir', path.join(WORK, 'cache'), '--report-path', path.join(WORK, 'rsp-report.csv'),
@@ -259,6 +314,8 @@ try {
         writeFileSync(witness, JSON.stringify({
             prevDepositHash: depositHash,
             deposits: queue[number - 1].map(({ l2Recipient, amount }) => ({ l2Recipient, amount: amount.toString() })),
+            // Дерево выводов программа пересчитывает целиком: вывод блока 3 — прежний лист для блоков 4 и 5.
+            priorWithdrawals: number > 3 ? [withdrawalLeaf] : [],
         }));
         run(HOST, [
             '--block-input', path.join(WORK, 'cache', 'input', CHAIN_ID.toString(), `${number}.bin`), '--chain-id', CHAIN_ID.toString(),
@@ -274,19 +331,24 @@ try {
         reports.push(report);
     }
 
-    // --- аварийный выход пользователя против блока 3: заголовок, eth_getProof, подпись ---
+    // --- аварийные выходы обоих счетов против блока 3: eth_getProof и подпись согласия ---
     const blockHash = bytes(blocks[2].blockHash);
-    const proof = await call(HTTP, 'eth_getProof', [user, [], '0x3']);
-    const recipientHash = keccak(Buffer.from('evm-exit-recipient-reth'));
+    const recipientHash = payoutTo ? payoutTo.hash : keccak(Buffer.from('evm-exit-recipient-reth'));
     const consent = keccak(TAG, word(CHAIN_ID), blockHash, recipientHash);
-    const signature = cast('wallet', 'sign', '--private-key', key, hex(consent));
-    const raw = bytes(signature);
-    const point = secp256k1.Signature.fromBytes(raw.subarray(0, 64), 'compact')
-        .addRecoveryBit(raw[64] - 27)
-        .recoverPublicKey(keccak(ETH_PREFIX, consent))
-        .toBytes(false);
-    if (hex(keccak(Buffer.from(point).subarray(1)).subarray(12)) !== user) fail('подпись согласия не восстанавливается в адрес пользователя');
-    if (!keccak(bytes(proof.accountProof[0])).equals(bytes(blocks[2].stateRoot))) fail('доказательство счёта не от корня состояния блока 3');
+    const exits = [];
+    for (const [account, secretKey] of [[user, key], [other, otherKey]]) {
+        const proof = await call(HTTP, 'eth_getProof', [account, [], '0x3']);
+        const signature = cast('wallet', 'sign', '--private-key', secretKey, hex(consent));
+        const raw = bytes(signature);
+        const point = secp256k1.Signature.fromBytes(raw.subarray(0, 64), 'compact')
+            .addRecoveryBit(raw[64] - 27)
+            .recoverPublicKey(keccak(ETH_PREFIX, consent))
+            .toBytes(false);
+        if (hex(keccak(Buffer.from(point).subarray(1)).subarray(12)) !== account) fail('подпись согласия не восстанавливается в адрес счёта');
+        if (!keccak(bytes(proof.accountProof[0])).equals(bytes(blocks[2].stateRoot))) fail('доказательство счёта не от корня состояния блока 3');
+        exits.push({ account, balanceWei: BigInt(proof.balance).toString(), accountProof: proof.accountProof, signature });
+    }
+    if (BigInt(exits[1].balanceWei) !== OTHER_DEPOSIT * 1_000_000_000n) fail('баланс второго счёта — не его депозит');
 
     writeFileSync(
         path.join(OUT, 'expected.json'),
@@ -306,16 +368,15 @@ try {
                 user,
                 // Очередь L1 в порядке постановки и номер батча, который обязан обработать элемент.
                 deposits: deposits.map(({ l2Recipient, amount }, index) => ({ l2Recipient, amount: amount.toString(), batch: index + 2 })),
-                withdrawal: { leafIndex: 0, recipientHash: WITHDRAW_RECIPIENT, amount: (WITHDRAW_WEI / 1_000_000_000n).toString() },
-                exit: {
-                    blockNumber: 3,
-                    account: user,
-                    balanceWei: BigInt(proof.balance).toString(),
-                    accountProof: proof.accountProof,
-                    recipientHash: hex(recipientHash),
-                    consentHash: hex(consent),
-                    signature,
-                },
+                withdrawal: { leafIndex: 0, ...withdrawalLeaf },
+                storageDeletion: { block: 5, contract: storageContract.toLowerCase(), deletedSlot: DELETED_SLOT, keptSlots: KEPT_SLOTS },
+                transferWei: TRANSFER_WEI.toString(),
+                // Аварийные выходы против блока 3: согласие обоих счетов — одному получателю.
+                exitBlock: 3,
+                exitRecipient: payoutTo ? payoutTo.toString({ testOnly: true }) : null,
+                exitRecipientHash: hex(recipientHash),
+                consentHash: hex(consent),
+                exits,
             },
             null,
             1,
@@ -323,7 +384,7 @@ try {
     );
     rmSync(FIXTURES, { recursive: true, force: true });
     cpSync(OUT, FIXTURES, { recursive: true });
-    console.log(`Записано: fixtures/evm_batches/reth/ — блоки 1–3 (${reports.map((report) => report.zkvmCycles).join(', ')} циклов), выход счёта ${user}: ${proof.accountProof.length} узла(ов), баланс ${BigInt(proof.balance)} wei`);
+    console.log(`Записано: fixtures/evm_batches/reth/ — блоки 1–5 (${reports.map((report) => report.zkvmCycles).join(', ')} циклов), выходы: ${exits.map((exit) => `${exit.account} — ${exit.balanceWei} wei`).join(', ')}`);
 } finally {
     node.kill();
 }

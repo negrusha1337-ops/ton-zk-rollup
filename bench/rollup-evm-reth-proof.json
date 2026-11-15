@@ -1,0 +1,18 @@
+{
+  "source": "Измерено в @ton/sandbox тестом tests/RollupEvmRethProof.spec.ts; не редактировать вручную",
+  "note": "Газ rollup-контракта на настоящих Groth16-пруфах SP1 трёх блоков узла Reth (депозиты зачислениями EIP-4895, перевод, вывод через мост) и аварийного выхода счёта против последнего из них. Генезис цепочки пуст.",
+  "gasLimit": 1000000,
+  "sourcesSha256": "2a50732b7a89e7a3d64b727bb26fee4990946bcf3db44955243a5b85ec2dd9f5",
+  "zkvmCycles": [
+    7493747,
+    7540185,
+    7960816
+  ],
+  "submitBatch1": 950856,
+  "submitBatch2": 950661,
+  "submitBatch3": 950856,
+  "withdrawStep": 22944,
+  "forceExitEvm1": 71249,
+  "forceExitEvm2": 71500,
+  "rejectedForgery": 950449
+}

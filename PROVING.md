@@ -297,7 +297,7 @@ npx jest tests/RollupEvmProof.spec.ts
 ### Сценарий на узле Reth
 
 ```bash
-node zkvm-evm/scenario/reth-scenario.mjs      # узел, три блока, свидетели, исполнение в zkVM без пруфа
+node zkvm-evm/scenario/reth-scenario.mjs [адрес получателя]   # узел, пять блоков, свидетели, исполнение в zkVM без пруфа
 npx jest tests/RollupEvmReth.spec.ts          # полный цикл на стороне TON (двойник)
 ```
 
@@ -310,7 +310,28 @@ Engine API (`engine_forkchoiceUpdatedV3` с зачислениями → `engine
 берёт одним запросом `debug_executionWitness`.
 
 Блоки: 1 — пустой (родитель — генезис), 2 — зачисление депозита пользователю, 3 — зачисление
-второго депозита, перевод и вывод через мост. В zkVM без пруфа: 7 493 747, 7 540 185, 7 961 116 циклов; публичные
-значения совпали с нативным расчётом. Программа не менялась: ELF и ключ те же, что у пруфа
-`fixtures/sp1_evm_batch2`. Пруфов этих блоков нет — они строятся только по команде.
+второго депозита, перевод и вывод через мост, 4 — создание контракта с хранилищем, 5 — обнуление
+слота рядом с веткой (находка 7-1). В zkVM без пруфа: 7 493 747, 7 540 185, 7 960 816, 7 994 404, 7 989 466 циклов; публичные значения совпали с
+нативным расчётом. Программа не менялась: ELF и ключ те же, что у пруфа `fixtures/sp1_evm_batch2`.
 
+Получатель выплат (вывод через мост и аварийные выходы обоих счетов) задаётся аргументом
+сценария — адресом кошелька будущего прогона в testnet; согласие подписывают одноразовые ключи,
+переподписать его после запуска нельзя.
+
+Пруфы блоков 1–3 (только по команде; переменные шардов — как в «Пруф блока EVM для контракта»):
+
+```bash
+zkvm-evm/host/verify-elf.sh && node zk/gen-evm-rollup-key.mjs --check
+for N in 1 2 3; do
+  zkvm-evm/host/prove-guarded.sh --batch-input fixtures/evm_batches/reth/block-$N.bin \
+    --prove --proof-out fixtures/evm_batches/proof-reth-block$N.json
+  node zk/import-sp1-fixture.mjs "$D/Groth16Verifier.sol" "$D/SP1VerifierGroth16.sol" \
+    fixtures/evm_batches/proof-reth-block$N.json sp1_evm_reth$N
+  node zk/gen-bn254-groth16-fixture.mjs sp1_evm_reth$N
+done
+npx jest tests/RollupEvmRethProof.spec.ts     # полный цикл на настоящем контракте
+```
+
+Повторный запуск сценария даёт новую цепочку: пруфы прежней становятся негодными (тест пометит
+себя ожидающим). Сырые пруфы лежат вне `fixtures/evm_batches/reth/` — сценарий этот каталог
+стирает.

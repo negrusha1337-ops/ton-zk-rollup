@@ -15,7 +15,7 @@ import {
     evmSignatureFromHex,
 } from '../wrappers/evmExit';
 import { EvmBatchReport, loadEvmProgramKeys, publicInputOf } from '../wrappers/evmProofs';
-import { Rollup } from '../wrappers/Rollup';
+import { NullifierErrors, Rollup } from '../wrappers/Rollup';
 import { batchDataHash, dataChunkCell, depositHash, merkleProofCell, withdrawalTree } from '../wrappers/rollupMath';
 import { computePhaseOf } from './helpers/gas';
 import { finalizeDummyKeys } from './helpers/rollupSetup';
@@ -143,6 +143,17 @@ describe('Rollup: полный цикл на блоках узла Reth', () => 
                 '0x' + loadEvmProgramKeys().programElfSha256.replace(/^0x/, ''),
             );
         }
+        // Блоки 4 и 5 (контракт с хранилищем и обнуление слота рядом с веткой, REVIEW.md 7-1)
+        // продолжают ту же цепочку и исполнены программой в zkVM: без этого сценарий не записал бы
+        // expected.json. Батчами в этом тесте они не становятся.
+        expect(expected.blocks.length).toBe(5);
+        expect(expected.storageDeletion.block).toBe(5);
+        for (const number of [4, 5]) {
+            const report = JSON.parse(readFileSync(path.join(FIXTURES, `block-${number}.json`), 'utf8'));
+            expect(report.publicValues.newStateRoot).toBe(expected.blocks[number - 1].hash);
+            expect(report.publicValues.prevStateRoot).toBe(expected.blocks[number - 2].hash);
+            expect(report.transactions).toBe(1);
+        }
         // Блок 1 очередь не трогает; блоки 2 и 3 обрабатывают по депозиту.
         expect(reports[0].publicValues.newDepositHash).toBe(reports[0].publicValues.prevDepositHash);
         expect(reports[1].publicValues.newDepositHash).not.toBe(reports[1].publicValues.prevDepositHash);
@@ -170,14 +181,19 @@ describe('Rollup: полный цикл на блоках узла Reth', () => 
         const tree = withdrawalTree([leaf]);
         expect(tree.root).toBe(BigInt(reports[2].publicValues.withdrawalsRoot));
         const withdrawTo = new Address(0, bytes(expected.withdrawal.recipientHash));
-        const withdraw = await rollup.sendWithdraw(stranger.getSender(), {
-            leafIndex: leaf.leafIndex,
-            recipient: withdrawTo,
-            amount: leaf.amount,
-            merkleProof: merkleProofCell(tree.proofFor(leaf.leafIndex)),
-            value: (await rollup.getMinimumValues()).withdraw,
-        });
-        expect(withdraw.transactions).toHaveTransaction({ from: rollup.address, to: withdrawTo, value: leaf.amount });
+        // Сколько каждый адрес обязан получить за весь тест (вывод и выходы могут идти одному получателю).
+        const owed = new Map<string, bigint>();
+        const credit = (to: Address, amount: bigint) => owed.set(to.toString(), (owed.get(to.toString()) ?? 0n) + amount);
+        const sendWithdraw = async () =>
+            rollup.sendWithdraw(stranger.getSender(), {
+                leafIndex: leaf.leafIndex,
+                recipient: withdrawTo,
+                amount: leaf.amount,
+                merkleProof: merkleProofCell(tree.proofFor(leaf.leafIndex)),
+                value: (await rollup.getMinimumValues()).withdraw,
+            });
+        expect((await sendWithdraw()).transactions).toHaveTransaction({ from: rollup.address, to: withdrawTo, value: leaf.amount });
+        credit(withdrawTo, leaf.amount);
 
         // --- секвенсор пропал: поздний депозит ждёт дольше срока, rollup замораживается ---
         const late = toNano('0.5');
@@ -187,58 +203,55 @@ describe('Rollup: полный цикл на блоках узла Reth', () => 
         await rollup.sendActivateEscapeHatch(stranger.getSender(), toNano('0.05'));
         expect((await rollup.getEscapeState()).frozen).toBe(true);
 
-        // --- аварийный выход пользователя: заголовок блока 3 из данных батча и eth_getProof от Reth ---
-        const exit = expected.exit;
+        // --- аварийные выходы обоих счетов: заголовок блока 3 из данных батча и eth_getProof от Reth ---
         const header = evmNodeItems(bytes(reports[2].dataChunksHex.join('')))[0];
         expect('0x' + Buffer.from(keccak_256(header)).toString('hex')).toBe(expected.blocks[2].hash);
-        expect(exit.account).toBe(expected.user);
-        const exitTo = new Address(0, bytes(exit.recipientHash));
-        const exitAmount = BigInt(exit.balanceWei) / WEI_PER_NANOTON;
-        // Баланс пользователя — его депозит минус перевод, вывод и газ двух транзакций.
-        expect(exitAmount).toBeLessThan(BigInt(first.amount) - leaf.amount - 100_000_000n);
-        expect(exitAmount).toBeGreaterThan(BigInt(first.amount) - leaf.amount - 100_000_000n - 1_000_000n);
-        expect(await rollup.getEvmExitConsentHash(BigInt(exit.recipientHash))).toBe(BigInt(exit.consentHash));
-        const exited = await rollup.sendForceExitEvm(stranger.getSender(), {
-            recipient: exitTo,
-            header: evmHeaderCell(header),
-            proof: evmProofCell(evmProofSteps((exit.accountProof as string[]).map(bytes))),
-            signature: evmSignatureCell(evmSignatureFromHex(exit.signature)),
-            value: (await rollup.getEvmExitBudget()).minValue,
-        });
-        expect(exited.transactions).toHaveTransaction({ from: rollup.address, to: exitTo, value: exitAmount });
+        const exitTo = new Address(0, bytes(expected.exitRecipientHash));
+        expect(await rollup.getEvmExitConsentHash(BigInt(expected.exitRecipientHash))).toBe(BigInt(expected.consentHash));
+        const exits = expected.exits as { account: string; balanceWei: string; accountProof: string[]; signature: string }[];
+        expect(exits.map((exit) => exit.account)).toEqual([expected.user, second.l2Recipient]);
+        const amounts = exits.map((exit) => BigInt(exit.balanceWei) / WEI_PER_NANOTON);
+        // Пользователь: депозит минус перевод, вывод и газ двух транзакций (меньше 0,001 монеты).
+        const spent = BigInt(expected.transferWei) / WEI_PER_NANOTON + leaf.amount;
+        expect(amounts[0]).toBeLessThan(BigInt(first.amount) - spent);
+        expect(amounts[0]).toBeGreaterThan(BigInt(first.amount) - spent - 1_000_000n);
+        // Второй счёт только получил депозит: его баланс — ровно депозит.
+        expect(amounts[1]).toBe(BigInt(second.amount));
+        const sendExit = async (index: number) =>
+            rollup.sendForceExitEvm(stranger.getSender(), {
+                recipient: exitTo,
+                header: evmHeaderCell(header),
+                proof: evmProofCell(evmProofSteps(exits[index].accountProof.map(bytes))),
+                signature: evmSignatureCell(evmSignatureFromHex(exits[index].signature)),
+                value: (await rollup.getEvmExitBudget()).minValue,
+            });
+        for (const index of [0, 1]) {
+            expect((await sendExit(index)).transactions).toHaveTransaction({ from: rollup.address, to: exitTo, value: amounts[index] });
+            credit(exitTo, amounts[index]);
+        }
+
+        // Повтор вывода и выходов второй раз не платит (деньги на контракте ещё есть: отказ — от нуллификатора).
+        expect((await sendWithdraw()).transactions).not.toHaveTransaction({ from: rollup.address, to: withdrawTo });
+        for (const index of [0, 1]) {
+            const again = await sendExit(index);
+            expect(again.transactions).toHaveTransaction({ success: false, exitCode: NullifierErrors.alreadyClaimed });
+            expect(again.transactions).not.toHaveTransaction({ from: rollup.address, to: exitTo });
+        }
 
         // --- поздний депозит возвращается вносителю: денег хватает, потому что всё обеспечено ---
         const refund = await rollup.sendCancelDeposit(stranger.getSender(), { depositIndex: 3, value: toNano('0.05') });
         expect(refund.transactions).toHaveTransaction({ from: rollup.address, to: stranger.address, value: late });
 
-        // Каждый получатель получил ровно свою сумму и ни нанотоном больше (адреса новые: баланс —
-        // это и есть полученное), а повтор вывода и выхода второй раз не платит.
+        // Каждый получатель получил ровно своё и ни нанотоном больше (адреса новые: баланс — это и
+        // есть полученное).
         const balanceOf = async (address: Address) => (await blockchain.getContract(address)).balance;
-        expect(await balanceOf(withdrawTo)).toBe(leaf.amount);
-        expect(await balanceOf(exitTo)).toBe(exitAmount);
-        const withdrawAgain = await rollup.sendWithdraw(stranger.getSender(), {
-            leafIndex: leaf.leafIndex,
-            recipient: withdrawTo,
-            amount: leaf.amount,
-            merkleProof: merkleProofCell(tree.proofFor(leaf.leafIndex)),
-            value: (await rollup.getMinimumValues()).withdraw,
-        });
-        expect(withdrawAgain.transactions).not.toHaveTransaction({ from: rollup.address, to: withdrawTo });
-        const exitAgain = await rollup.sendForceExitEvm(stranger.getSender(), {
-            recipient: exitTo,
-            header: evmHeaderCell(header),
-            proof: evmProofCell(evmProofSteps((exit.accountProof as string[]).map(bytes))),
-            signature: evmSignatureCell(evmSignatureFromHex(exit.signature)),
-            value: (await rollup.getEvmExitBudget()).minValue,
-        });
-        expect(exitAgain.transactions).not.toHaveTransaction({ from: rollup.address, to: exitTo });
-        expect(await balanceOf(withdrawTo)).toBe(leaf.amount);
-        expect(await balanceOf(exitTo)).toBe(exitAmount);
+        for (const address of [withdrawTo, exitTo]) expect(await balanceOf(address)).toBe(owed.get(address.toString()));
 
         // Грубая сверка остатка: на контракте не меньше того, что ещё числится на L2 за другими
         // счетами. Строгой она не является — на контракте лежат ещё комиссии и остатки сообщений;
-        // точность даёт проверка выше: каждая выплата — ровно своя сумма и один раз.
-        const remaining = BigInt(first.amount) + BigInt(second.amount) - leaf.amount - exitAmount;
+        // точность даёт проверка выше.
+        const remaining = BigInt(first.amount) + BigInt(second.amount) - leaf.amount - amounts[0] - amounts[1];
+        expect(remaining).toBeGreaterThan(0n);
         expect(await balanceOf(rollup.address)).toBeGreaterThanOrEqual(remaining);
     });
 
@@ -271,7 +284,7 @@ describe('Rollup: полный цикл на блоках узла Reth', () => 
         await rollup.sendDeposit(stranger.getSender(), { l2Recipient: 0xdeadn, value: toNano('0.5') + depositFee, maxFee: depositFee });
         blockchain.now = START + TIMEOUT + 1;
         await rollup.sendActivateEscapeHatch(stranger.getSender(), toNano('0.05'));
-        const exit = expected.exit;
+        const exit = expected.exits[0];
         const thief = await blockchain.treasury('thief');
         const result = await rollup.sendForceExitEvm(stranger.getSender(), {
             // Получатель — посторонний кошелёк, а согласие подписано под другой адрес.

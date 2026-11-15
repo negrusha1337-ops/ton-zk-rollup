@@ -114,9 +114,10 @@ export type ProvenEvmBatch = {
 };
 
 /** Пруф SP1 блока EVM вместе с подсказками для контракта и данными батча. */
-export function loadProvenEvmBatch(): ProvenEvmBatch {
-    const raw = read(PROOF_DIRECTORY, 'proof.json');
-    const report = loadEvmBatchReport();
+export const loadProvenEvmBatch = (): ProvenEvmBatch => provenBatch(PROOF_DIRECTORY, loadEvmBatchReport());
+
+function provenBatch(directory: string, report: EvmBatchReport): ProvenEvmBatch {
+    const raw = read(directory, 'proof.json');
     return {
         proof: {
             a: [BigInt(raw.pi_a[0]), BigInt(raw.pi_a[1])],
@@ -126,8 +127,8 @@ export function loadProvenEvmBatch(): ProvenEvmBatch {
             ],
             c: [BigInt(raw.pi_c[0]), BigInt(raw.pi_c[1])],
         },
-        hinted: (read(PROOF_DIRECTORY, 'onchain.json') as { hinted: HintedFixture }).hinted,
-        publicInputs: (read(PROOF_DIRECTORY, 'public.json') as string[]).map(BigInt),
+        hinted: (read(directory, 'onchain.json') as { hinted: HintedFixture }).hinted,
+        publicInputs: (read(directory, 'public.json') as string[]).map(BigInt),
         report,
         roots: {
             newStateRoot: BigInt(report.publicValues.newStateRoot),
@@ -136,3 +137,55 @@ export function loadProvenEvmBatch(): ProvenEvmBatch {
         dataChunks: report.dataChunksHex.map((hex) => dataChunkCell(Buffer.from(hex, 'hex'))),
     };
 }
+
+// --- блоки узла Reth (zkvm-evm/scenario/reth-scenario.mjs): батчи 1–3 идут под пруфы ---
+
+/** Блоки цепочки Reth, которые принимает настоящий контракт: батч k — блок k. */
+export const RETH_PROVEN_BLOCKS = [1, 2, 3];
+const rethProofDirectory = (block: number) => `sp1_evm_reth${block}`;
+export const loadRethBatchReport = (block: number): EvmBatchReport & { programElfSha256: string } =>
+    read('evm_batches', 'reth', `block-${block}.json`);
+export const loadRethExpected = () => read('evm_batches', 'reth', 'expected.json');
+
+/**
+ * Годны ли пруфы SP1 блоков Reth для сквозного теста и почему нет. Каждый запуск сценария даёт
+ * новую цепочку: пруфы прежней цепочки не сойдутся по публичному входу.
+ */
+export function rethProofStatus(): { current: boolean; reason: string } {
+    for (const required of [['evm_batches', 'program.json'], ['evm_batches', 'key.json'], ['evm_batches', 'reth', 'expected.json']]) {
+        if (!existsSync(path.join(FIXTURES, ...required))) return { current: false, reason: `нет fixtures/${required.join('/')}` };
+    }
+    const program = loadEvmProgramKeys();
+    if (program.sourcesSha256 !== currentEvmSourcesSha256()) {
+        return { current: false, reason: 'fixtures/evm_batches/program.json описывает прежние исходники программы' };
+    }
+    const key = read('evm_batches', 'key.json');
+    const problems: string[] = [];
+    for (const block of RETH_PROVEN_BLOCKS) {
+        const directory = rethProofDirectory(block);
+        if (!['proof.json', 'public.json', 'source.json', 'onchain.json'].every((name) => existsSync(path.join(FIXTURES, directory, name)))) {
+            return { current: false, reason: `${directory}: пруфа нет` };
+        }
+        const problem = (text: string) => problems.push(`${directory}: ${text}`);
+        const inputs = (read(directory, 'public.json') as string[]).map(BigInt);
+        const source = read(directory, 'source.json');
+        const onchain = read(directory, 'onchain.json');
+        const report = loadRethBatchReport(block);
+        if (key.programVKey !== program.programVKey) problem('ключ контракта выведен для другой программы');
+        if (inputs[0] !== BigInt(program.programVKey)) problem('ключ программы не тот, что в program.json');
+        if (inputs[2] !== 0n) problem('exitCode не ноль');
+        if (inputs[3] !== BigInt(key.vkRoot)) problem('vkRoot не тот, что у закреплённого верификатора');
+        if (inputs[4] !== 0n) problem('нонс не ноль');
+        if (source.kind !== 'batch' || source.program !== 'evm') problem('это не пруф программы батча EVM');
+        if (source.elfSha256 !== program.programElfSha256) problem('построен для другого ELF, чем записан в program.json');
+        if (report.programElfSha256.replace(/^0x/, '') !== program.programElfSha256.replace(/^0x/, '')) problem('блок исполнен другим ELF');
+        if (inputs[1] !== publicInputOf(report.publicValuesBytes)) problem('публичный вход не тот, что даёт блок нынешней цепочки Reth');
+        if (JSON.stringify(source.variableInputs) !== '[1]') problem('переменных входов должно быть ровно один (дайджест)');
+        const vkHash = '0x' + Cell.fromBase64(onchain.hinted.vkDataBoc).hash().toString('hex');
+        if (vkHash !== key.keyHash) problem('ключ контракта не тот, что выведен из исходников (key.json)');
+    }
+    return { current: problems.length === 0, reason: problems.join('; ') };
+}
+
+/** Пруф SP1 блока Reth вместе с подсказками для контракта и данными батча. */
+export const loadProvenRethBatch = (block: number): ProvenEvmBatch => provenBatch(rethProofDirectory(block), loadRethBatchReport(block));

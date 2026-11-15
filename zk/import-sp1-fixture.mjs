@@ -56,6 +56,18 @@ const KINDS = [
         prefix: 'sp1_evm_batch',
         kind: 'batch',
         evm: true,
+        reportDirectory: 'contract',
+        vkeyField: 'programVKey',
+        elfField: 'programElfSha256',
+        publicValuesBytes: 256,
+    },
+    // Та же программа на блоках узла Reth (zkvm-evm/scenario/reth-scenario.mjs): имя —
+    // sp1_evm_reth<номер блока>, батч — fixtures/evm_batches/reth/block-<N>.json.
+    {
+        prefix: 'sp1_evm_reth',
+        kind: 'batch',
+        evm: true,
+        reportDirectory: 'reth',
         vkeyField: 'programVKey',
         elfField: 'programElfSha256',
         publicValuesBytes: 256,
@@ -66,14 +78,14 @@ const KINDS = [
  * импортированный под именем батча 2, или пруф прежнего сценария иначе всплыли бы только в
  * сквозном тесте.
  */
-function scenarioPublicValues(kind, name, evm = false) {
+function scenarioPublicValues(kind, name, evm = false, prefix = '', reportDirectory = '') {
     const read = (...parts) => JSON.parse(readFileSync(path.join(ROOT, 'fixtures', ...parts), 'utf8'));
     if (evm) {
-        // Батч для контракта: fixtures/evm_batches/contract/block-<N>.json пишет хост после
-        // сверки публичных значений zkVM с нативным расчётом (zkvm-evm/scenario/anvil-scenario.sh).
-        const block = name.slice('sp1_evm_batch'.length);
+        // Батч для контракта: fixtures/evm_batches/<каталог>/block-<N>.json пишет хост после
+        // сверки публичных значений zkVM с нативным расчётом (сценарии в zkvm-evm/scenario/).
+        const block = name.slice(prefix.length);
         if (!/^[0-9]+$/.test(block)) throw new Error(`В имени ${name} нет номера блока`);
-        return read('evm_batches', 'contract', `block-${block}.json`).publicValuesBytes.slice(2);
+        return read('evm_batches', reportDirectory, `block-${block}.json`).publicValuesBytes.slice(2);
     }
     if (kind === 'batch') {
         const index = Number(name.slice('sp1_rollup_batch'.length));
@@ -141,7 +153,7 @@ if (program) {
             `Публичные значения: ${publicValuesBytes.length} байт, у программы «${program.kind}» их ${program.publicValuesBytes}`,
         );
     }
-    if (publicValuesBytes.toString('hex') !== scenarioPublicValues(program.kind, fixtureName, program.evm)) {
+    if (publicValuesBytes.toString('hex') !== scenarioPublicValues(program.kind, fixtureName, program.evm, program.prefix, program.reportDirectory)) {
         throw new Error(
             `Публичные значения пруфа не те, что сценарий выдаёт для ${fixtureName}: пруф построен для другого ` +
                 'батча, другой заявки или прежнего сценария',
