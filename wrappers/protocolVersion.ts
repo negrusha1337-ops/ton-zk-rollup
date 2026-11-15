@@ -18,7 +18,7 @@ export const PROTOCOL_VERSION: number = 2;
  * protocol-v1. Ключ программы EVM (fixtures/evm_batches/key.json) и пруфы игрушечной схемы
  * (fixtures/rollup_batches) уже протокола v2: у них версия записана в самих файлах.
  */
-export const PROOF_FIXTURES_PROTOCOL_VERSION: number = 1;
+export const PROOF_FIXTURES_PROTOCOL_VERSION: number = 2;
 
 /** Почему пруфами из fixtures/ сейчас пользоваться нельзя; null — можно. */
 export function proofFixturesBlocker(): string | null {
