@@ -56,14 +56,6 @@ const HINT_BIGQ_CELLS: int = 55
 global hintZ: int
 global hintS: int
 
-/// Отметки расхода газа по стадиям — только для профилирования на стенде.
-global hintGasMarks: array<int>
-
-@inline
-fun markGas() {
-  hintGasMarks.push(getGasConsumedAtTheMoment());
-}
-
 /// Константы ключа верификации (раскладка — zk/gen-bn254-groth16-fixture.mjs).
 struct HintedVk {
   /// IC0 плюс вклад всех постоянных публичных входов.
@@ -308,8 +300,6 @@ fun groth16VerifyBn254Hinted(
   vkData: cell, hints: cell
 ): bool {
   assert (input0 >= 0 && input0 < BN254_R && input1 >= 0 && input1 < BN254_R) throw 7003;
-  hintGasMarks = [];
-  markGas();
   assert (g1IsValid(ax, ay) && g1IsValid(cx, cy) && g2IsOnTwist(b)) throw 7010;
   var hintsRoot = hints.beginParse();
   val committed = hintsRoot.loadRef();
@@ -353,7 +343,6 @@ fun groth16VerifyBn254Hinted(
   assert (fpMul(vkY, invVkY) == 1) throw 7008;
   assert (fpMul(ay, invAy) == 1) throw 7008;
   assert (fpMul(cy, invCy) == 1) throw 7008;
-  markGas();
 
   // Множители линий для трёх пар: a = −(x_P / y_P)·z, b = (1 / y_P)·z³.
   // Первая пара — (−A, B): y_P = −ay.
@@ -406,7 +395,6 @@ fun groth16VerifyBn254Hinted(
     i -= 1;
   }
   assert (accumulatorChain.remainingBitsCount() == 0 && accumulatorChain.remainingRefsCount() == 0) throw 7004;
-  markGas();
 
   // --- замыкающее тождество: два шага с psi(B), константа (α, β), свидетель ---
   val q1 = posB.psi();
@@ -434,7 +422,6 @@ fun groth16VerifyBn254Hinted(
 
   // --- c · c⁻¹ = 1 ---
   acc = fpMul(acc, rho) + fpMul(cAtZ, cInvAtZ) - 1;
-  markGas();
 
   // --- правая часть: bigQ(z) · P(z) ---
   // Ровно HINT_BIGQ_CELLS ячеек по 4 коэффициента, затем пустая ячейка.
@@ -449,6 +436,5 @@ fun groth16VerifyBn254Hinted(
   }
   assert (quotient.remainingBitsCount() == 0 && quotient.remainingRefsCount() == 0) throw 7004;
   val pAtZ = fpMul(z6, z6 - 18) + 82;
-  markGas();
   return (acc - fpMul(quotientAtZ, pAtZ)) % BN254_P == 0;
 }
