@@ -1,8 +1,9 @@
 import { createHash } from 'crypto';
+import { keccak_256 } from '@noble/hashes/sha3';
 import { beginCell, Cell } from '@ton/core';
 
-// Арифметика протокола rollup'а вне блокчейна. Должна совпадать с
-// contracts/rollup/logic.tolk и zk/gen-rollup-batches.mjs.
+// Арифметика протокола rollup'а (версия 2, PROTOCOL-V2.md) вне блокчейна. Должна совпадать с
+// contracts/rollup/logic.tolk и программой zkVM.
 
 export const WITHDRAWAL_TREE_DEPTH = 32;
 const MASK_253 = (1n << 253n) - 1n;
@@ -26,23 +27,33 @@ export type BatchPublicValues = {
     prevWithdrawalsRoot: bigint;
     withdrawalsRoot: bigint;
     prevDepositHash: bigint;
+    /** Хеш очереди L1 в точке, до которой батч её обработал, — из хранилища контракта. */
     newDepositHash: bigint;
+    /** Число листьев дерева выводов до батча — из хранилища контракта. */
+    prevWithdrawalsCount: bigint;
+    withdrawalsCount: bigint;
+    /** Время блока L2, секунды. */
+    blockTimestamp: bigint;
 };
 
-/** Первый публичный вход пруфа батча: sha256 восьми значений, обрезанный до 253 бит. */
+/** Публичные значения батча по порядку: одиннадцать 32-байтовых слов (352 байта). */
+export const batchPublicValueWords = (v: BatchPublicValues): bigint[] => [
+    v.chainId,
+    v.prevStateRoot,
+    v.newStateRoot,
+    v.batchHash,
+    v.prevWithdrawalsRoot,
+    v.withdrawalsRoot,
+    v.prevDepositHash,
+    v.newDepositHash,
+    v.prevWithdrawalsCount,
+    v.withdrawalsCount,
+    v.blockTimestamp,
+];
+
+/** Первый публичный вход пруфа батча: sha256 одиннадцати значений, обрезанный до 253 бит. */
 export function batchDigest(v: BatchPublicValues): bigint {
-    return (
-        sha256Int(
-            v.chainId,
-            v.prevStateRoot,
-            v.newStateRoot,
-            v.batchHash,
-            v.prevWithdrawalsRoot,
-            v.withdrawalsRoot,
-            v.prevDepositHash,
-            v.newDepositHash,
-        ) & MASK_253
-    );
+    return sha256Int(...batchPublicValueWords(v)) & MASK_253;
 }
 
 /** Накопительный хеш очереди депозитов после очередного депозита. */
@@ -86,6 +97,60 @@ export function withdrawalTree(leaves: WithdrawalLeaf[]) {
             return nodes.get(index % 2 === 0 ? index + 1 : index - 1) ?? emptySubtrees[depth];
         });
     return { root, proofFor };
+}
+
+// --- дерево выводов с дозаписью: фронтир и счётчик (PROTOCOL-V2.md, раздел 4 и правка 0.4) ---
+//
+// Программа zkVM не пересчитывает дерево целиком: ей хватает «фронтира» — по одному хешу на
+// уровень — и числа листьев. frontier[h] — корень полного левого поддерева высоты h на
+// единичном бите h счётчика; на нулевых битах — ноль (канонический вид).
+
+/** Больше листьев в дереве не бывает: переход счётчика к 2^32 — отказ. */
+export const MAX_WITHDRAWALS = 2n ** BigInt(WITHDRAWAL_TREE_DEPTH) - 1n;
+
+/** Фронтир пустого дерева. */
+export const emptyWithdrawalFrontier = (): bigint[] => new Array<bigint>(WITHDRAWAL_TREE_DEPTH).fill(0n);
+
+/**
+ * Корень дерева по фронтиру и счётчику. При нуле листьев — ноль, а не хеш пустого дерева
+ * (как у withdrawalTree и у контракта).
+ */
+export function withdrawalFrontierRoot(frontier: bigint[], count: bigint): bigint {
+    if (frontier.length !== WITHDRAWAL_TREE_DEPTH) throw new Error('withdrawalFrontierRoot: во фронтире не 32 хеша');
+    if (count < 0n || count > MAX_WITHDRAWALS) throw new Error('withdrawalFrontierRoot: счётчик вне дерева');
+    if (count === 0n) return 0n;
+    let node = 0n;
+    for (let height = 0; height < WITHDRAWAL_TREE_DEPTH; height++) {
+        node =
+            ((count >> BigInt(height)) & 1n) === 1n
+                ? sha256Int(frontier[height], node)
+                : sha256Int(node, emptySubtrees[height]);
+    }
+    return node;
+}
+
+/**
+ * Дозапись листа (хеш листа — withdrawalLeafHash с номером, равным прежнему счётчику).
+ * Возвращает новые фронтир и счётчик; исходный фронтир не меняется.
+ */
+export function appendWithdrawalLeaf(
+    frontier: bigint[],
+    count: bigint,
+    leafHash: bigint,
+): { frontier: bigint[]; count: bigint } {
+    if (frontier.length !== WITHDRAWAL_TREE_DEPTH) throw new Error('appendWithdrawalLeaf: во фронтире не 32 хеша');
+    if (count < 0n || count >= MAX_WITHDRAWALS) throw new Error('appendWithdrawalLeaf: дерево выводов заполнено');
+    const next = [...frontier];
+    let node = leafHash;
+    for (let height = 0; height < WITHDRAWAL_TREE_DEPTH; height++) {
+        if (((count >> BigInt(height)) & 1n) === 0n) {
+            next[height] = node;
+            break;
+        }
+        node = sha256Int(next[height], node);
+        next[height] = 0n;
+    }
+    return { frontier: next, count: count + 1n };
 }
 
 /** Доказательство как цепочка ячеек: по три хеша на ячейку, продолжение по ссылке. */
@@ -149,15 +214,58 @@ export const batchDataHash = (chunks: Cell[]) => chunks.reduce(dataHashStep, 0n)
 
 /** Метка принудительной транзакции в хеше очереди — как FORCED_TRANSACTION_MARKER в контракте. */
 export const FORCED_TRANSACTION_MARKER = 1n << 255n;
+/** Предел длины «змейки» в ячейках — как MAX_FORCED_TX_CELLS в контракте (get-метод queueLimits). */
+export const MAX_FORCED_TX_CELLS = 64;
+/** Наибольшая транзакция, которая помещается в «змейку»: 64 ячейки по 127 байт. */
+export const MAX_FORCED_TX_BYTES = MAX_FORCED_TX_CELLS * DATA_CELL_BYTES;
 
-/** Принудительная транзакция как ячейка: одна ячейка без ссылок, не больше DATA_CELL_BYTES байт. */
-export function forcedTransactionCell(transaction: Buffer): Cell {
-    if (transaction.length > DATA_CELL_BYTES) {
-        throw new Error(`forcedTransactionCell: ${transaction.length} байт не помещаются в одну ячейку`);
+/**
+ * Байтовая строка «змейкой» ячеек: куски заданной длины по порядку, каждый следующий — по
+ * единственной ссылке предыдущего. `pieces` — длины кусков (сумма равна длине строки); без
+ * него строка режется по DATA_CELL_BYTES байт. Пустая строка — одна пустая ячейка.
+ */
+export function byteSnake(data: Buffer, pieces?: number[]): Cell {
+    const lengths = pieces ?? [];
+    if (!pieces) {
+        for (let left = data.length; left > 0; left -= DATA_CELL_BYTES) lengths.push(Math.min(left, DATA_CELL_BYTES));
+        if (lengths.length === 0) lengths.push(0);
     }
-    return beginCell().storeBuffer(transaction).endCell();
+    if (lengths.reduce((sum, length) => sum + length, 0) !== data.length) {
+        throw new Error('byteSnake: длины кусков не складываются в длину строки');
+    }
+    if (lengths.some((length) => length < 0 || length > DATA_CELL_BYTES)) {
+        throw new Error(`byteSnake: кусок не помещается в ячейку (${DATA_CELL_BYTES} байт)`);
+    }
+    let tail: Cell | null = null;
+    let end = data.length;
+    for (let index = lengths.length - 1; index >= 0; index--) {
+        const builder = beginCell().storeBuffer(data.subarray(end - lengths[index], end));
+        if (tail) builder.storeRef(tail);
+        tail = builder.endCell();
+        end -= lengths[index];
+    }
+    return tail!;
 }
 
-/** Накопительный хеш очереди L1→L2 после принудительной транзакции — как в контракте. */
-export const forcedTransactionHash = (previous: bigint, transaction: Cell) =>
-    sha256Int(previous, FORCED_TRANSACTION_MARKER, cellHashInt(transaction));
+/**
+ * Принудительная транзакция как «змейка»: байты подписанной транзакции EVM (EIP-2718), не
+ * больше MAX_FORCED_TX_CELLS ячеек. Нарезка на хеш в очереди не влияет.
+ */
+export function forcedTransactionCell(transaction: Buffer, pieces?: number[]): Cell {
+    const cellCount = pieces?.length ?? Math.max(1, Math.ceil(transaction.length / DATA_CELL_BYTES));
+    if (cellCount > MAX_FORCED_TX_CELLS) {
+        throw new Error(`forcedTransactionCell: ${cellCount} ячеек больше предела ${MAX_FORCED_TX_CELLS}`);
+    }
+    return byteSnake(transaction, pieces);
+}
+
+/** keccak-256 байтов транзакции числом: для транзакции EVM это её хеш. */
+export const forcedTransactionKeccak = (transaction: Buffer) =>
+    BigInt('0x' + Buffer.from(keccak_256(transaction)).toString('hex'));
+
+/**
+ * Накопительный хеш очереди L1→L2 после принудительной транзакции — как в контракте:
+ * sha256(прежний ‖ метка ‖ keccak256(байты транзакции)).
+ */
+export const forcedTransactionHash = (previous: bigint, transaction: Buffer) =>
+    sha256Int(previous, FORCED_TRANSACTION_MARKER, forcedTransactionKeccak(transaction));

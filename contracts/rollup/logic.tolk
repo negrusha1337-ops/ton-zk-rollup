@@ -1,9 +1,10 @@
-// Логика rollup-контракта (минимальная версия): батчи, депозит TON, вывод с
-// нуллификатором, загрузка ключа. Проверка пруфа сюда не входит — её делает файл
+// Логика rollup-контракта, протокол версии 2 (PROTOCOL-V2.md): батчи, очередь L1 (депозит TON
+// и принудительные транзакции EVM), вывод с нуллификатором, загрузка ключа. Проверка пруфа сюда не входит — её делает файл
 // точки входа (настоящая в rollup.tolk, заглушка для тестов в rollup_mock.tolk).
 import "storage"
 import "messages"
 import "nullifier_types"
+import "bytes"
 import "../bn254/verifier_api"
 import "../bn254/hinted"
 import "@stdlib/gas-payments"
@@ -27,7 +28,6 @@ enum RollupErrors {
   NothingToExit = 7315,
   DepositAlreadyProcessed = 7316,
   NoSuchDeposit = 7317,
-  ExitKeyNotSet = 7318,
   MalformedForcedTransaction = 7319,
   InsufficientFunds = 7320,
   /// Параметры развёртывания недопустимы (срок заморозки меньше MIN_ESCAPE_TIMEOUT).
@@ -40,6 +40,24 @@ enum RollupErrors {
   FeeBelowGasCost = 7325,
   /// Комиссия за место в очереди выше той, на которую согласился вноситель (maxFee).
   QueueFeeAboveLimit = 7326,
+  /// Батч заявил отметку очереди вне отрезка [processed, head].
+  QueueMarkOutOfRange = 7327,
+  /// Батч заявил больше MAX_BATCH_QUEUE_ITEMS элементов очереди за раз.
+  TooManyQueueItems = 7328,
+  /// Время блока L2 позже времени L1.
+  BlockFromFuture = 7329,
+  /// Блок L2 старше maxBlockAge: батч негоден навсегда, блок пересобирается.
+  BlockTooOld = 7330,
+  /// В словаре очереди MAX_TRACKED_ITEMS неубранных записей: постановка откладывается, пока
+  /// очередь не обработают.
+  QueueStorageFull = 7331,
+  /// Сумма депозита на L2 не меньше 2^64 нанотон.
+  DepositTooLarge = 7332,
+  /// Начальное состояние не каноническое: не тот генезис, ненулевые выводы, номер батча или
+  /// непустая очередь. С таким состоянием ключ не фиксируется.
+  BadGenesis = 7333,
+  /// В словаре очереди нет записи, которая обязана там быть (нарушен инвариант хранилища).
+  QueueEntryMissing = 7334,
 }
 
 /// Удерживается с каждого депозита: покрывает газ транзакции и плату за хранение.
@@ -52,20 +70,26 @@ enum RollupErrors {
 /// цены газа не зависят.
 const DEPOSIT_FEE: coins = ton("0.01")
 const MIN_DEPOSIT: coins = ton("0.05")
-/// Газ шага депозита, с запасом: измеренный расход — около 7 700 gas и растёт с глубиной
-/// словаря квитанций (bench/rollup-submit-batch.json).
-const DEPOSIT_STEP_GAS: int = 25000
-/// Газ постановки принудительной транзакции в очередь, с запасом.
-const FORCE_TRANSACTION_STEP_GAS: int = 15000
-/// Плата за место в очереди L1 удваивается на каждые столько элементов, ждущих в текущем
-/// окне — между отметками target и head (после принятия батча окно начинается заново).
+/// Газ шага депозита, с запасом: запись в словарь очереди и уборка до двух прежних записей.
+/// Измерено на словаре, заполненном до MAX_TRACKED_ITEMS (bench/rollup-queue-gas.json):
+/// 24,9 тыс. gas, из них около 17 тыс. — три правки словаря глубиной в 13 уровней. Тест
+/// сверяет измеренное с этим числом через get-метод queueBudgets.
+const DEPOSIT_STEP_GAS: int = 40000
+/// Газ постановки принудительной транзакции в очередь, с запасом. Измерено там же: 83 тыс.
+/// gas на «змейке» из MAX_FORCED_TX_CELLS ячеек при полном словаре — около 0,9 тыс. на
+/// ячейку (чтение и проверки формы; сам keccak-256 стоит меньше тысячи на всю транзакцию)
+/// плюс та же работа со словарём, что у депозита.
+const FORCE_TRANSACTION_STEP_GAS: int = 110000
+/// Плата за место в очереди L1 удваивается на каждые столько необработанных элементов —
+/// между отметками processed и head.
 ///
-/// Зачем. Всё, что стоит в окне, следующий-за-следующим батч ОБЯЗАН обработать. Без роста
-/// платы окно можно было бы раздуть дешёвыми депозитами так, что батч не успеть доказать за
-/// срок заморозки, — то есть остановить rollup за копейки. Жёсткий предел окна был бы хуже:
-/// заполнив его, можно вытеснять чужие принудительные транзакции, а это цензура. Растущая
-/// плата никого не вытесняет — место в очереди есть всегда, — но делает раздувание
-/// экспоненциально дорогим: n элементов стоят порядка базовой платы × ШАГ × 2^(n / ШАГ).
+/// Зачем. Необработанный хвост секвенсор обязан разобрать раньше, чем самый старый элемент
+/// провисит срок заморозки. Без роста платы хвост можно было бы раздуть дешёвыми депозитами
+/// так, что его не успеть доказать, — то есть остановить rollup за копейки. Жёсткий предел
+/// хвоста был бы хуже: заполнив его, можно вытеснять чужие принудительные транзакции, а это
+/// цензура. Растущая плата никого не вытесняет, но делает раздувание экспоненциально дорогим:
+/// n элементов стоят порядка базовой платы × ШАГ × 2^(n / ШАГ). (Предел MAX_TRACKED_ITEMS ниже
+/// — про память контракта; платой он недостижим.)
 const QUEUE_FEE_STEP: int = 64
 /// Предел числа удвоений: дальше плата не растёт (и не переполняет coins).
 const QUEUE_FEE_MAX_DOUBLINGS: int = 40
@@ -73,12 +97,30 @@ const QUEUE_FEE_MAX_DOUBLINGS: int = 40
 /// секвенсор, а в очередь её может поставить кто угодно. Не возвращается.
 const FORCE_TRANSACTION_FEE: coins = ton("0.05")
 /// Метка принудительной транзакции в накопительном хеше очереди: стоит на месте
-/// получателя депозита (160 бит), поэтому спутать их нельзя. Совпадает с
-/// FORCED_TRANSACTION_MARKER в zkvm/lib.
+/// получателя депозита (160 бит), поэтому спутать их нельзя. Часть протокола: то же значение
+/// у программы zkVM и в wrappers/rollupMath.ts.
 const FORCED_TRANSACTION_MARKER: int = 1 << 255
-/// Принудительная транзакция — одна ячейка без ссылок: хеш такой ячейки программа zkVM
-/// может посчитать из байтов для любого содержимого.
-const MAX_FORCED_TRANSACTION_BITS: int = 1016
+/// Предел длины «змейки» принудительной транзакции, ячеек: до 64 × 127 = 8 128 байт.
+/// То же значение — в wrappers/rollupMath.ts. У программы zkVM предела длины нет намеренно:
+/// свойство, которое проверяет контракт, не должно быть ещё и ошибкой батча.
+const MAX_FORCED_TX_CELLS: int = 64
+/// Сколько элементов очереди L1 батч может обработать за раз. Секвенсора нельзя заставить
+/// взять в блок больше, и сам он больше взять не может: цена пруфа батча ограничена сверху.
+/// Значение ПРОБНОЕ — до замера времени пруфа (PROTOCOL-V2.md, 0.2 и спайк 4); то же число
+/// обязана проверять программа zkVM. Тесты берут его get-методом queueLimits.
+const MAX_BATCH_QUEUE_ITEMS: int = 32
+/// Сколько записей об элементах очереди контракт держит в словаре. При заполнении постановка
+/// в очередь отказывает (QueueStorageFull), пока обработанные записи не уберут. Рычагом
+/// цензуры это не становится: мусор (обработанное) убирает сама постановка и кто угодно
+/// сообщением PruneDepositReceipts, а необработанных элементов столько не набрать — плата за
+/// место к этому времени удвоена QUEUE_FEE_MAX_DOUBLINGS раз.
+const MAX_TRACKED_ITEMS: int = 8192
+/// Сколько обработанных записей убирает каждая постановка в очередь. Две на одну новую:
+/// словарь при работающем секвенсоре сокращается, а не только не растёт.
+const QUEUE_PRUNE_PER_PUSH: int = 2
+/// Сумма депозита на L2 обязана быть меньше этого числа нанотон: программа zkVM держит суммы
+/// в 64 битах, и большую она не смогла бы зачислить — батч с таким элементом был бы недоказуем.
+const DEPOSIT_AMOUNT_LIMIT: int = 1 << 64
 /// Газ шага Withdraw (проверка Merkle-доказательства и заявка в нуллификатор), с запасом.
 const WITHDRAW_STEP_GAS: int = 40000
 /// Верхняя оценка размера заявки в нуллификатор вместе с его кодом и данными (StateInit).
@@ -91,6 +133,17 @@ const MAX_DATA_BATCHES_AHEAD: int = 4
 /// а без ключей rollup не принимает депозиты: тестовый срок в минуты не попадёт в
 /// развёртывание, которым кто-то пользуется.
 const MIN_ESCAPE_TIMEOUT: int = 3600
+/// Наименьший допустимый maxBlockAge, секунд: с меньшим батч не успеть доказать и принять
+/// (пруф блока строится минутами). Наибольший — escapeTimeout.
+const MIN_MAX_BLOCK_AGE: int = 1800
+/// Хеш заголовка блока-генезиса L2 — константа протокола: генезис закреплён целиком (счёт
+/// моста, время, лимит газа, базовая комиссия) и от chainId не зависит. FinalizeKey сверяет с
+/// ней начальное слово состояния.
+/// ЗНАЧЕНИЕ ПРОБНОЕ: хеш генезиса из спайка 5 (PROTOCOL-V2.md, 0.5). Окончательное закрепит
+/// шаг программы zkVM вместе с байткодом моста. Тесты берут его get-методом genesisHash.
+const GENESIS_HASH: int = 0xc0284e91570e7f1314f6e4460a613225f49b46deeebd2be3c463fb1c1e0e7883
+/// Версия протокола: формат публичных значений, сообщений и хранилища (PROTOCOL-V2.md).
+const PROTOCOL_VERSION: int = 2
 /// Глубина дерева выводов: 2^32 листьев.
 const WITHDRAWAL_TREE_DEPTH: int = 32
 /// Скалярное поле BN254 ~254 бита: дайджест публичных значений обрезается до 253 бит
@@ -98,22 +151,28 @@ const WITHDRAWAL_TREE_DEPTH: int = 32
 const DIGEST_MASK_253: int = (1 << 253) - 1
 
 @pure fun sha256OfBuilder(b: builder, count: int): uint256 asm "HASHEXT_SHA256"
-@pure fun sha256OfTwo(first: builder, second: builder, count: int): uint256 asm "HASHEXT_SHA256"
-@pure fun sha256OfThree(first: builder, second: builder, third: builder, count: int): uint256 asm "HASHEXT_SHA256"
+@pure fun sha256OfFour(first: builder, second: builder, third: builder, fourth: builder, count: int): uint256
+  asm "HASHEXT_SHA256"
 
-/// Первый публичный вход пруфа: sha256 от восьми 32-байтовых значений, обрезанный до
+/// Первый публичный вход пруфа: sha256 от одиннадцати 32-байтовых значений, обрезанный до
 /// 253 бит. Порядок значений — часть протокола; программа для zkVM обязана
 /// коммитить их так же:
 ///   chainId ‖ prevStateRoot ‖ newStateRoot ‖ batchHash
 ///           ‖ prevWithdrawalsRoot ‖ withdrawalsRoot ‖ prevDepositHash ‖ newDepositHash
+///           ‖ prevWithdrawalsCount ‖ withdrawalsCount ‖ blockTimestamp
 ///
-/// Из сообщения берутся только два значения: новый корень состояния и новый корень
-/// выводов. Всё остальное — из хранилища: chainId, прежний корень состояния, хеш данных
-/// батча, опубликованных в TON (см. takeBatchData), обе отметки очереди L1 и ПРЕЖНИЙ
-/// корень выводов. Последнее принципиально: список прежних выводов — приватный вход
-/// программы, и без этой привязки секвенсор мог бы приписать в дерево лист в свою пользу.
-fun batchDigest(chainId: int, state: RollupState, queue: DepositQueue, roots: BatchRoots, batchHash: int): int {
-  // Четыре 256-битных значения не помещаются в одну ячейку, поэтому строителей три.
+/// Из сообщения берутся четыре значения: новое слово состояния, новые корень и счётчик
+/// выводов и время блока. Всё остальное — из хранилища: chainId, прежнее слово состояния, хеш
+/// данных батча, опубликованных в TON (см. takeBatchData), хеши очереди L1 в прежней отметке
+/// и в заявленной точке (`newDepositHash`, см. queueHashAt), ПРЕЖНИЕ корень и счётчик выводов.
+/// Последнее принципиально: фронтир прежнего дерева — приватный вход программы, и без этой
+/// привязки секвенсор мог бы приписать в дерево лист в свою пользу либо подменить счётчик
+/// (один корень счётчик не связывает).
+fun batchDigest(
+  chainId: int, state: RollupState, queue: DepositQueue, roots: BatchRoots, batchHash: int, newDepositHash: int
+): int {
+  // Четыре 256-битных значения не помещаются в одну ячейку, поэтому строителей четыре:
+  // 3 + 3 + 3 + 2 слова.
   val first = beginCell()
     .storeUint(chainId, 256)
     .storeUint(state.stateRoot, 256)
@@ -122,8 +181,31 @@ fun batchDigest(chainId: int, state: RollupState, queue: DepositQueue, roots: Ba
     .storeUint(batchHash, 256)
     .storeUint(state.withdrawalsRoot, 256)
     .storeUint(roots.withdrawalsRoot, 256);
-  val third = beginCell().storeUint(queue.processedHash, 256).storeUint(queue.targetHash, 256);
-  return sha256OfThree(first, second, third, 3) & DIGEST_MASK_253;
+  val third = beginCell()
+    .storeUint(queue.processedHash, 256)
+    .storeUint(newDepositHash, 256)
+    .storeUint(state.withdrawalsCount, 256);
+  val fourth = beginCell().storeUint(roots.withdrawalsCount, 256).storeUint(roots.blockTimestamp, 256);
+  return sha256OfFour(first, second, third, fourth, 4) & DIGEST_MASK_253;
+}
+
+/// Хеш очереди L1 в точке «обработано n элементов» — восьмое слово публичных значений батча,
+/// заявившего отметку n. Проверяет саму отметку: processed ≤ n ≤ head и не больше
+/// MAX_BATCH_QUEUE_ITEMS элементов за батч.
+///
+/// Точка n == head — текущий хеш очереди; иначе — хеш ДО элемента n + 1 из словаря. Поэтому
+/// элемент, вставший в очередь между сборкой блока и приёмом батча, батч не ломает: хеш в
+/// точке n от него не зависит.
+@inline_ref
+fun queueHashAt(state: RollupState, queue: DepositQueue, n: int): int {
+  assert ((n >= queue.processedCount) && (n <= queue.headCount)) throw RollupErrors.QueueMarkOutOfRange;
+  assert (n - queue.processedCount <= MAX_BATCH_QUEUE_ITEMS) throw RollupErrors.TooManyQueueItems;
+  if (n == queue.headCount) {
+    return queue.headHash;
+  }
+  val next = state.queueItems.get(n + 1);
+  assert (next.isFound) throw RollupErrors.QueueEntryMissing;
+  return next.loadValue().hashBefore;
 }
 
 /// Шаг накопительного хеша данных батча: sha256(предыдущий ‖ хеш ячейки с порцией).
@@ -180,6 +262,8 @@ struct PreparedBatch {
   state: RollupState
   queue: DepositQueue
   roots: BatchRoots
+  /// Хеш очереди L1 в заявленной батчем точке.
+  newDepositHash: int
   /// Первый публичный вход, который обязан подтвердить пруф.
   digest: int
   vkData: cell
@@ -195,6 +279,13 @@ fun prepareSubmitBatch(sender: address, msg: SubmitBatch): PreparedBatch {
   assert (!state.frozen) throw RollupErrors.RollupFrozen;
   val queue = state.queue.load();
   val roots = msg.roots.load();
+  // Время блока L2 — в прошлом L1, но не старше maxBlockAge: иначе время L2 можно было бы
+  // вести в произвольном отставании или забегании. Батч, не принятый за maxBlockAge, негоден
+  // навсегда.
+  val now = blockchain.now();
+  assert (roots.blockTimestamp <= now) throw RollupErrors.BlockFromFuture;
+  assert (roots.blockTimestamp + storage.maxBlockAge >= now) throw RollupErrors.BlockTooOld;
+  val newDepositHash = queueHashAt(state, queue, roots.queueProcessedUpTo);
   // Хеш данных батча контракт берёт из своего хранилища: пруф для данных, которые не
   // были опубликованы в TON, не сойдётся.
   val batchHash = takeBatchData(mutate state);
@@ -203,50 +294,64 @@ fun prepareSubmitBatch(sender: address, msg: SubmitBatch): PreparedBatch {
     state: state,
     queue: queue,
     roots: roots,
-    digest: batchDigest(storage.chainId, state, queue, roots, batchHash),
+    newDepositHash: newDepositHash,
+    digest: batchDigest(storage.chainId, state, queue, roots, batchHash, newDepositHash),
     vkData: keys.vkData!,
   };
 }
 
-/// Применяет батч, пруф которого уже проверен.
-fun applyBatch(mutate storage: RollupStorage, state: RollupState, queue: DepositQueue, roots: BatchRoots) {
+/// Применяет батч, пруф которого уже проверен. Записи словаря очереди здесь не удаляются:
+/// это самая тесная по газу транзакция. Их убирают постановка в очередь и PruneDepositReceipts.
+fun applyBatch(batch: PreparedBatch) {
   val nextQueue = DepositQueue {
-    headCount: queue.headCount,
-    headHash: queue.headHash,
-    // Следующий батч обязан обработать всё, что стоит в очереди сейчас.
-    targetCount: queue.headCount,
-    targetHash: queue.headHash,
-    processedCount: queue.targetCount,
-    processedHash: queue.targetHash,
+    headCount: batch.queue.headCount,
+    headHash: batch.queue.headHash,
+    processedCount: batch.roots.queueProcessedUpTo,
+    processedHash: batch.newDepositHash,
+    prunedCount: batch.queue.prunedCount,
   };
-  var next = state;
-  next.stateRoot = roots.newStateRoot;
-  next.withdrawalsRoot = roots.withdrawalsRoot;
-  next.batchIndex = state.batchIndex + 1;
+  var next = batch.state;
+  next.stateRoot = batch.roots.newStateRoot;
+  next.withdrawalsRoot = batch.roots.withdrawalsRoot;
+  next.withdrawalsCount = batch.roots.withdrawalsCount;
+  next.batchIndex = batch.state.batchIndex + 1;
   next.queue = nextQueue.toCell();
-  // Депозиты за прежней целью стали обязательными для следующего батча; за новой целью
-  // пока никого нет.
-  next.queuedAfterProcessedAt = state.queuedAfterTargetAt;
-  next.queuedAfterTargetAt = 0;
+  var storage = batch.storage;
   storage.state = next.toCell();
   storage.save();
 }
 
-/// Ставит элемент в очередь L1→L2 и возвращает его номер (с единицы). Элемент входит в
-/// накопительный хеш как sha256(прежний ‖ first ‖ second).
-fun pushQueueItem(mutate state: RollupState, first: int, second: int): int {
-  var queue = state.queue.load();
-  if (queue.headCount == queue.targetCount) {
-    // Первый элемент за отметкой target: с него считается возраст для аварийного выхода.
-    state.queuedAfterTargetAt = blockchain.now();
+/// Убирает из словаря очереди не больше `limit` записей уже обработанных элементов, самые
+/// старые. Записи с номерами больше processedCount не трогает никогда: по ним считается хеш
+/// очереди в точке N, срок заморозки и возврат депозита. Возвращает, сколько убрано.
+fun pruneQueueItems(mutate state: RollupState, mutate queue: DepositQueue, limit: int): int {
+  var pruned = 0;
+  while ((pruned < limit) && (queue.prunedCount < queue.processedCount)) {
+    queue.prunedCount += 1;
+    state.queueItems.delete(queue.prunedCount);
+    pruned += 1;
   }
+  return pruned;
+}
+
+/// Ставит элемент в очередь L1→L2 и возвращает его номер (с единицы). Элемент входит в
+/// накопительный хеш как sha256(прежний ‖ first ‖ second); в словарь идёт запись с хешем
+/// очереди до элемента, временем постановки и квитанцией (у депозита).
+fun pushQueueItem(mutate state: RollupState, first: int, second: int, receipt: DepositReceipt?): int {
+  var queue = state.queue.load();
+  // Попутная уборка: записи обработанных элементов больше не нужны.
+  pruneQueueItems(mutate state, mutate queue, QUEUE_PRUNE_PER_PUSH);
+  // После постановки неубранных записей не больше MAX_TRACKED_ITEMS.
+  assert (queue.headCount - queue.prunedCount < MAX_TRACKED_ITEMS) throw RollupErrors.QueueStorageFull;
+  val index = queue.headCount + 1;
+  state.queueItems.set(index, QueueEntry { hashBefore: queue.headHash, queuedAt: blockchain.now(), receipt: receipt });
   queue.headHash = sha256OfBuilder(
     beginCell().storeUint(queue.headHash, 256).storeUint(first, 256).storeUint(second, 256),
     1
   );
-  queue.headCount += 1;
+  queue.headCount = index;
   state.queue = queue.toCell();
-  return queue.headCount;
+  return index;
 }
 
 /// Фиксированная комиссия обязана покрывать газ шага при текущих ценах сети: иначе шаг
@@ -256,19 +361,19 @@ fun assertFeeCoversGas(fee: coins, stepGas: int) {
   assert (fee >= calculateGasFee(BASECHAIN, stepGas)) throw RollupErrors.FeeBelowGasCost;
 }
 
-/// Сколько раз удвоена плата за место в очереди при нынешней длине окна.
+/// Сколько раз удвоена плата за место в очереди при нынешней длине необработанного хвоста.
 @inline
 fun queueFeeDoublings(queue: DepositQueue): int {
-  return min((queue.headCount - queue.targetCount) / QUEUE_FEE_STEP, QUEUE_FEE_MAX_DOUBLINGS);
+  return min((queue.headCount - queue.processedCount) / QUEUE_FEE_STEP, QUEUE_FEE_MAX_DOUBLINGS);
 }
 
-/// Комиссия депозита при нынешней длине окна очереди.
+/// Комиссия депозита при нынешней длине необработанного хвоста очереди.
 @inline
 fun depositFeeFor(queue: DepositQueue): coins {
   return DEPOSIT_FEE << queueFeeDoublings(queue);
 }
 
-/// Плата за принудительную транзакцию при нынешней длине окна очереди.
+/// Плата за принудительную транзакцию при нынешней длине необработанного хвоста очереди.
 @inline
 fun forceTransactionFeeFor(queue: DepositQueue): coins {
   return forceTransactionFee() << queueFeeDoublings(queue);
@@ -294,21 +399,15 @@ fun handleDeposit(sender: address, valueCoins: coins, msg: DepositTon) {
   assert (!state.frozen) throw RollupErrors.RollupFrozen;
   assertFeeCoversGas(DEPOSIT_FEE, DEPOSIT_STEP_GAS);
 
-  // Комиссия растёт с длиной окна очереди и вычитается из суммы на L2: вноситель сам задаёт,
+  // Комиссия растёт с длиной необработанного хвоста очереди и вычитается из суммы на L2: вноситель сам задаёт,
   // на какую он согласен. Иначе — отказ, и депозит возвращается целиком.
   val fee = depositFeeFor(state.queue.load());
   assert (fee <= msg.maxFee) throw RollupErrors.QueueFeeAboveLimit;
   val amount = valueCoins - fee;
   assert (amount >= MIN_DEPOSIT) throw RollupErrors.DepositTooSmall;
-  val index = pushQueueItem(mutate state, msg.l2Recipient, amount);
+  assert (amount < DEPOSIT_AMOUNT_LIMIT) throw RollupErrors.DepositTooLarge;
   // Квитанция: если rollup заморозят раньше, чем депозит попадёт в батч, его вернут вносителю.
-  state.depositReceipts.set(index, DepositReceipt { depositor: sender, amount: amount });
-  // Попутная уборка: квитанция самого старого уже обработанного депозита больше не нужна.
-  // Так словарь не растёт быстрее очереди, и забить им хранилище контракта нельзя.
-  val oldest = state.depositReceipts.findFirst();
-  if (oldest.isFound && (oldest.getKey() <= state.queue.load().processedCount)) {
-    state.depositReceipts.delete(oldest.getKey());
-  }
+  pushQueueItem(mutate state, msg.l2Recipient, amount, DepositReceipt { depositor: sender, amount: amount });
   storage.state = state.toCell();
   storage.save();
 }
@@ -318,21 +417,16 @@ fun handleForceTransaction(valueCoins: coins, msg: ForceTransaction) {
   assert (storage.keys.load().vkData != null) throw RollupErrors.KeyNotFinalized;
   var state = storage.state.load();
   assert (!state.frozen) throw RollupErrors.RollupFrozen;
-  // Плата растёт с длиной окна очереди, но места в очереди хватает всегда: принудительную
-  // транзакцию нельзя вытеснить, можно только заставить заплатить больше.
+  // Плата растёт с длиной необработанного хвоста очереди, но вытеснить принудительную
+  // транзакцию нельзя, можно только заставить заплатить больше.
   assert (valueCoins >= forceTransactionFeeFor(state.queue.load())) throw RollupErrors.NotEnoughValue;
-  // Содержимое не разбирается, но форма проверяется: иначе в очередь можно было бы
-  // поставить дерево ячеек, хеш которого программа zkVM не сможет воспроизвести, и
-  // остановить rollup.
-  val body = msg.l2Transaction.beginParse();
-  val bits = body.remainingBitsCount();
-  assert ((body.remainingRefsCount() == 0) && (bits <= MAX_FORCED_TRANSACTION_BITS) && (bits % 8 == 0))
-    throw RollupErrors.MalformedForcedTransaction;
-  // В очередь идёт хеш ячейки, собранной здесь из этих же битов, а НЕ хеш присланной
-  // ячейки. Присланная может быть экзотической (ссылка на библиотеку): TVM при чтении
-  // подставит содержимое библиотеки, проверка формы пройдёт, а хеш самой ссылки программа
-  // zkVM из байтов не воспроизведёт — и rollup встал бы навсегда.
-  pushQueueItem(mutate state, FORCED_TRANSACTION_MARKER, beginCell().storeSlice(body).endCell().hash());
+  // Содержимое не разбирается, проверяется только форма «змейки»: целые байты, не больше одной
+  // ссылки, не больше MAX_FORCED_TX_CELLS обычных ячеек. В очередь идёт keccak-256 прочитанных
+  // байтов — для транзакции EVM это её хеш, — а не хеш ячейки: от нарезки он не зависит, и
+  // программа zkVM считает его из тех же байтов. Что транзакция — именно вывод через мост,
+  // контракт не проверяет: негодную программа пропустит.
+  val parts = byteParts(msg.l2Transaction, MAX_FORCED_TX_CELLS, RollupErrors.MalformedForcedTransaction as int);
+  pushQueueItem(mutate state, FORCED_TRANSACTION_MARKER, keccak256OfParts(parts), null);
   storage.state = state.toCell();
   storage.save();
 }
@@ -491,18 +585,41 @@ fun handleUploadKeyPart(sender: address, msg: UploadKeyPart) {
   storage.save();
 }
 
+/// Начальное состояние обязано быть каноническим: закреплённый генезис, ни одного батча,
+/// пустое дерево выводов, пустая очередь L1. Контракт не может проверить свои начальные данные
+/// при развёртывании, но может отказаться начинать с ними работу: без зафиксированного ключа
+/// нет ни депозитов, ни батчей.
+@inline_ref
+fun assertCanonicalGenesis(state: RollupState) {
+  val queue = state.queue.load();
+  assert (
+    (state.batchIndex == 0)
+      && (state.stateRoot == GENESIS_HASH)
+      && (state.withdrawalsRoot == 0)
+      && (state.withdrawalsCount == 0)
+      && (queue.headCount == 0)
+      && (queue.headHash == 0)
+      && (queue.processedCount == 0)
+      && (queue.processedHash == 0)
+      && (queue.prunedCount == 0)
+      && state.queueItems.isEmpty()
+  ) throw RollupErrors.BadGenesis;
+}
+
 fun handleFinalizeKey(sender: address, msg: FinalizeKey) {
   var storage = RollupStorage.load();
   assert (sender == storage.owner) throw RollupErrors.NotOwner;
   var keys = storage.keys.load();
   assert (keys.vkData == null) throw RollupErrors.KeyAlreadyFinalized;
   assert (!storage.state.load().frozen) throw RollupErrors.RollupFrozen;
-  // Rollup без ключа выхода зафиксировать нельзя: иначе аварийный режим оставил бы
-  // балансы L2 запертыми.
-  assert ((keys.exitIc0x != 0) || (keys.exitIc0y != 0)) throw RollupErrors.ExitKeyNotSet;
   // Слишком короткий срок заморозки — признак тестовой конфигурации: с ним rollup не
   // начинает работу (без ключей депозиты не принимаются).
   assert (storage.escapeTimeout >= MIN_ESCAPE_TIMEOUT) throw RollupErrors.BadDeployment;
+  // Возраст блока: не меньше получаса (иначе батч не успеть принять) и не больше срока
+  // заморозки (иначе время L2 могло бы отставать дольше, чем живёт необработанная очередь).
+  assert ((storage.maxBlockAge >= MIN_MAX_BLOCK_AGE) && (storage.maxBlockAge <= storage.escapeTimeout))
+    throw RollupErrors.BadDeployment;
+  assertCanonicalGenesis(storage.state.load());
   // У ключа ровно один переменный вход: остальные (в том числе нонс SP1, равный нулю)
   // свёрнуты в IC0. Второй таблицы быть не должно — проверить её было бы нечем.
   assert (msg.table1Parts == 0) throw KEY_ERROR_BAD_PART;
@@ -513,18 +630,36 @@ fun handleFinalizeKey(sender: address, msg: FinalizeKey) {
   storage.save();
 }
 
-/// (корень состояния, корень выводов, номер батча)
-fun rollupStateView(): (int, int, int) {
+/// (слово состояния, корень выводов, номер батча, счётчик выводов)
+fun rollupStateView(): (int, int, int, int) {
   val state = RollupStorage.load().state.load();
-  return (state.stateRoot, state.withdrawalsRoot, state.batchIndex);
+  return (state.stateRoot, state.withdrawalsRoot, state.batchIndex, state.withdrawalsCount);
 }
 
-/// Параметры развёртывания: (владелец, секвенсор, chainId, срок заморозки, хеш кода
-/// нуллификатора). Контракт не может проверить их сам — их сверяет тот, кто собирается
-/// доверить rollup'у деньги (scripts/verifyRollupDeployment.ts, ARCHITECTURE.md).
-fun deploymentView(): (address, address, int, int, int) {
+/// Параметры развёртывания: (владелец, секвенсор, chainId, срок заморозки, наибольший возраст
+/// блока, хеш кода нуллификатора). Контракт не может проверить их сам — их сверяет тот, кто
+/// собирается доверить rollup'у деньги (scripts/verifyRollupDeployment.ts, ARCHITECTURE.md).
+fun deploymentView(): (address, address, int, int, int, int) {
   val storage = RollupStorage.load();
-  return (storage.owner, storage.sequencer, storage.chainId, storage.escapeTimeout, storage.nullifierCode.hash());
+  return (
+    storage.owner,
+    storage.sequencer,
+    storage.chainId,
+    storage.escapeTimeout,
+    storage.maxBlockAge,
+    storage.nullifierCode.hash()
+  );
+}
+
+/// Пределы очереди L1: (элементов на батч, записей в словаре, ячеек в «змейке» принудительной
+/// транзакции, записей, убираемых одной постановкой, предел суммы депозита на L2).
+fun queueLimitsView(): (int, int, int, int, int) {
+  return (MAX_BATCH_QUEUE_ITEMS, MAX_TRACKED_ITEMS, MAX_FORCED_TX_CELLS, QUEUE_PRUNE_PER_PUSH, DEPOSIT_AMOUNT_LIMIT);
+}
+
+/// Границы времени: (наименьший допустимый maxBlockAge, наименьший допустимый срок заморозки).
+fun timeLimitsView(): (int, int) {
+  return (MIN_MAX_BLOCK_AGE, MIN_ESCAPE_TIMEOUT);
 }
 
 /// Запасы газа шагов очереди L1 и БАЗОВАЯ плата за принудительную транзакцию при текущих
@@ -534,11 +669,11 @@ fun queueBudgetsView(): (int, int, int) {
 }
 
 /// Плата за место в очереди прямо сейчас: (комиссия депозита, плата за принудительную
-/// транзакцию, элементов в текущем окне, шаг удвоения). Комиссию депозита вноситель
+/// транзакцию, необработанных элементов в очереди, шаг удвоения). Комиссию депозита вноситель
 /// указывает в поле maxFee; плату за принудительную транзакцию прикладывает к сообщению.
 fun queueFeesView(): (int, int, int, int) {
   val queue = RollupStorage.load().state.load().queue.load();
-  return (depositFeeFor(queue), forceTransactionFeeFor(queue), queue.headCount - queue.targetCount, QUEUE_FEE_STEP);
+  return (depositFeeFor(queue), forceTransactionFeeFor(queue), queue.headCount - queue.processedCount, QUEUE_FEE_STEP);
 }
 
 /// Запасы газа цепочки вывода и производные от них суммы (get-метод payoutBudgets).
@@ -562,21 +697,34 @@ fun owedPayoutView(key: int): (address?, int) {
   return (debt.recipient, debt.amount);
 }
 
-/// Очередь депозитов: (поставлено, хеш), (цель, хеш), (обработано, хеш)
+/// Очередь L1: (поставлено, хеш), (обработано, хеш), убрано записей.
 fun depositQueueView(): DepositQueue {
   return RollupStorage.load().state.load().queue.load();
 }
 
-/// Первый публичный вход, который контракт потребует от следующего батча с такими корнями
-/// (при уже опубликованных для него данных).
-fun expectedPublicInputView(newStateRoot: int, withdrawalsRoot: int): int {
+/// Запись об элементе очереди: (есть ли, хеш очереди до элемента, когда встал).
+fun queueItemView(index: int): (bool, int, int) {
+  val entry = RollupStorage.load().state.load().queueItems.get(index);
+  if (!entry.isFound) {
+    return (false, 0, 0);
+  }
+  val item = entry.loadValue();
+  return (true, item.hashBefore, item.queuedAt);
+}
+
+/// Первый публичный вход, который контракт потребует от следующего батча с такими значениями
+/// (при уже опубликованных для него данных). Отметка очереди проверяется как в батче; время
+/// блока — нет: оно сверяется с временем приёма.
+fun expectedPublicInputView(roots: BatchRoots): int {
   val storage = RollupStorage.load();
   val state = storage.state.load();
+  val queue = state.queue.load();
   return batchDigest(
     storage.chainId,
     state,
-    state.queue.load(),
-    BatchRoots { newStateRoot: newStateRoot, withdrawalsRoot: withdrawalsRoot },
-    batchDataHashOf(state.pendingData, state.batchIndex + 1)
+    queue,
+    roots,
+    batchDataHashOf(state.pendingData, state.batchIndex + 1),
+    queueHashAt(state, queue, roots.queueProcessedUpTo)
   );
 }

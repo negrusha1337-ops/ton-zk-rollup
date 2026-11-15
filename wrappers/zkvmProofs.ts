@@ -3,7 +3,7 @@ import path from 'path';
 import { Cell } from '@ton/core';
 import { Bn254Proof, KeyUploadJson } from './Bn254Groth16Verifier';
 import { Address } from '@ton/core';
-import { BatchRoots, ExitClaim } from './Rollup';
+import { BatchRootsV1, ExitClaim } from './Rollup';
 import { dataChunkCell, forcedTransactionCell, WithdrawalLeaf } from './rollupMath';
 
 // Загрузка пруфов SP1 программы перехода состояния (zkvm/) из фикстур. Используется и
@@ -84,7 +84,7 @@ export type ProvenBatch = {
     /** Пять публичных входов схемы SP1: ключ программы, дайджест, код выхода, корень ключей, нонс (всегда 0). */
     publicInputs: bigint[];
     output: BatchOutput;
-    roots: BatchRoots;
+    roots: BatchRootsV1;
     /** Порции данных, которые нужно опубликовать до отправки батча. */
     dataChunks: Cell[];
 };

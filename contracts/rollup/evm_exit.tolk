@@ -7,7 +7,8 @@
 //   • доказательство счёта против этого корня — то, что отдаёт любой узел по eth_getProof;
 //   • подпись своим ключом под chainId, хешем блока и получателем в TON.
 // Адрес счёта контракт восстанавливает из подписи сам, баланс берёт из листа дерева. Дальше —
-// та же цепочка, что у выхода по пруфу: заявка в нуллификатор счёта и выплата либо долг.
+// та же цепочка, что у вывода: заявка в нуллификатор счёта и выплата либо долг. В протоколе
+// версии 2 это единственный путь выхода с баланса L2 после заморозки.
 //
 // Почему этому можно верить. Каждый узел доказательства хешируется из своих байтов, и хеш
 // обязан совпасть с тем, что записан в родителе (у корня — с корнем состояния из заголовка).
@@ -22,16 +23,18 @@
 // Как присылаются байты. Байтовая строка (заголовок, узел) — «змейка» ячеек: данные из целых
 // байтов и не больше одной ссылки на продолжение. Резать строку можно где угодно, но каждая
 // читаемая единица (байт признака, длина, содержимое строки до 32 байт) обязана лежать в
-// одной ячейке целиком — так режет wrappers/evmExit.ts.
+// одной ячейке целиком — так режет wrappers/evmExit.ts. Чтение «змейки» — rollup/bytes.tolk.
 import "storage"
 import "messages"
 import "logic"
 import "escape"
+import "bytes"
 import "nullifier_types"
 import "@stdlib/gas-payments"
 
 enum EvmExitErrors {
-  /// Байтовая строка не из целых байтов, ячеек слишком много или единица разрезана ячейками.
+  /// Байтовая строка не из целых байтов, ячеек слишком много, ячейка экзотическая или единица
+  /// разрезана ячейками.
   BadEncoding = 7400,
   /// Хеш заголовка не равен слову состояния контракта.
   WrongBlockHeader = 7401,
@@ -56,15 +59,12 @@ const EVM_WEI_PER_NANOTON: int = 1000000000
 /// Больше ячеек у одной байтовой строки не бывает: заголовок блока — до 6, узел-ветка — до 6.
 const EVM_MAX_PARTS: int = 12
 /// Газ шага ForceExitEvm, из которого считается минимум приложенных монет. Измерено
-/// (bench/rollup-evm-exit.json): 103–164 тыс. gas на настоящих доказательствах из 3–5 узлов и
-/// 454 тыс. на десяти полных ветках с листом — глубина дерева с триллионом счетов; полная
-/// ветка стоит около 43 тыс. Запас покрывает второе с десятой долей сверху; тест сверяет
-/// измеренное с этим числом через get-метод evmExitBudget.
+/// (bench/rollup-evm-exit.json): 104–165 тыс. gas на настоящих доказательствах из 3–5 узлов и
+/// 460 тыс. на десяти полных ветках с листом — глубина дерева с триллионом счетов; полная
+/// ветка стоит около 43 тыс. Запас покрывает второе с 8% сверху; тест сверяет измеренное с
+/// этим числом через get-метод evmExitBudget.
 const EVM_EXIT_STEP_GAS: int = 500000
 
-@pure fun keccak256OfBuilder(b: builder, count: int): uint256 asm "HASHEXT_KECCAK256"
-/// keccak-256 склейки срезов: кортеж раскладывается на стек вместе с числом элементов.
-@pure fun keccak256OfParts(parts: array<slice>): uint256 asm "255 PUSHINT EXPLODEVAR HASHEXT_KECCAK256"
 /// Восстановление ключа secp256k1 из подписи: (признак, x, y, успех).
 @pure fun ecRecover(hash: uint256, v: int, r: uint256, s: uint256): (int?, int?, int?, bool)
   asm "ECRECOVER NULLSWAPIFNOT2 NULLSWAPIFNOT"
@@ -75,29 +75,6 @@ fun evmExitMinValue(): coins {
   return calculateGasFee(BASECHAIN, EVM_EXIT_STEP_GAS)
     + calculateForwardFee(BASECHAIN, CLAIM_MESSAGE_BITS, CLAIM_MESSAGE_CELLS)
     + nullifierMinValue();
-}
-
-/// Срезы «змейки» по порядку: только данные, без ссылок.
-@inline_ref
-fun byteParts(root: cell): array<slice> {
-  var parts: array<slice> = [];
-  var current = root;
-  var more = true;
-  while (more) {
-    var s = current.beginParse();
-    val bits = s.remainingBitsCount();
-    assert (bits % 8 == 0) throw EvmExitErrors.BadEncoding;
-    parts.push(s.loadBits(bits));
-    assert (parts.size() <= EVM_MAX_PARTS) throw EvmExitErrors.BadEncoding;
-    val refs = s.remainingRefsCount();
-    assert (refs <= 1) throw EvmExitErrors.BadEncoding;
-    if (refs == 1) {
-      current = s.loadRef();
-    } else {
-      more = false;
-    }
-  }
-  return parts;
 }
 
 /// Последовательное чтение байтовой строки, разложенной по срезам.
@@ -217,7 +194,7 @@ fun evmAccountBalance(stateRoot: int, key: int, firstStep: Cell<EvmProofStep>): 
   var step = firstStep.load();
   // Каждый узел продвигает глубину хотя бы на полубайт, глубина не больше 64: цикл конечен.
   while (true) {
-    val parts = byteParts(step.node);
+    val parts = byteParts(step.node, EVM_MAX_PARTS, EvmExitErrors.BadEncoding);
     assert (keccak256OfParts(parts) == expected) throw EvmExitErrors.WrongNodeHash;
     var reader = ByteReader { parts: parts, next: 0, current: createEmptySlice() };
     reader.listHeader();
@@ -305,7 +282,7 @@ fun handleForceExitEvm(valueCoins: coins, msg: ForceExitEvm) {
   assert (workchain == BASECHAIN) throw RollupErrors.WrongRecipient;
 
   // Заголовок: его хеш — слово состояния контракта, из него — корень состояния Ethereum.
-  val headerParts = byteParts(msg.header);
+  val headerParts = byteParts(msg.header, EVM_MAX_PARTS, EvmExitErrors.BadEncoding);
   assert (keccak256OfParts(headerParts) == state.stateRoot) throw EvmExitErrors.WrongBlockHeader;
   val evmStateRoot = evmHeaderStateRoot(headerParts);
 

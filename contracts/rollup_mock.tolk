@@ -20,12 +20,12 @@ fun onInternalMessage(inMsg: InMessage) {
 
   match (msg) {
     SubmitBatch => {
-      var batch = prepareSubmitBatch(inMsg.senderAddress, msg);
+      val batch = prepareSubmitBatch(inMsg.senderAddress, msg);
       // ЗАГЛУШКА — единственное отличие от rollup.tolk: пруф считается верным, если его
       // первое число равно 1.
       val ok = (msg.proof.load().ax == 1) && (batch.digest != 0);
       assert (ok) throw RollupErrors.WrongProof;
-      applyBatch(mutate batch.storage, batch.state, batch.queue, batch.roots);
+      applyBatch(batch);
     }
     PublishData => {
       handlePublishData(inMsg.senderAddress, msg);
@@ -54,21 +54,8 @@ fun onInternalMessage(inMsg: InMessage) {
     FinalizeKey => {
       handleFinalizeKey(inMsg.senderAddress, msg);
     }
-    SetExitKey => {
-      handleSetExitKey(inMsg.senderAddress, msg);
-    }
     ActivateEscapeHatch => {
       handleActivateEscapeHatch();
-    }
-    ForceExit => {
-      val storage = RollupStorage.load();
-      val claim = msg.claim.load();
-      val digest = prepareForceExit(inMsg.valueCoins, storage, claim);
-      // ЗАГЛУШКА — единственное отличие от rollup.tolk: пруф считается верным, если его
-      // первое число равно 1.
-      val ok = (msg.proof.load().ax == 1) && (digest != 0);
-      assert (ok) throw RollupErrors.WrongProof;
-      completeForceExit(storage, msg.queryId, claim);
     }
     ForceExitEvm => {
       handleForceExitEvm(inMsg.valueCoins, msg);
@@ -92,20 +79,54 @@ fun onBouncedMessage(inMsg: InMessageBounced) {
   // ничего не записал, поэтому откатывать нечего: остаток монет остаётся на балансе.
 }
 
-/// (корень состояния, корень выводов, номер батча)
-get fun rollupState(): (int, int, int) {
+/// Версия протокола: формат публичных значений, сообщений и хранилища.
+get fun protocolVersion(): int {
+  return PROTOCOL_VERSION;
+}
+
+/// Хеш заголовка генезиса L2, с которым контракт соглашается зафиксировать ключ.
+get fun genesisHash(): int {
+  return GENESIS_HASH;
+}
+
+/// (слово состояния, корень выводов, номер батча, счётчик выводов)
+get fun rollupState(): (int, int, int, int) {
   return rollupStateView();
 }
 
-/// Очередь депозитов: поставлено, цель следующего батча, обработано — счётчик и хеш для каждого.
+/// Очередь L1: поставлено и обработано — счётчик и хеш для каждого; сколько записей убрано.
 get fun depositQueue(): DepositQueue {
   return depositQueueView();
 }
 
-/// Первый публичный вход, который контракт потребует от следующего батча с такими корнями
+/// Запись об элементе очереди L1: (есть ли, хеш очереди до элемента, когда встал).
+get fun queueItem(index: int): (bool, int, int) {
+  return queueItemView(index);
+}
+
+/// Пределы очереди L1: (элементов на батч, записей в словаре, ячеек в «змейке» принудительной
+/// транзакции, записей, убираемых одной постановкой, предел суммы депозита на L2).
+get fun queueLimits(): (int, int, int, int, int) {
+  return queueLimitsView();
+}
+
+/// Границы времени: (наименьший допустимый maxBlockAge, наименьший допустимый срок заморозки).
+get fun timeLimits(): (int, int) {
+  return timeLimitsView();
+}
+
+/// Первый публичный вход, который контракт потребует от следующего батча с такими значениями
 /// (при уже опубликованных для него данных).
-get fun expectedPublicInput(newStateRoot: int, withdrawalsRoot: int): int {
-  return expectedPublicInputView(newStateRoot, withdrawalsRoot);
+get fun expectedPublicInput(
+  newStateRoot: int, withdrawalsRoot: int, withdrawalsCount: int, queueProcessedUpTo: int, blockTimestamp: int
+): int {
+  return expectedPublicInputView(BatchRoots {
+    newStateRoot: newStateRoot,
+    withdrawalsRoot: withdrawalsRoot,
+    withdrawalsCount: withdrawalsCount,
+    queueProcessedUpTo: queueProcessedUpTo,
+    blockTimestamp: blockTimestamp,
+  });
 }
 
 /// Накопительный хеш данных, опубликованных для батча с этим номером; 0, если их нет.
@@ -127,11 +148,6 @@ get fun keyHash(): int {
   return keys.vkData!.hash();
 }
 
-/// Хеш ключа верификации программы выхода; 0, пока ключ не зафиксирован.
-get fun exitKeyHash(): int {
-  return exitKeyHashView();
-}
-
 get fun nullifierAddress(leafIndex: int): address {
   return nullifierDeployment(RollupStorage.load().nullifierCode, leafIndex).calculateAddress();
 }
@@ -141,14 +157,9 @@ get fun exitNullifierAddress(l2Account: int): address {
   return nullifierDeployment(RollupStorage.load().nullifierCode, exitNullifierKey(l2Account)).calculateAddress();
 }
 
-/// (заморожен ли, когда встал самый старый необработанный депозит или 0, срок в секундах)
+/// (заморожен ли, когда встал самый старый необработанный элемент очереди или 0, срок в секундах)
 get fun escapeState(): (bool, int, int) {
   return escapeStateView();
-}
-
-/// Публичный вход, который контракт потребует от пруфа выхода с такой заявкой.
-get fun expectedExitInput(l2Account: int, amount: int, recipientHash: int): int {
-  return expectedExitInputView(l2Account, amount, recipientHash);
 }
 
 /// (вноситель, сумма) по номеру депозита; сумма 0, если квитанции нет.
@@ -156,8 +167,9 @@ get fun depositReceipt(depositIndex: int): (address?, int) {
   return depositReceiptView(depositIndex);
 }
 
-/// Параметры развёртывания: (владелец, секвенсор, chainId, срок заморозки, хеш кода нуллификатора).
-get fun deployment(): (address, address, int, int, int) {
+/// Параметры развёртывания: (владелец, секвенсор, chainId, срок заморозки, наибольший возраст
+/// блока, хеш кода нуллификатора).
+get fun deployment(): (address, address, int, int, int, int) {
   return deploymentView();
 }
 
@@ -166,9 +178,9 @@ get fun owedPayout(key: int): (address?, int) {
   return owedPayoutView(key);
 }
 
-/// Минимум монет для Withdraw и для ForceExit при текущих ценах сети.
-get fun minimumValues(): (int, int) {
-  return (withdrawMinValue(), forceExitMinValue());
+/// Минимум монет для Withdraw при текущих ценах сети (для ForceExitEvm — evmExitBudget).
+get fun minimumValues(): int {
+  return withdrawMinValue();
 }
 
 /// Запасы газа, из которых считаются пороги, и то, что из них получается в монетах:
@@ -185,7 +197,7 @@ get fun queueBudgets(): (int, int, int) {
 }
 
 /// Плата за место в очереди сейчас: (комиссия депозита, плата за принудительную транзакцию,
-/// элементов в текущем окне, шаг удвоения).
+/// необработанных элементов в очереди, шаг удвоения).
 get fun queueFees(): (int, int, int, int) {
   return queueFeesView();
 }
