@@ -260,7 +260,7 @@ describe('Rollup: настоящая проверка пруфа, протоко
             'rollup-submit-batch.json',
             {
                 source: 'Измерено в @ton/sandbox тестом tests/RollupProof.spec.ts на настоящем контракте; не редактировать вручную',
-                note: 'Газ транзакций rollup-контракта протокола v2 с настоящей проверкой пруфа BN254 (один переменный публичный вход — дайджест одиннадцати слов); пруфы — игрушечной схемы. submitBatch — отметка очереди в её середине, очередь из одного элемента, без данных; submitBatchWithData — отметка в середине, две порции данных; submitBatchAtHead — отметка на голове очереди, данные, ненулевые прежние корень и счётчик выводов; submitBatchFullQueue — словарь очереди заполнен до предела (maxTrackedItems − 1 записей), отметка в его середине, отрезок в maxBatchQueueItems элементов, данные. submitBatchWorst — наибольший из них, submitBatchHeadroom — запас до лимита газа транзакции. rejectedForgery и rejectedForgeryFullQueue — «лучшая подделка», отклонённая замыкающим равенством. depositFullQueue и forceTransactionFullQueue — шаги очереди на том же полном словаре при самой глубокой вставке (см. bench/rollup-queue-gas.json — те же шаги на двойнике).',
+                note: 'Газ транзакций rollup-контракта протокола v2 с настоящей проверкой пруфа BN254 (один переменный публичный вход — дайджест одиннадцати слов); пруфы — игрушечной схемы. submitBatch — отметка очереди в её середине, очередь из одного элемента, без данных; submitBatchWithData — отметка в середине, две порции данных; submitBatchAtHead — отметка на голове очереди, данные, ненулевые прежние корень и счётчик выводов; submitBatchFullQueue — словарь очереди заполнен до предела (maxTrackedItems − 1 записей), отметка в его середине, отрезок в maxBatchQueueItems элементов, данные, а в словаре данных — записи и трёх следующих батчей (всего четыре: больше контракт вперёд не принимает). submitBatchWorst — наибольший из них, submitBatchHeadroom — запас до лимита газа транзакции. rejectedForgery и rejectedForgeryFullQueue — «лучшая подделка», отклонённая замыкающим равенством. depositFullQueue и forceTransactionFullQueue — шаги очереди на том же полном словаре при самой глубокой вставке (см. bench/rollup-queue-gas.json — те же шаги на двойнике).',
                 gasLimit: TX_GAS_LIMIT,
                 maxTrackedItems: constants.maxTrackedItems,
                 maxBatchQueueItems: constants.maxBatchQueueItems,
@@ -824,6 +824,26 @@ describe('Rollup: настоящая проверка пруфа, протоко
             };
             at(roots);
             await publishData(full, full.batchIndexBefore + 1, dataOf(full), target);
+            // Худший случай словаря данных: опубликованы данные и всех следующих батчей, сколько
+            // контракт позволяет вперёд, — в словаре столько записей, сколько в нём бывает. Батч
+            // забирает и удаляет только свою.
+            const ahead = [2, 3, 4].map((offset) => full.batchIndexBefore + offset);
+            for (const batchIndex of ahead) {
+                const published = await target.sendPublishData(sequencer.getSender(), {
+                    batchIndex,
+                    data: dataChunkCell(Buffer.from(`данные батча ${batchIndex}, опубликованные заранее`)),
+                    value: PUBLISH_DATA_VALUE,
+                });
+                accepted(published, target);
+            }
+            const beyond = await target.sendPublishData(sequencer.getSender(), {
+                batchIndex: full.batchIndexBefore + 5,
+                data: dataChunkCell(Buffer.from('слишком далеко')),
+                value: PUBLISH_DATA_VALUE,
+            });
+            rejected(beyond, RollupErrors.dataTooFarAhead, target);
+            const pendingAhead = await Promise.all(ahead.map((batchIndex) => target.getBatchDataHash(batchIndex)));
+            expect(pendingAhead.every((hash) => hash !== 0n)).toBe(true);
             expect(await target.getExpectedPublicInput(roots)).toBe(BigInt(full.publicInput));
 
             // Подделка на том же состоянии: отказ замыкающим равенством, состояние не тронуто.
@@ -843,6 +863,9 @@ describe('Rollup: настоящая проверка пруфа, протоко
             // Батч записей не удаляет и счётчик убранных не трогает.
             expect(after.items.size).toBe(constants.maxTrackedItems - 1);
             expect(after.prunedCount).toBe(deepestBase());
+            // Свою запись о данных батч удалил, записи следующих батчей остались как были.
+            expect(await target.getBatchDataHash(full.batchIndexBefore + 1)).toBe(0n);
+            expect(await Promise.all(ahead.map((batchIndex) => target.getBatchDataHash(batchIndex)))).toEqual(pendingAhead);
             expect(await target.getRollupState()).toEqual({
                 stateRoot: words.newStateRoot,
                 withdrawalsRoot: words.withdrawalsRoot,
