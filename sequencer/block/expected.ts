@@ -146,3 +146,65 @@ export function reportMismatches(
         out.push('байты публичных значений не те');
     return out;
 }
+
+/**
+ * Несущие слова отдельно: блок, который доказывает пруф, — ровно кандидат, и стоит он ровно на
+ * проверенной вершине. Остальное (reportMismatches) осмысленно только при этих двух.
+ */
+export function anchorMismatches(report: EvmBatchReport, parentHash: string, candidateHash: string): string[] {
+    const out: string[] = [];
+    const word = (value: string) => {
+        try {
+            return BigInt(value);
+        } catch {
+            return -1n;
+        }
+    };
+    if (word(report.publicValues.newStateRoot) !== BigInt(candidateHash))
+        out.push(
+            `newStateRoot программы ${report.publicValues.newStateRoot} — не хеш кандидата ${candidateHash}: отчёт о другом блоке`,
+        );
+    if (word(report.publicValues.prevStateRoot) !== BigInt(parentHash))
+        out.push(
+            `prevStateRoot программы ${report.publicValues.prevStateRoot} — не хеш проверенной вершины ${parentHash}`,
+        );
+    return out;
+}
+
+/**
+ * Судьба принудительных — ПО ПОРЯДКУ, не по множеству байтов: две одинаковые принудительные в
+ * одном отрезке законны (копию чужой ставит кто угодно), программа включает первую и пропускает
+ * вторую (круг 18, H1). Идём по принудительным отрезка: i-я запись отчёта — о i-й принудительной
+ * (её место в отрезке — queueIndex), каждая включённая — следующая транзакция блока байт в байт,
+ * и других принудительных в блоке нет. `blockForced` — первые транзакции блока (принудительные).
+ */
+export function forcedFateMismatches(
+    segment: QueuedItem[],
+    forced: EvmBatchReport['forced'],
+    blockForced: string[],
+): string[] {
+    const out: string[] = [];
+    const positions = segment.flatMap(({ item }, position) => (item.kind === 'forced' ? [{ item, position }] : []));
+    if (forced.length !== positions.length)
+        out.push(`в отчёте программы принудительных ${forced.length}, в отрезке ${positions.length}`);
+    let next = 0;
+    positions.forEach(({ item, position }, index) => {
+        const outcome = forced[index];
+        if (!outcome) return;
+        if (outcome.queueIndex !== position)
+            out.push(
+                `принудительная №${item.number}: у программы место в отрезке ${outcome.queueIndex}, у сервиса ${position}`,
+            );
+        if (outcome.outcome !== 'included') return;
+        const raw = '0x' + item.bytes.toString('hex');
+        const atBlock = blockForced[next];
+        if (atBlock === undefined || atBlock.toLowerCase() !== raw)
+            out.push(
+                `принудительная №${item.number}: программа включила её, а транзакция блока №${next} — ${atBlock === undefined ? 'нет такой' : 'другая'}`,
+            );
+        next++;
+    });
+    if (next !== blockForced.length)
+        out.push(`в блоке принудительных ${blockForced.length}, а программа включила ${next}`);
+    return out;
+}

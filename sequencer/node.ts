@@ -1,14 +1,15 @@
-import { ChildProcess, spawn } from 'child_process';
+import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
-import { mkdirSync, writeFileSync } from 'fs';
+import { chmodSync, mkdirSync, writeFileSync } from 'fs';
 import path from 'path';
 import { BRIDGE_ADDRESS, BRIDGE_CODE, GENESIS_HASH, genesisJson } from './protocol';
+import { track } from './children';
 import { NodeRpc, rpcClient } from './rpc';
 
 // Локальный узел reth v2.2.0 для сборщика: генезис протокола (мост-предустановка), JSON-RPC и
 // Engine API только на 127.0.0.1, без пиров. Клиента консенсуса нет: блоки собирает сервис
 // (testing_buildBlockV1), голову и финальность двигает он же (engine_forkchoiceUpdatedV3).
-// Узел гасится при выходе процесса и по сигналам — фоновым он не остаётся.
+// Узел гасится при выходе процесса и по сигналам (children.ts) — фоновым он не остаётся.
 
 export type NodeOptions = {
     reth: string;
@@ -27,20 +28,6 @@ export type RunningNode = {
     stop(): Promise<void>;
 };
 
-const live = new Set<ChildProcess>();
-let handlersInstalled = false;
-function installHandlers() {
-    if (handlersInstalled) return;
-    handlersInstalled = true;
-    process.on('exit', () => live.forEach((child) => child.kill('SIGKILL')));
-    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
-        process.once(signal, () => {
-            live.forEach((child) => child.kill('SIGTERM'));
-            process.exit(1);
-        });
-    }
-}
-
 async function portBusy(port: number): Promise<boolean> {
     try {
         await fetch(`http://127.0.0.1:${port}`, { method: 'POST', body: '{}', signal: AbortSignal.timeout(1000) });
@@ -52,7 +39,6 @@ async function portBusy(port: number): Promise<boolean> {
 
 /** Пишет генезис (если его ещё нет — тот же файл переиспользуется) и секрет, поднимает узел. */
 export async function startNode(options: NodeOptions): Promise<RunningNode> {
-    installHandlers();
     for (const port of [options.httpPort, options.authPort]) {
         if (await portBusy(port)) throw new Error(`порт ${port} занят: на нём уже кто-то отвечает`);
     }
@@ -64,7 +50,9 @@ export async function startNode(options: NodeOptions): Promise<RunningNode> {
     const secret = randomBytes(32);
     const jwtPath = path.join(options.dir, 'jwt.hex');
     writeFileSync(jwtPath, secret.toString('hex'), { mode: 0o600 });
-    const child = spawn(
+    // mode действует только при создании файла: прежний файл с иными правами — тоже 600.
+    chmodSync(jwtPath, 0o600);
+    const child = track(spawn(
         'nice',
         [
             '-n',
@@ -106,16 +94,19 @@ export async function startNode(options: NodeOptions): Promise<RunningNode> {
             path.join(options.dir, 'logs'),
         ],
         { stdio: 'ignore' },
-    );
-    live.add(child);
+    ));
     const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-    child.once('exit', () => live.delete(child));
     const rpcUrl = `http://127.0.0.1:${options.httpPort}`;
     const rpc: NodeRpc = { eth: rpcClient(rpcUrl), engine: rpcClient(`http://127.0.0.1:${options.authPort}`, secret) };
     const stop = async () => {
         if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
-        await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 15_000))]);
-        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        let timer: NodeJS.Timeout | undefined;
+        await Promise.race([exited, new Promise((resolve) => (timer = setTimeout(resolve, 15_000)))]);
+        clearTimeout(timer);
+        if (child.exitCode === null && child.signalCode === null) {
+            child.kill('SIGKILL');
+            await exited;
+        }
     };
     try {
         for (let attempt = 0; ; attempt++) {

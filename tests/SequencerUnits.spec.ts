@@ -65,22 +65,25 @@ describe('сборщик блоков: отрезок и зачисления', 
 
     it('отрезок — префикс окна не длиннее предела контракта', () => {
         const window = Array.from({ length: 5 }, (_, index) => deposit(index + 1, A, 1n));
-        expect(chooseSegment(window, 3, new Map())).toEqual({
+        const policy = { pending: window.length, previousCut: false };
+        expect(chooseSegment(window, 3, new Map(), policy)).toEqual({
             items: window.slice(0, 3),
             cut: 'предел 3 элементов на батч',
+            depositCut: false,
         });
-        expect(chooseSegment(window, 5, new Map())).toEqual({ items: window, cut: null });
-        expect(chooseSegment(window, 0, new Map()).items).toEqual([]);
-        expect(() => chooseSegment([window[0], window[2]], 5, new Map())).toThrow('не по порядку');
+        expect(chooseSegment(window, 5, new Map(), policy)).toEqual({ items: window, cut: null, depositCut: false });
+        expect(chooseSegment(window, 0, new Map(), policy).items).toEqual([]);
+        expect(() => chooseSegment([window[0], window[2]], 5, new Map(), policy)).toThrow('не по порядку');
     });
 
-    it('принудительная от счёта, которому в этом же отрезке зачисляется депозит, уходит в следующий блок', () => {
+    it('без очереди сверх предела принудительная от счёта с депозитом в этом же отрезке уходит в следующий блок', () => {
         const window = [
             forced(1, Buffer.from('aa', 'hex')),
             deposit(2, A, 1n),
             forced(3, Buffer.from('bb', 'hex')),
             deposit(4, B, 1n),
         ];
+        const policy = { pending: window.length, previousCut: false };
         // Отправитель элемента 3 — A: депозит A зачислится только в конце блока, отрезок режется перед ним.
         expect(
             chooseSegment(
@@ -90,10 +93,12 @@ describe('сборщик блоков: отрезок и зачисления', 
                     [1, A],
                     [3, A.toUpperCase().replace('0X', '0x')],
                 ]),
+                policy,
             ),
         ).toEqual({
             items: window.slice(0, 2),
             cut: 'элемент №3: отправителю зачисляется депозит в этом же отрезке',
+            depositCut: true,
         });
         // Принудительная ДО депозита того же счёта — не повод резать; чужой отправитель — тоже.
         expect(
@@ -104,6 +109,7 @@ describe('сборщик блоков: отрезок и зачисления', 
                     [1, A],
                     [3, B],
                 ]),
+                policy,
             ).items,
         ).toEqual(window);
     });
@@ -307,7 +313,14 @@ describe('сборщик блоков: элементы очереди из со
         await expect(matchQueueItems(from, hashes, messages.slice(0, 1), async () => 5n)).rejects.toThrow(
             'сообщения, которое его поставило, сервис не нашёл',
         );
-        expect(QueueMismatchError).toBeDefined();
+        // Каждый отказ — именно QueueMismatchError (сервис останавливается на нём, а не повторяет).
+        for (const failing of [
+            matchQueueItems(from, hashes, messages, async () => 6n),
+            matchQueueItems(from, hashes, altered, async () => 5n),
+            matchQueueItems(from, hashes, messages, async () => null),
+            matchQueueItems(from, hashes, messages.slice(0, 1), async () => 5n),
+        ])
+            await expect(failing).rejects.toBeInstanceOf(QueueMismatchError);
     });
 
     it('ответ toncenter v3: успех — вычисление прошло и транзакция не прервана; внешние и возвращённые — без тела', () => {

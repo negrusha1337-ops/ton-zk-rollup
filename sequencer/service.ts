@@ -1,7 +1,14 @@
 import { appendFileSync, copyFileSync, mkdirSync, readFileSync } from 'fs';
 import path from 'path';
 import { EvmBatchReport } from '../wrappers/evmProofs';
-import { bridgeLeaves, expectedPublicValues, LogEntry, reportMismatches } from './block/expected';
+import {
+    anchorMismatches,
+    bridgeLeaves,
+    expectedPublicValues,
+    forcedFateMismatches,
+    LogEntry,
+    reportMismatches,
+} from './block/expected';
 import {
     blockTimestamp,
     buildRequest,
@@ -13,7 +20,19 @@ import {
     PoolTransaction,
 } from './block/payload';
 import { chooseSegment, creditsOf } from './block/segment';
-import { blockInput, classifyForced, ProgramTools, RollupWitness, runProgram } from './program';
+import {
+    blockInput,
+    classifyForced,
+    hostIdentity,
+    identityMismatches,
+    loadProgramKeys,
+    ProgramKeys,
+    ProgramTools,
+    reportIdentityMismatches,
+    RollupWitness,
+    runProgram,
+    ToolFailure,
+} from './program';
 import { FORCED_TX_GAS_CAP, GAS_LIMIT, ZERO_HASH } from './protocol';
 import { BatchProof, Prover, ProverJob } from './prover';
 import { QueuedItem, QueueSource } from './queue/types';
@@ -23,6 +42,7 @@ import {
     BlockRecord,
     DEFAULT_STATE_DIR,
     deserialize,
+    lockStateDir,
     Pending,
     SequencerState,
     serialize,
@@ -52,6 +72,11 @@ import { BatchSubmitter } from './submitter';
 
 export type Phase = 'built' | 'inserted' | 'tentative' | 'checked' | 'proven';
 
+/** fixtures/evm_batches/program.json — что записано о сборке программы (пишет только --vkeys). */
+export const DEFAULT_PROGRAM_KEYS = path.join(__dirname, '..', 'fixtures', 'evm_batches', 'program.json');
+/** Бюджет газа транзакций пула на блок по умолчанию (принцип 0.1: цена блока для прувера известна). */
+export const DEFAULT_POOL_GAS_BUDGET = 5_000_000n;
+
 /** Остановка сервиса: дальше без человека нельзя (текст — что случилось). */
 export class SequencerStop extends Error {}
 /** Только для тестов: искусственная остановка после фазы. */
@@ -75,6 +100,20 @@ export type SequencerConfig = {
     tools: ProgramTools;
     /** Предел отрезка очереди — get-метод queueLimits контракта. */
     maxBatchQueueItems: number;
+    /** Срок приёма батча после времени блока, с — get-метод deployment контракта (maxBlockAge). */
+    maxBlockAge: number;
+    /** program.json сборки программы; по умолчанию — DEFAULT_PROGRAM_KEYS. */
+    programKeysPath?: string;
+    /** Кандидат старше этого (с от его времени) после перезапуска не продолжается; по умолчанию maxBlockAge / 4. */
+    staleCandidateAge?: number;
+    /** Запас до конца срока приёма перед пруфом и перед отправкой, с; по умолчанию 300. */
+    submitMargin?: number;
+    /** Наибольшее расхождение часов машины с временем L1 при старте, с; по умолчанию 60. */
+    clockSkewLimit?: number;
+    /** Бюджет газа транзакций пула на блок; по умолчанию DEFAULT_POOL_GAS_BUDGET. */
+    poolGasBudget?: bigint;
+    /** Сколько раз повторять запуск хоста или rsp после сбоя инструмента; по умолчанию 2. */
+    toolRetries?: number;
     now?: () => number;
 };
 
@@ -83,6 +122,8 @@ export type SequencerDeps = {
     queue: QueueSource;
     prover: Prover;
     submitter: BatchSubmitter;
+    /** Время последнего блока L1 (TON), с: в Sandbox — blockchain.now, в сети — у провайдера. */
+    l1Now: () => Promise<number>;
     log?: (line: string) => void;
     /** Только для тестов: остановиться после фазы; подменить запрос к узлу на попытке. */
     faults?: { stopAfter?: Phase; tamper?: (request: BuildRequest, attempt: number) => BuildRequest };
@@ -108,6 +149,8 @@ export class Sequencer {
     private readonly store: StateStore;
     private state!: SequencerState;
     private readonly now: () => number;
+    private programKeys!: ProgramKeys;
+    private release: (() => void) | null = null;
 
     constructor(
         private readonly config: SequencerConfig,
@@ -144,9 +187,39 @@ export class Sequencer {
         ]);
     }
 
-    /** Загрузить состояние, сверить узел с ним и вернуть узел на проверенную цепочку. */
+    /**
+     * Взять каталог состояния, сверить хост с program.json и часы с L1, загрузить состояние,
+     * сверить узел с ним и вернуть узел на проверенную цепочку.
+     */
     async start(): Promise<void> {
+        this.release = lockStateDir(this.config.stateDir);
+        try {
+            await this.startLocked();
+        } catch (error) {
+            this.close();
+            throw error;
+        }
+    }
+
+    /** Снять блокировку каталога состояния. Экземпляр после этого не продвигается. */
+    close(): void {
+        this.release?.();
+        this.release = null;
+    }
+
+    private async startLocked(): Promise<void> {
         await checkGenesis(this.deps.node, this.config.chainId);
+        this.programKeys = loadProgramKeys(this.config.programKeysPath ?? DEFAULT_PROGRAM_KEYS);
+        const identity = identityMismatches(await hostIdentity(this.config.tools), this.programKeys);
+        if (identity.length > 0)
+            throw new SequencerStop(`хост программы не тот, под который выведен ключ контракта: ${identity.join('; ')}; пересоберите хост`);
+        const l1 = await this.deps.l1Now();
+        const skew = this.now() - l1;
+        const limit = this.config.clockSkewLimit ?? 60;
+        if (Math.abs(skew) > limit)
+            throw new SequencerStop(
+                `часы машины расходятся со временем L1 на ${skew} с (предел ${limit}): время блоков и срок приёма считались бы неверно`,
+            );
         this.state = this.store.load(this.config.chainId);
         const { tip, accepted } = this.state;
         let status = (await this.fcu(tip.hash, tip.hash, accepted.hash)).payloadStatus.status;
@@ -176,6 +249,7 @@ export class Sequencer {
 
     /** Одно продвижение. `allowEmpty` — собирать блок и без элементов очереди и транзакций пула. */
     async step(options: { allowEmpty?: boolean } = {}): Promise<StepResult> {
+        if (!this.release) throw new Error('сервис не запущен (start) либо закрыт (close)');
         const unaccepted = this.state.blocks.find((record) => record.status !== 'accepted');
         if (unaccepted) return this.proveAndSubmit(unaccepted);
         return this.nextBlock(options.allowEmpty ?? false);
@@ -183,10 +257,35 @@ export class Sequencer {
 
     // --- пруф и отправка ---
 
+    /**
+     * Успеть ли: контракт берёт батч, пока `время L1 ≤ время блока + maxBlockAge` (0.3), и позже
+     * негоден навсегда. Перед пруфом и перед отправкой — с запасом; не успеть — остановка.
+     */
+    private async assertInTime(number: number, report: EvmBatchReport, before: string): Promise<void> {
+        const timestamp = Number(report.publicValues.blockTimestamp);
+        const l1 = await this.deps.l1Now();
+        const margin = this.config.submitMargin ?? 300;
+        const deadline = timestamp + this.config.maxBlockAge;
+        if (deadline < l1 + margin)
+            throw new SequencerStop(
+                `батч ${number} не успеть принять ${before}: время блока ${timestamp} + maxBlockAge ${this.config.maxBlockAge} = ${deadline}, ` +
+                    `а время L1 ${l1} + запас ${margin} = ${l1 + margin}; блок нужно пересобрать (пересборки ещё нет)`,
+            );
+    }
+
+    private assertReportIdentity(report: EvmBatchReport): void {
+        const mismatches = reportIdentityMismatches(report, this.programKeys);
+        if (mismatches.length > 0)
+            throw new SequencerStop(`хост устарел: ${mismatches.join('; ')}; пересоберите хост и запустите сервис снова`);
+    }
+
     private async proveAndSubmit(record: BlockRecord): Promise<StepResult> {
         const job = JSON.parse(readFileSync(path.join(record.dir, 'job.json'), 'utf8')) as ProverJob;
+        const report = JSON.parse(readFileSync(job.report, 'utf8')) as EvmBatchReport;
+        this.assertReportIdentity(report);
         let proof: BatchProof;
         if (record.status === 'checked') {
+            await this.assertInTime(record.number, report, 'до пруфа');
             proof = await this.deps.prover.prove(job);
             writeAtomically(path.join(record.dir, 'proof.json'), serialize(proof));
             record.status = 'proven';
@@ -195,7 +294,7 @@ export class Sequencer {
         } else {
             proof = deserialize<BatchProof>(readFileSync(path.join(record.dir, 'proof.json'), 'utf8'));
         }
-        const report = JSON.parse(readFileSync(job.report, 'utf8')) as EvmBatchReport;
+        await this.assertInTime(record.number, report, 'до отправки');
         const outcome = await this.deps.submitter.submit({
             number: record.number,
             blockHash: record.hash,
@@ -223,7 +322,17 @@ export class Sequencer {
         let attempt = 1;
         // Кандидат, отданный узлу до остановки, не собирается заново: проверка продолжается с его фазы.
         const resumed = this.state.pending;
-        if (resumed) {
+        const staleAge = this.config.staleCandidateAge ?? Math.floor(this.config.maxBlockAge / 4);
+        if (resumed && this.now() - Number(BigInt(resumed.payload.timestamp)) > staleAge) {
+            // Устаревший кандидат: его батч мог бы не успеть к контракту. Собирается новый той же
+            // высоты от той же вершины — он и вытеснит прежнего у узла.
+            this.log(
+                `блок ${resumed.number}: кандидат ${resumed.payload.blockHash} (фаза ${resumed.phase}) старше ${staleAge} с — собирается заново`,
+            );
+            this.state.pending = null;
+            this.save();
+            attempt = resumed.attempt;
+        } else if (resumed) {
             this.log(
                 `блок ${resumed.number}: продолжается кандидат ${resumed.payload.blockHash} с фазы ${resumed.phase}`,
             );
@@ -252,17 +361,22 @@ export class Sequencer {
         const dir = this.store.candidateDir(number, attempt);
         const window = await this.deps.queue.read(tip.queue, tip.cursor, this.config.maxBatchQueueItems);
         const forcedWindow = window.items.filter(({ item }) => item.kind === 'forced');
-        const verdicts = await classifyForced(
-            this.config.tools,
-            this.config.chainId,
-            forcedWindow.map(({ item }) => (item.kind === 'forced' ? item.bytes : Buffer.alloc(0))),
-            dir,
+        const verdicts = await this.tool(`блок ${number}: форма принудительных`, () =>
+            classifyForced(
+                this.config.tools,
+                this.config.chainId,
+                forcedWindow.map(({ item }) => (item.kind === 'forced' ? item.bytes : Buffer.alloc(0))),
+                dir,
+            ),
         );
         const signers = new Map<number, string>();
         verdicts.forEach((verdict, index) => {
             if (verdict.form === 'valid') signers.set(forcedWindow[index].item.number, verdict.signer);
         });
-        const choice = chooseSegment(window.items, this.config.maxBatchQueueItems, signers);
+        const choice = chooseSegment(window.items, this.config.maxBatchQueueItems, signers, {
+            pending: window.head.count - tip.queue.count,
+            previousCut: tip.cut ?? false,
+        });
         if (choice.cut) this.log(`блок ${number}: отрезок до ${tip.queue.count + choice.items.length} — ${choice.cut}`);
         const segment = choice.items;
         // Принудительные, годные по форме, — кандидаты в блок; остальные программа пропустит.
@@ -301,6 +415,7 @@ export class Sequencer {
                     forcedCount: raw.length,
                     payload: envelope.executionPayload,
                     segment,
+                    cut: choice.depositCut,
                     signers: [
                         ...new Set(
                             segment.flatMap(({ item }) =>
@@ -340,7 +455,9 @@ export class Sequencer {
             [],
         );
         const all = Object.values(content.pending ?? {}).flatMap((byNonce) => Object.values(byNonce));
-        const budget = GAS_LIMIT - BigInt(forcedCount) * FORCED_TX_GAS_CAP;
+        const room = GAS_LIMIT - BigInt(forcedCount) * FORCED_TX_GAS_CAP;
+        const limit = this.config.poolGasBudget ?? DEFAULT_POOL_GAS_BUDGET;
+        const budget = room < limit ? room : limit;
         const chosen = filterPool(all, this.config.chainId, budget);
         const raw: string[] = [];
         for (const transaction of chosen)
@@ -356,22 +473,23 @@ export class Sequencer {
         const { tip, accepted } = this.state;
         const hash = pending.payload.blockHash;
         if (pending.phase === 'built') {
-            const inserted = await this.deps.node.engine<{ status: string }>('engine_newPayloadV3', [
-                pending.payload,
-                [],
-                ZERO_HASH,
-            ]);
-            if (inserted.status !== 'VALID')
-                throw new SequencerStop(
-                    `узел не принял собранный им же блок ${pending.number}: ${JSON.stringify(inserted)}`,
-                );
-            pending.phase = 'inserted';
-            this.save();
+            await this.insert(pending);
             this.fault('inserted');
         }
         if (pending.phase === 'inserted' || (await this.canonicalHash(pending.number)) !== hash) {
             // Временная голова: без неё узел не отдаёт ни блок, ни свидетеля. safe и finalized — прежние.
-            const status = (await this.fcu(hash, tip.hash, accepted.hash)).payloadStatus.status;
+            let status = (await this.fcu(hash, tip.hash, accepted.hash)).payloadStatus.status;
+            if (status !== 'VALID') {
+                // Узел не знает кандидата: перезапущен после newPayload (неканонический блок
+                // в памяти, на диск не попал). Фаза — назад к built, блок — заново из сохранённого ответа.
+                this.log(
+                    `блок ${pending.number}: узел не знает кандидата ${hash} (${status}) — newPayload из сохранённого ответа`,
+                );
+                pending.phase = 'built';
+                this.save();
+                await this.insert(pending);
+                status = (await this.fcu(hash, tip.hash, accepted.hash)).payloadStatus.status;
+            }
             if (status !== 'VALID')
                 throw new SequencerStop(`узел не сделал кандидата ${pending.number} головой: ${status}`);
             pending.phase = 'tentative';
@@ -398,13 +516,15 @@ export class Sequencer {
         };
 
         // Свидетель: вход блока от узла (rsp) и доказательства счетов отправителей на родителе.
-        const input = await blockInput(this.config.tools, {
-            rpcUrl: this.config.rpcUrl,
-            genesisPath: this.config.genesisPath,
-            chainId: this.config.chainId,
-            number: pending.number,
-            workDir: pending.dir,
-        });
+        const input = await this.tool(`блок ${pending.number}: вход блока (rsp)`, () =>
+            blockInput(this.config.tools, {
+                rpcUrl: this.config.rpcUrl,
+                genesisPath: this.config.genesisPath,
+                chainId: this.config.chainId,
+                number: pending.number,
+                workDir: pending.dir,
+            }),
+        );
         const accountProofs: RollupWitness['accountProofs'] = [];
         for (const address of pending.signers) {
             const proof = await this.deps.node.eth<{ accountProof: string[] }>('eth_getProof', [
@@ -427,17 +547,21 @@ export class Sequencer {
             withdrawalsCount: tip.tree.count.toString(),
             accountProofs,
         };
-        const verdict = await runProgram(this.config.tools, {
-            blockInput: input,
-            chainId: this.config.chainId,
-            witness,
-            previousReport: tip.report,
-            workDir: pending.dir,
-            batchInput: path.join(pending.dir, 'batch.bin'),
-            report: path.join(pending.dir, 'report.json'),
-        });
+        const verdict = await this.tool(`блок ${pending.number}: программа (хост)`, () =>
+            runProgram(this.config.tools, {
+                blockInput: input,
+                chainId: this.config.chainId,
+                witness,
+                previousReport: tip.report,
+                workDir: pending.dir,
+                batchInput: path.join(pending.dir, 'batch.bin'),
+                report: path.join(pending.dir, 'report.json'),
+            }),
+        );
         if (!verdict.accepted) return reject(verdict.reason);
         const report = verdict.report;
+        // Отчёт не от той программы — виноват хост, а не кандидат: кандидат остаётся в работе.
+        this.assertReportIdentity(report);
 
         // Собственный расчёт против программы.
         const receipts = await this.deps.node.eth<{ logs: LogEntry[] }[]>('eth_getBlockReceipts', [
@@ -454,23 +578,23 @@ export class Sequencer {
             leaves: bridgeLeaves(receipts),
             dataChunks: report.dataChunksHex.map((chunk) => Buffer.from(chunk, 'hex')),
         });
-        const mismatches = reportMismatches(report, expected, tip.queue);
+        // Несущие слова — первыми и отдельно: отчёт о другом блоке или от другой вершины.
+        const mismatches = [
+            ...anchorMismatches(report, tip.hash, hash),
+            ...reportMismatches(report, expected, tip.queue),
+        ];
         const rawBlock = await this.deps.node.eth<string>('debug_getRawBlock', [hash]);
         if (rawBlock.replace(/^0x/, '') !== report.dataChunksHex.join(''))
             mismatches.push('данные батча — не RLP блока со слов узла');
-        // Судьба принудительных: включены ровно те, что стоят в блоке.
-        const inBlock = new Set(pending.request.transactions.slice(0, pending.forcedCount));
+        // Судьба принудительных — по порядку (две одинаковые в отрезке законны).
+        mismatches.push(
+            ...forcedFateMismatches(
+                pending.segment,
+                report.forced,
+                pending.payload.transactions.slice(0, pending.forcedCount),
+            ),
+        );
         const segmentForced = pending.segment.filter(({ item }) => item.kind === 'forced');
-        report.forced.forEach((outcome, index) => {
-            const item = segmentForced[index]?.item;
-            const raw = item && item.kind === 'forced' ? '0x' + item.bytes.toString('hex') : '';
-            if ((outcome.outcome === 'included') !== inBlock.has(raw))
-                mismatches.push(
-                    `принудительная №${item?.number}: программа — ${outcome.outcome}, в блоке — ${inBlock.has(raw) ? 'есть' : 'нет'}`,
-                );
-        });
-        if (report.forced.length !== segmentForced.length)
-            mismatches.push('в отчёте программы не все принудительные отрезка');
         if (mismatches.length > 0) {
             reject(`расчёт сервиса не сошёлся с программой: ${mismatches.join('; ')}`);
             throw new SequencerStop(
@@ -502,6 +626,7 @@ export class Sequencer {
             cursor: lastItem ? lastItem.message : tip.cursor,
             tree: expected.treeAfter,
             report: path.join(blockDir, 'report.json'),
+            ...(pending.cut ? { cut: true } : {}),
         };
         this.state.blocks.push({ number: pending.number, hash, status: 'checked', dir: blockDir });
         this.state.pending = null;
@@ -524,6 +649,40 @@ export class Sequencer {
             included,
             pool: pending.payload.transactions.length - pending.forcedCount,
         };
+    }
+
+    /** newPayload из сохранённого ответа узла; не VALID — остановка. Фаза — inserted. */
+    private async insert(pending: Pending): Promise<void> {
+        const inserted = await this.deps.node.engine<{ status: string }>('engine_newPayloadV3', [
+            pending.payload,
+            [],
+            ZERO_HASH,
+        ]);
+        if (inserted.status !== 'VALID')
+            throw new SequencerStop(
+                `узел не принял собранный им же блок ${pending.number}: ${JSON.stringify(inserted)}`,
+            );
+        pending.phase = 'inserted';
+        this.save();
+    }
+
+    /**
+     * Запуск хоста или rsp с повтором: сбой инструмента (ToolFailure — убит, упал вне проверок
+     * программы, нет файла) — не отказ программы. Повторы кончились — остановка; кандидат остаётся
+     * в работе и после перезапуска продолжается с той же фазы.
+     */
+    private async tool<T>(what: string, call: () => Promise<T>): Promise<T> {
+        const retries = this.config.toolRetries ?? 2;
+        for (let attempt = 0; ; attempt++) {
+            try {
+                return await call();
+            } catch (error) {
+                if (!(error instanceof ToolFailure)) throw error;
+                if (attempt >= retries)
+                    throw new SequencerStop(`${what}: сбой инструмента после ${attempt + 1} попыток — ${error.message}`);
+                this.log(`${what}: сбой инструмента (${error.message}) — повтор`);
+            }
+        }
     }
 
     private async canonicalHash(number: number): Promise<string | null> {
