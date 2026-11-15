@@ -18,14 +18,17 @@ import {
 const ROOT = path.join(__dirname, '..');
 const SELF = 'tests/ProtocolGate.spec.ts';
 
-/** Файлы без проверки типов: только скрипты протокола v1 — и каждый с причиной. */
+/**
+ * Файлы без проверки типов: только скрипты протокола v1 — и каждый с причиной. Скрипт полного
+ * цикла (scripts/runRethCycleTestnet.ts) перенесён на протокол v2: он типизируется и в этом
+ * списке его больше нет.
+ */
 const UNCHECKED: Record<string, string> = {
     'scripts/runRollupTestnet.ts':
         'прогон игрушечного реестра протокола v1 (пруфы fixtures/sp1_rollup_*, выход по пруфу); в v2 этого пути нет',
     'scripts/runEvmBatchTestnet.ts': 'приём батча EVM по пруфу протокола v1 (fixtures/sp1_evm_batch2); в v2 цепочки anvil нет',
     'scripts/runEvmExitTestnet.ts':
         'выход счёта EVM со словом состояния, заданным при развёртывании; в v2 его записывает только батч — ждёт пруфов v2',
-    'scripts/runRethCycleTestnet.ts': 'полный цикл на пруфах блоков Reth протокола v1 — ждёт пруфов v2 и переноса на обёртки v2',
 };
 
 /** Файлы с отложенными тестами (todo): только те, что ждут пруфов, — и каждый с причиной. */
