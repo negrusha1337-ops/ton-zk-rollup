@@ -299,8 +299,10 @@ npx blueprint run verifyRollupDeployment --testnet <адрес> <chainId> <ми�
   ДО того, как он станет проверенной вершиной, состояние в `.tools/sequencer/`. Прувер —
   `LocalProver` (очередь `.tools/sequencer/proofs/`, `prove-guarded.sh` с шардами из
   `zkvm-evm/host/prover-shards.env`, импорт `import-sp1-fixture.mjs sp1_evm_sequencer --out-dir
-  --report` — в каталог задания, не в fixtures/), заготовка `RemoteProver`; отправщик —
-  `TestnetSubmitter` (кошелёк `WALLET_MNEMONIC`/`WALLET_VERSION`, журнал `outbox.json` до отправки,
+  --report` — в каталог задания, не в fixtures/), `RemoteProver` (сервер с GPU по ssh, `--prover=remote:<хост>`,
+  скрипт `zkvm-evm/host/remote/prove-job.sh`); отправщик — `TestnetSubmitter` (кошелёк сервиса —
+  `SEQUENCER_MNEMONIC`/`SEQUENCER_WALLET_VERSION` из `.env` проекта, отдельный от кошелька прогонов
+  `WALLET_MNEMONIC`; сервис сам читает `.env` и отказывает, если ключи совпали; журнал `outbox.json` до отправки,
   get-методы на снимке счёта с его `sync_utime`); `main.ts check|run`; `main.ts deploy` (`deploy.ts`)
   разворачивает контракт v2 кошельком сервиса тем же отправщиком (`TestnetSubmitter.send`, следствия
   `deployed`/`keyPart`/`keyHash`; запись `outbox.json` несёт адрес контракта) со сверкой
