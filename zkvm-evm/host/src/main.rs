@@ -2,7 +2,8 @@
 //!
 //!   rollup-evm-host --vkeys                                  # ключ программы → fixtures/evm_batches/program.json
 //!   rollup-evm-host --block-input <кэш RSP>/input/<chainId>/<N>.bin --chain-id <chainId> \
-//!       [--witness witness.json] [--execute] [--write-input batch.bin] [--report report.json]
+//!       [--witness witness.json] [--previous-report block-(N-1).json] [--execute]
+//!       [--write-input batch.bin] [--report report.json]
 //!   rollup-evm-host --batch-input batch.bin --execute         # готовый вход батча (фикстура)
 //!   rollup-evm-host --batch-input batch.bin --prove --proof-out proof.json
 //!
@@ -12,6 +13,16 @@
 //! счетов отправителей принудительных транзакций (`eth_getProof` на родителе — их кладёт в файл
 //! свидетеля тот, кто ходит в узел), считает публичные значения нативно и, с `--execute`,
 //! исполняет гостевую программу в zkVM БЕЗ пруфа и сверяет её публичные значения с нативными.
+//!
+//! Прежняя отметка очереди (`queueProcessedFrom`) программе не нужна и в публичные значения не
+//! входит, но по ней батч заявляет контракту `queueProcessedUpTo`. Поэтому хост её не берёт из
+//! файла свидетеля на веру: ноль допустим только при нулевом прежнем хеше очереди, а ненулевая
+//! отметка — только вместе с отчётом предыдущего батча (`--previous-report`), с которым сверяются
+//! отметка, хеш очереди, фронтир и счётчик дерева выводов и хеш родителя.
+//!
+//! Вход батча (`--write-input`) пишется после всех запрошенных проверок — нативной и, с
+//! `--execute`, исполнения в zkVM — через временный файл: фикстуры входа, который zkVM не
+//! принял, не появляется.
 //!
 //! Зачем дополнение. Свидетель узла раскрывает только то, что трогал блок. Принудительную
 //! транзакцию, которую программа пропускает (nonce, баланс, отправителя нет), блок не содержит,
@@ -75,6 +86,10 @@ struct Args {
     /// доказательства счетов отправителей. Без него — пустая очередь и пустое дерево.
     #[arg(long, requires = "block_input")]
     witness: Option<PathBuf>,
+    /// Отчёт хоста о предыдущем батче (--report): с ним сверяется прежняя отметка очереди из
+    /// свидетеля. Обязателен, если отметка не ноль.
+    #[arg(long, requires = "witness")]
+    previous_report: Option<PathBuf>,
     /// Готовый вход батча (bincode), записанный раньше через --write-input.
     #[arg(long)]
     batch_input: Option<PathBuf>,
@@ -90,7 +105,8 @@ struct Args {
     /// Куда записать пруф Groth16 (JSON в формате zk/import-sp1-fixture.mjs).
     #[arg(long, requires = "prove")]
     proof_out: Option<PathBuf>,
-    /// Записать вход батча (bincode) — фикстура для тестов.
+    /// Записать вход батча (bincode) — фикстура для тестов. Пишется после нативной проверки и,
+    /// с --execute, после сверки с zkVM.
     #[arg(long)]
     write_input: Option<PathBuf>,
     /// Записать итог (JSON): одиннадцать слов, данные батча, судьба принудительных транзакций,
@@ -108,7 +124,8 @@ struct WitnessFile {
     #[serde(default)]
     prev_deposit_hash: B256,
     /// Прежняя отметка очереди (`processedCount` контракта): номер последнего обработанного
-    /// элемента. Программе не нужна — идёт в отчёт, чтобы батч знал, какую отметку заявить.
+    /// элемента. Программе не нужна — идёт в отчёт, чтобы батч знал, какую отметку заявить;
+    /// сверяется в `checked_queue_mark`. Без поля — ноль.
     #[serde(default)]
     queue_processed_from: u64,
     /// Отрезок очереди, который обрабатывает блок, по порядку.
@@ -345,7 +362,92 @@ fn supplement_state(
 /// Что известно о батче помимо входа программы: прежняя отметка очереди и чем дополнен свидетель.
 struct Extra {
     queue_processed_from: Option<u64>,
+    /// С чем сверена прежняя отметка очереди — для отчёта.
+    queue_mark_checked_against: Option<&'static str>,
     supplemented: Vec<serde_json::Value>,
+}
+
+/// Отказ по несогласованному свидетелю: сообщение и код 2 (как у прочих отказов хоста).
+fn refuse(message: String) -> ! {
+    eprintln!("{message}");
+    std::process::exit(2);
+}
+
+/// Поле отчёта предыдущего батча строкой.
+fn report_text<'a>(report: &'a serde_json::Value, path: &[&str]) -> &'a str {
+    let mut value = report;
+    for key in path {
+        value = &value[*key];
+    }
+    value.as_str().unwrap_or_else(|| refuse(format!("В отчёте предыдущего батча нет поля {}", path.join("."))))
+}
+
+/// Сверяет прежнюю отметку очереди из свидетеля и возвращает, с чем она сверена.
+///
+/// Отметка — не часть входа программы: программа знает только хеш очереди в прежней точке.
+/// Неверная отметка в отчёте дала бы батчу неверное `queueProcessedUpTo`, и контракт отверг бы
+/// его уже после пруфа. Ноль — это пустая прежняя очередь, её хеш — ноль, и наоборот. Ненулевая
+/// отметка сверяется с отчётом предыдущего батча: там она — `queueProcessedUpTo`, а хеш очереди,
+/// дерево выводов и слово состояния этого батча обязаны продолжать тот.
+fn checked_queue_mark(
+    witness: &WitnessFile,
+    previous_report: Option<&Path>,
+    block: &EthClientExecutorInput,
+) -> &'static str {
+    let from = witness.queue_processed_from;
+    let hash_is_zero = witness.prev_deposit_hash == B256::ZERO;
+    if (from == 0) != hash_is_zero {
+        refuse(format!(
+            "Прежняя отметка очереди {from} не согласуется с прежним хешем очереди {}: ноль у отметки и у хеша — только вместе.",
+            witness.prev_deposit_hash
+        ));
+    }
+    let Some(path) = previous_report else {
+        if from != 0 {
+            refuse(format!(
+                "Прежняя отметка очереди {from} не ноль: её нечем сверить. Передайте отчёт предыдущего батча (--previous-report)."
+            ));
+        }
+        return "empty queue";
+    };
+    let previous: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(path).expect("отчёт предыдущего батча не читается"))
+            .expect("отчёт предыдущего батча не разобран");
+    let up_to = previous["queueProcessedUpTo"].as_u64();
+    if up_to != Some(from) {
+        refuse(format!(
+            "Прежняя отметка очереди в свидетеле — {from}, а предыдущий батч обработал очередь до {up_to:?}."
+        ));
+    }
+    let frontier: Vec<B256> = if witness.withdrawals_frontier.is_empty() {
+        vec![B256::ZERO; WITHDRAWAL_TREE_DEPTH]
+    } else {
+        witness.withdrawals_frontier.clone()
+    };
+    let previous_frontier: Vec<B256> = previous["withdrawalsFrontierAfter"]
+        .as_array()
+        .unwrap_or_else(|| refuse("В отчёте предыдущего батча нет поля withdrawalsFrontierAfter".into()))
+        .iter()
+        .map(|node| node.as_str().and_then(|text| text.parse().ok()).unwrap_or_else(|| refuse("Фронтир в отчёте предыдущего батча не разобран".into())))
+        .collect();
+    let parse = |path: &[&str]| -> B256 {
+        report_text(&previous, path).parse().unwrap_or_else(|_| refuse(format!("Поле {} отчёта предыдущего батча — не хеш", path.join("."))))
+    };
+    let checks = [
+        ("хеш очереди", parse(&["publicValues", "newDepositHash"]) == witness.prev_deposit_hash),
+        ("хеш родителя", parse(&["publicValues", "newStateRoot"]) == block.current_block.header.parent_hash),
+        ("фронтир дерева выводов", previous_frontier == frontier),
+        (
+            "счётчик выводов",
+            report_text(&previous, &["publicValues", "withdrawalsCount"]) == witness.withdrawals_count.as_deref().unwrap_or("0"),
+        ),
+    ];
+    for (what, equal) in checks {
+        if !equal {
+            refuse(format!("Свидетель не продолжает предыдущий батч: не совпал {what}."));
+        }
+    }
+    "previous report"
 }
 
 /// Вход батча и сведения для отчёта: готовый (--batch-input) или собранный
@@ -354,7 +456,7 @@ fn load_input(args: &Args) -> (EvmBatchInput, Extra) {
     if let Some(path) = &args.batch_input {
         let input = bincode::deserialize(&fs::read(path).expect("файл входа батча не читается"))
             .expect("вход батча не разобран");
-        return (input, Extra { queue_processed_from: None, supplemented: Vec::new() });
+        return (input, Extra { queue_processed_from: None, queue_mark_checked_against: None, supplemented: Vec::new() });
     }
     let path = args.block_input.as_ref().expect("нужен --block-input или --batch-input");
     let mut block: EthClientExecutorInput =
@@ -366,6 +468,7 @@ fn load_input(args: &Args) -> (EvmBatchInput, Extra) {
         None => WitnessFile::default(),
     };
     let chain_id = args.chain_id.expect("с --block-input нужен --chain-id");
+    let checked_against = checked_queue_mark(&witness, args.previous_report.as_deref(), &block);
     let queue_items: Vec<QueueItem> = witness
         .queue
         .iter()
@@ -397,7 +500,12 @@ fn load_input(args: &Args) -> (EvmBatchInput, Extra) {
         withdrawals_frontier,
         withdrawals_count,
     };
-    (input, Extra { queue_processed_from: Some(witness.queue_processed_from), supplemented })
+    let extra = Extra {
+        queue_processed_from: Some(witness.queue_processed_from),
+        queue_mark_checked_against: Some(checked_against),
+        supplemented,
+    };
+    (input, extra)
 }
 
 fn main() {
@@ -422,13 +530,9 @@ fn main() {
     let block_number = input.block.current_block.header.number;
     let encoded = bincode::serialize(&input).expect("вход батча не сериализуется");
 
-    // Сначала проверка, потом запись: фикстура отвергнутого батча не появляется.
+    // Сначала проверки, потом запись (ниже): фикстура отвергнутого батча не появляется.
     let outcome = process_evm_batch(input).expect("нативный расчёт отверг батч");
     let native = outcome.values.clone();
-    if let Some(path) = &args.write_input {
-        fs::write(path, &encoded).expect("вход батча не записан");
-        println!("Вход батча: {} ({} байт)", path.display(), encoded.len());
-    }
     println!(
         "Блок {block_number}: транзакций {transactions}, элементов очереди {}, выводов {}, данных батча {data_bytes} байт",
         queue_items.len(),
@@ -446,6 +550,16 @@ fn main() {
         println!("Публичные значения zkVM совпали с нативным расчётом.");
         println!("Циклов zkVM: {}", report.total_instruction_count());
         cycles = Some(report.total_instruction_count());
+    }
+    // Вход батча — после нативной проверки и, если запрошено, после сверки с zkVM: расхождение
+    // выше — паника, и до записи дело не доходит. Через временный файл: прерванная запись не
+    // оставит обрезанной фикстуры под настоящим именем.
+    if let Some(path) = &args.write_input {
+        let mut temporary = path.clone().into_os_string();
+        temporary.push(".tmp");
+        fs::write(&temporary, &encoded).expect("вход батча не записан");
+        fs::rename(&temporary, path).expect("вход батча не переименован");
+        println!("Вход батча: {} ({} байт)", path.display(), encoded.len());
     }
 
     let mut proof_seconds = None;
@@ -509,6 +623,9 @@ fn main() {
             // Отметки очереди L1: батч заявляет контракту queueProcessedUpTo.
             "queueProcessedFrom": queue_processed_from,
             "queueProcessedUpTo": queue_processed_from.map(|from| from + queue_items.len() as u64),
+            // С чем сверена прежняя отметка: «empty queue» — ноль при нулевом хеше очереди,
+            // «previous report» — отчёт предыдущего батча.
+            "queueMarkCheckedAgainst": extra.queue_mark_checked_against,
             "queueItems": queue_items.len(),
             // Счета, которыми дополнен свидетель узла (eth_getProof на родителе), и сколько узлов
             // каждый раскрыл: ноль — путь уже был в свидетеле.
