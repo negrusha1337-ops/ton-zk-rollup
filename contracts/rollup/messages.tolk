@@ -156,6 +156,34 @@ struct (0x5242000a) PruneDepositReceipts {
   count: uint16
 }
 
+/// Подпись secp256k1 в раскладке Ethereum.
+struct EvmSignature {
+  v: uint8
+  r: uint256
+  s: uint256
+}
+
+/// Узел доказательства счёта EVM: байты узла «змейкой» (contracts/rollup/evm_exit.tolk) и
+/// ссылка на следующий узел по пути к листу.
+struct EvmProofStep {
+  isBranch: bool
+  node: cell
+  next: Cell<EvmProofStep>?
+}
+
+/// Кто угодно → Rollup (только после заморозки, rollup на EVM): выплатить баланс обычного счёта
+/// L2 из последнего принятого блока. Пруф zkVM не нужен: контракт сам проверяет заголовок
+/// блока, доказательство счёта и подпись владельца под этим получателем.
+struct (0x5242000d) ForceExitEvm {
+  queryId: uint64
+  /// Получатель в basechain.
+  recipient: address
+  /// RLP заголовка последнего принятого блока.
+  header: cell
+  proof: Cell<EvmProofStep>
+  signature: Cell<EvmSignature>
+}
+
 type RollupMessage =
   | SubmitBatch
   | PublishData
@@ -170,5 +198,6 @@ type RollupMessage =
   | SetExitKey
   | ActivateEscapeHatch
   | ForceExit
+  | ForceExitEvm
   | CancelDeposit
   | PruneDepositReceipts

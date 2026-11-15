@@ -6,12 +6,12 @@
     "NULLIFIER_CLAIM_GAS": 12000,
     "PAYOUT_STEP_GAS": 40000
   },
-  "payoutPaid": 4417,
-  "payoutOwed": 6185,
-  "payOwed": 5559,
-  "withdrawStep": 22944,
+  "payoutPaid": 4617,
+  "payoutOwed": 6385,
+  "payOwed": 5759,
+  "withdrawStep": 23144,
   "nullifierClaim": 4133,
   "claimMessageCells": 9,
   "claimMessageBits": 2429,
-  "payoutOwedDeep": 24685
+  "payoutOwedDeep": 24885
 }

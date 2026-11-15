@@ -257,8 +257,9 @@ python3 zkvm-evm/scenario/check-locks.py               # версии крейт
 (`zkvm-evm/host/src/sources.rs`, повтор — `zk/evm-binding.mjs`) → `fixtures/evm_batches/program.json`
 (`rollup-evm-host --vkeys`) → `fixtures/evm_batches/key.json` (`node zk/gen-evm-rollup-key.mjs`) →
 `fixtures/sp1_evm_batch2` (импорт пруфа). **Ключ выхода в `key.json` — заглушка**: программы
-аварийного выхода для состояния EVM нет, контракт с этим ключом годится только для демонстрации
-приёма батча. Батч для контракта — `fixtures/evm_batches/contract/block-2.*`: блок 2 сценария с
+аварийного выхода для состояния EVM нет. Баланс обычного счёта выходит без неё — контракт сам
+проверяет доказательство счёта (`ForceExitEvm`, [ARCHITECTURE.md](ARCHITECTURE.md)); токены и
+контракты L2 без программы выхода не вывести. Батч для контракта — `fixtures/evm_batches/contract/block-2.*`: блок 2 сценария с
 нулевым хешем очереди L1, как у только что развёрнутого контракта.
 
 ```bash

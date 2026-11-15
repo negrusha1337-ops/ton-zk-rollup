@@ -15,7 +15,7 @@ import { toNano } from '@ton/core';
 export const DEPLOY_VALUE = toNano('0.05');
 /** Часть ключа: до 7 403 gas, около 0,0005 TON. */
 export const KEY_PART_VALUE = toNano('0.001');
-/** Ключ выхода (5 816 gas) и фиксация ключа (21 346 gas, около 0,0014 TON). */
+/** Ключ выхода (5 816 gas) и фиксация ключа (21 596 gas, около 0,0014 TON). */
 export const KEY_FINALIZE_VALUE = toNano('0.003');
 /** Порция данных батча: около 5 200 gas (0,00035 TON) при любом размере порции. */
 export const PUBLISH_DATA_VALUE = toNano('0.001');

@@ -19,6 +19,7 @@ export const RollupOpcodes = {
     withdraw: 0x52420004,
     activateEscapeHatch: 0x52420006,
     forceExit: 0x52420007,
+    forceExitEvm: 0x5242000d,
     cancelDeposit: 0x52420008,
     setExitKey: 0x52420009,
     pruneDepositReceipts: 0x5242000a,
@@ -282,6 +283,38 @@ export class Rollup implements Contract {
             .storeRef(claim)
             .endCell();
         await this.send(provider, via, opts.value, body);
+    }
+
+    /**
+     * Аварийный выход счёта EVM без пруфа: заголовок последнего принятого блока, доказательство
+     * счёта и подпись владельца (ячейки собирает wrappers/evmExit.ts).
+     */
+    async sendForceExitEvm(
+        provider: ContractProvider,
+        via: Sender,
+        opts: { recipient: Address; header: Cell; proof: Cell; signature: Cell; value: bigint },
+    ) {
+        const body = beginCell()
+            .storeUint(RollupOpcodes.forceExitEvm, 32)
+            .storeUint(0, 64)
+            .storeAddress(opts.recipient)
+            .storeRef(opts.header)
+            .storeRef(opts.proof)
+            .storeRef(opts.signature)
+            .endCell();
+        await this.send(provider, via, opts.value, body);
+    }
+
+    /** Запас газа шага ForceExitEvm и минимум монет на него при текущих ценах сети. */
+    async getEvmExitBudget(provider: ContractProvider) {
+        const { stack } = await provider.get('evmExitBudget', []);
+        return { stepGas: stack.readNumber(), minValue: stack.readBigNumber() };
+    }
+
+    /** Хеш согласия, который подписывает владелец счёта EVM для выхода этому получателю. */
+    async getEvmExitConsentHash(provider: ContractProvider, recipientHash: bigint): Promise<bigint> {
+        const result = await provider.get('evmExitConsentHash', [{ type: 'int', value: recipientHash }]);
+        return result.stack.readBigNumber();
     }
 
     /** Вернуть вносителю депозит, не попавший в батч до заморозки. */

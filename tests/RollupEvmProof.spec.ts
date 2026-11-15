@@ -1,8 +1,19 @@
 import { Blockchain, BlockchainSnapshot, SandboxContract, TreasuryContract } from '@ton/sandbox';
-import { Cell } from '@ton/core';
+import { Address, Cell, toNano } from '@ton/core';
 import { compile } from '@ton/blueprint';
 import '@ton/test-utils';
+import { readFileSync } from 'fs';
+import path from 'path';
+import { keccak_256 } from '@noble/hashes/sha3';
 import { Bn254Groth16Verifier } from '../wrappers/Bn254Groth16Verifier';
+import {
+    evmHeaderCell,
+    evmNodeItems,
+    evmProofCell,
+    evmProofSteps,
+    evmSignatureCell,
+    evmSignatureFromHex,
+} from '../wrappers/evmExit';
 import { Rollup, RollupErrors, VerifierErrors } from '../wrappers/Rollup';
 import { batchDataHash, withdrawalTree } from '../wrappers/rollupMath';
 import {
@@ -29,9 +40,10 @@ const TX_GAS_LIMIT = 1_000_000;
 // Блок EVM, исполненный Reth внутри SP1 (zkvm-evm/), и его Groth16-пруф проверяются настоящим
 // rollup-контрактом — тем же, что принимает батчи игрушечного реестра: контракту всё равно,
 // что стоит за восемью словами. Это демонстрация приёма батча, а не готовый rollup на EVM:
-// ключ выхода в контракте — заглушка (аварийного выхода для состояния EVM нет), депозитов и
-// принудительных транзакций в батче нет, монеты L2 в блоке — из генезиса anvil, обеспечения на
-// L1 у них нет, поэтому вывод здесь не проверяется (REVIEW.md, находки 6-А, 6-Б).
+// ключ выхода в контракте — заглушка (выход по пруфу zkVM для состояния EVM невозможен; баланс
+// обычного счёта выходит без пруфа — tests/RollupEvmExit.spec.ts), депозитов и принудительных
+// транзакций в батче нет, монеты L2 в блоке — из генезиса anvil, обеспечения на L1 у них нет,
+// поэтому вывод здесь не проверяется (REVIEW.md, находки 6-А, 6-Б, 9-А).
 const SUITE = 'Rollup: пруф SP1 блока EVM';
 const status = evmProofStatus();
 if (status.current) {
@@ -120,7 +132,7 @@ function suite() {
             'rollup-evm-proof.json',
             {
                 source: 'Измерено в @ton/sandbox тестом tests/RollupEvmProof.spec.ts; не редактировать вручную',
-                note: 'Газ rollup-контракта с Groth16-пруфом SP1 (схема v6.1.0) блока EVM: программа zkvm-evm (Reth внутри SP1). Ключ выхода в контракте — заглушка; депозитов и принудительных транзакций в батче нет.',
+                note: 'Газ rollup-контракта с Groth16-пруфом SP1 (схема v6.1.0) блока EVM: программа zkvm-evm (Reth внутри SP1). Ключ выхода в контракте — заглушка; депозитов и принудительных транзакций в батче нет. forceExitEvmAfterBatch — выход счёта EVM без пруфа против блока, принятого этим батчем (три узла).',
                 gasLimit: TX_GAS_LIMIT,
                 sourcesSha256: loadEvmProgramKeys().sourcesSha256,
                 blockNumber: batch.report.blockNumber,
@@ -128,7 +140,7 @@ function suite() {
                 zkvmCycles: batch.report.zkvmCycles,
             },
             gas,
-            ['submitBatch', 'publishData', 'rejectedForgery'],
+            ['submitBatch', 'publishData', 'rejectedForgery', 'forceExitEvmAfterBatch'],
         );
         console.table(gas);
     });
@@ -216,5 +228,126 @@ function suite() {
         gas.rejectedForgery = Number(computePhaseOf(result.transactions, rollup.address).gasUsed);
         expect(gas.rejectedForgery).toBeLessThan(TX_GAS_LIMIT);
         expect(await rollup.getRollupState()).toMatchObject({ stateRoot: genesis, batchIndex: 0 });
+    });
+
+    describe('после принятого батча счёт выходит по доказательству против того же блока', () => {
+        // Сквозная связка двух половин: программа в zkVM коммитит хеш заголовка блока 2, а выход
+        // счёта EVM без пруфа (contracts/rollup/evm_exit.tolk) проверяет заголовок с этим хешем и
+        // дерево состояния под ним. Фикстура — zk/gen-evm-batch-exit-fixture.mjs: заголовок из
+        // данных батча, узлы — из состояния после блока 2, сохранённого во входе блока 3.
+        // Счёт — dev-счёт anvil, его баланс из генезиса и на L1 ничем не обеспечен (REVIEW.md,
+        // 9-А): платить контракту нечем, кроме чужого депозита, — тест это и показывает.
+        const exitFixture = JSON.parse(
+            readFileSync(path.join(__dirname, '..', 'fixtures', 'evm_exit', 'batch2-exit.json'), 'utf8'),
+        );
+        const bytes = (hex: string) => Buffer.from(hex.replace(/^0x/, ''), 'hex');
+        const header = bytes(exitFixture.headerRlp);
+        const recipient = new Address(0, bytes(exitFixture.recipientHash));
+        const account = BigInt(exitFixture.account);
+        // 1 нанотон = 1 gwei (EVM_WEI_PER_NANOTON в evm_exit.tolk).
+        const amount = BigInt(exitFixture.balanceWei) / 1_000_000_000n;
+        // Коды отказа: EvmExitErrors в contracts/rollup/evm_exit.tolk.
+        const WRONG_BLOCK_HEADER = 7401;
+        let user: SandboxContract<TreasuryContract>;
+
+        const exit = (headerRlp = header) =>
+            rollup.sendForceExitEvm(user.getSender(), {
+                recipient,
+                header: evmHeaderCell(headerRlp),
+                proof: evmProofCell(evmProofSteps(exitFixture.accountProof.map(bytes))),
+                signature: evmSignatureCell(evmSignatureFromHex(exitFixture.signature)),
+                value: exitValue,
+            });
+        let exitValue: bigint;
+        /** Депозит, который никто не обработал, ждёт дольше срока — rollup замораживается. */
+        const freeze = async () => {
+            const start = Math.floor(Date.now() / 1000);
+            blockchain.now = start;
+            await rollup.sendDeposit(user.getSender(), { l2Recipient: 0x1234n, value: amount + toNano('1') });
+            blockchain.now = start + ESCAPE_TIMEOUT_SECONDS + 1;
+            await rollup.sendActivateEscapeHatch(user.getSender(), toNano('0.05'));
+            expect((await rollup.getEscapeState()).frozen).toBe(true);
+        };
+
+        beforeEach(async () => {
+            user = await blockchain.treasury('user');
+            exitValue = ((await rollup.getEvmExitBudget()).minValue * 11n) / 10n;
+        });
+        afterEach(() => {
+            blockchain.now = undefined;
+        });
+
+        it('фикстура выхода — про тот самый блок, что в пруфе', () => {
+            // После перезапуска сценария anvil разошлись бы и пруф, и эта фикстура: видно сразу.
+            expect(BigInt(exitFixture.blockHash)).toBe(batch.roots.newStateRoot);
+            expect(header.equals(evmNodeItems(Buffer.from(batch.report.dataChunksHex.join(''), 'hex'))[0])).toBe(true);
+            expect(BigInt('0x' + Buffer.from(keccak_256(header)).toString('hex'))).toBe(batch.roots.newStateRoot);
+            expect(amount).toBeGreaterThan(0n);
+        });
+
+        it('батч по пруфу, заморозка, выход счёта: выплата один раз', async () => {
+            await publishData();
+            expect((await submit()).transactions).toHaveTransaction({ to: rollup.address, success: true });
+            expect(await rollup.getEvmExitConsentHash(BigInt(exitFixture.recipientHash))).toBe(BigInt(exitFixture.consentHash));
+            // До заморозки выхода нет.
+            expect((await exit()).transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: RollupErrors.rollupNotFrozen,
+            });
+            await freeze();
+
+            const result = await exit();
+            expect(result.transactions).toHaveTransaction({ to: rollup.address, success: true });
+            gas.forceExitEvmAfterBatch = Number(computePhaseOf(result.transactions, rollup.address).gasUsed);
+            expect(gas.forceExitEvmAfterBatch).toBeLessThanOrEqual((await rollup.getEvmExitBudget()).stepGas);
+            expect(result.transactions).toHaveTransaction({ from: rollup.address, to: recipient, value: amount });
+            expect((await blockchain.getContract(recipient)).balance).toBe(amount);
+
+            // Заявка счёта погашена в нуллификаторе; повтор не платит. Здесь он отклоняется ещё
+            // раньше — денег на вторую такую выплату у контракта нет (повтор при деньгах, до
+            // отказа нуллификатора, проверяет tests/RollupEvmExit.spec.ts).
+            const nullifier = await rollup.getExitNullifierAddress(account);
+            expect((await blockchain.getContract(nullifier)).accountState?.type).toBe('active');
+            const again = await exit();
+            expect(again.transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: RollupErrors.insufficientFunds,
+            });
+            expect(again.transactions).not.toHaveTransaction({ from: rollup.address, to: recipient });
+
+            // Цена необеспеченного баланса (9-А): выход оплачен депозитом вносителя, и вернуть
+            // свой депозит вноситель уже не может — контракту нечем.
+            const refund = await rollup.sendCancelDeposit(user.getSender(), { depositIndex: 1, value: toNano('0.05') });
+            expect(refund.transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: RollupErrors.insufficientFunds,
+            });
+        });
+
+        it('без принятого батча тот же выход не проходит: заголовок не тот, что в контракте', async () => {
+            // Слово состояния — ещё хеш блока 1: выход привязан именно к принятому батчу.
+            await freeze();
+            expect((await exit()).transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: WRONG_BLOCK_HEADER,
+            });
+        });
+
+        it('заголовок с изменённым байтом после принятого батча отвергается', async () => {
+            await publishData();
+            await submit();
+            await freeze();
+            const altered = Buffer.from(header);
+            altered[altered.length - 1] ^= 1;
+            expect((await exit(altered)).transactions).toHaveTransaction({
+                to: rollup.address,
+                success: false,
+                exitCode: WRONG_BLOCK_HEADER,
+            });
+        });
     });
 }

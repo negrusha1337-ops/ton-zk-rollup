@@ -6,6 +6,7 @@ import "rollup/storage"
 import "rollup/messages"
 import "rollup/logic"
 import "rollup/escape"
+import "rollup/evm_exit"
 import "bn254/verifier_api"
 
 contract RollupMock {
@@ -68,6 +69,9 @@ fun onInternalMessage(inMsg: InMessage) {
       val ok = (msg.proof.load().ax == 1) && (digest != 0);
       assert (ok) throw RollupErrors.WrongProof;
       completeForceExit(storage, msg.queryId, claim);
+    }
+    ForceExitEvm => {
+      handleForceExitEvm(inMsg.valueCoins, msg);
     }
     CancelDeposit => {
       handleCancelDeposit(msg);
@@ -184,4 +188,16 @@ get fun queueBudgets(): (int, int, int) {
 /// элементов в текущем окне, шаг удвоения).
 get fun queueFees(): (int, int, int, int) {
   return queueFeesView();
+}
+
+/// (газ шага ForceExitEvm, минимум монет на него при текущих ценах сети). Тест сверяет
+/// измеренный расход на глубоком доказательстве с этим запасом, а не со своей копией константы.
+get fun evmExitBudget(): (int, int) {
+  return (EVM_EXIT_STEP_GAS, evmExitMinValue());
+}
+
+/// Хеш согласия, который подписывает владелец счёта EVM для выхода этому получателю.
+get fun evmExitConsentHash(recipientHash: int): int {
+  val storage = RollupStorage.load();
+  return evmExitConsent(storage.chainId, storage.state.load().stateRoot, recipientHash);
 }

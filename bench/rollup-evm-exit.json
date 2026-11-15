@@ -1,0 +1,16 @@
+{
+  "source": "Измерено в @ton/sandbox тестом tests/RollupEvmExit.spec.ts; не редактировать вручную",
+  "note": "Газ аварийного выхода счёта EVM без пруфа zkVM: контракт сам проверяет заголовок блока, доказательство счёта и подпись. forceExitEvm — настоящее доказательство от anvil (число узлов — proofNodes); forceExitEvmDeep — собранное дерево из десяти полных веток и листа, глубже любого настоящего. stepGasBudget — запас газа шага, из которого контракт считает минимум монет.",
+  "gasLimit": 1000000,
+  "stepGasBudget": 500000,
+  "proofNodes": 3,
+  "proofNodeBytes": [
+    532,
+    211,
+    115
+  ],
+  "headerBytes": 580,
+  "forceExitEvm": 113281,
+  "forceExitEvmTestnetAccount": 143859,
+  "forceExitEvmDeep": 454181
+}
