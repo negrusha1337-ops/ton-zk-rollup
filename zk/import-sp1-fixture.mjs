@@ -70,7 +70,7 @@ const KINDS = [
         evm: true,
         reportDirectory: 'reth',
         vkeyField: 'programVKey',
-        elfField: 'programElfSha352',
+        elfField: 'programElfSha256',
         publicValuesBytes: 352,
     },
 ];
