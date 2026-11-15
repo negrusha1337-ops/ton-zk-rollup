@@ -6,6 +6,13 @@
 //!       [--write-input batch.bin] [--report report.json]
 //!   rollup-evm-host --batch-input batch.bin --execute         # готовый вход батча (фикстура)
 //!   rollup-evm-host --batch-input batch.bin --prove --proof-out proof.json
+//!   rollup-evm-host --classify-forced items.json --chain-id <chainId> --report verdicts.json
+//!
+//! `--classify-forced` — только проверка ФОРМЫ принудительных транзакций той же функцией, что в
+//! программе (`decode_forced_transaction`): файл — JSON-массив байтов элементов очереди (hex),
+//! ответ — по элементу: годна по форме (и чей это вызов) либо причина пропуска. Состояние здесь
+//! не читается: что revm отвергнет на состоянии, решает исполнение блока. Нужно сборщику блоков
+//! (`sequencer/`): мусор и негодные подписи отсеиваются до запроса к узлу.
 //!
 //! Вход блока готовит штатный `rsp --cache-dir` (он берёт у узла EVM блок и свидетель состояния).
 //! Хост добавляет свидетель rollup'а (отрезок очереди L1 с принудительными транзакциями, фронтир
@@ -76,10 +83,18 @@ struct Args {
     /// Посчитать ключ программы и записать fixtures/evm_batches/program.json.
     #[arg(long, conflicts_with_all = ["block_input", "batch_input", "execute", "compressed", "prove"])]
     vkeys: bool,
+    /// Проверить форму принудительных транзакций: JSON-массив байтов (hex). Ответ — в --report.
+    #[arg(
+        long,
+        requires_all = ["chain_id", "report"],
+        conflicts_with_all = ["vkeys", "block_input", "batch_input", "execute", "compressed", "prove", "write_input"]
+    )]
+    classify_forced: Option<PathBuf>,
     /// Вход блока в формате кэша RSP: <cache-dir>/input/<chainId>/<номер блока>.bin
     #[arg(long, requires = "chain_id", conflicts_with = "batch_input")]
     block_input: Option<PathBuf>,
-    /// Идентификатор rollup'а: первое слово публичных значений (с --block-input).
+    /// Идентификатор rollup'а: первое слово публичных значений (с --block-input) либо цепочка,
+    /// под которую проверяется форма (с --classify-forced).
     #[arg(long, conflicts_with = "batch_input")]
     chain_id: Option<u64>,
     /// JSON со свидетелем rollup'а: отрезок очереди L1, фронтир и счётчик дерева выводов,
@@ -367,6 +382,39 @@ struct Extra {
     supplemented: Vec<serde_json::Value>,
 }
 
+/// Запись файла через временный файл и переименование: прерванная запись не оставит обрезанного
+/// файла под настоящим именем (его читает сборщик блоков после перезапуска).
+fn write_atomically(path: &Path, contents: &[u8], what: &str) {
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    fs::write(&temporary, contents).unwrap_or_else(|error| panic!("{what} не записан: {error}"));
+    fs::rename(&temporary, path).unwrap_or_else(|error| panic!("{what} не переименован: {error}"));
+}
+
+/// Форма принудительных транзакций — функцией программы, без состояния (`--classify-forced`).
+/// Порядок ответа — порядок файла; `signer` — у годных по форме: чей это вызов моста и чьё
+/// доказательство счёта понадобится свидетелю.
+fn classify_forced(items: &Path, chain_id: u64, report: &Path) {
+    let text = fs::read_to_string(items).unwrap_or_else(|error| refuse(format!("Файл {} не читается: {error}", items.display())));
+    let items: Vec<Bytes> = serde_json::from_str(&text)
+        .unwrap_or_else(|error| refuse(format!("Файл {}: ожидается JSON-массив строк hex ({error})", items.display())));
+    let verdicts: Vec<serde_json::Value> = items
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| match decode_forced_transaction(bytes, chain_id, FORCED_TX_GAS_CAP) {
+            Ok(transaction) => serde_json::json!({
+                "index": index,
+                "form": "valid",
+                "signer": hex(transaction.signer().as_slice()),
+                "hash": hex(keccak256(bytes).as_slice()),
+            }),
+            Err(reason) => serde_json::json!({ "index": index, "form": "skipped", "reason": format!("{reason:?}") }),
+        })
+        .collect();
+    let answer = serde_json::json!({ "chainId": chain_id.to_string(), "forcedTxGasCap": FORCED_TX_GAS_CAP, "verdicts": verdicts });
+    write_atomically(report, (serde_json::to_string_pretty(&answer).expect("JSON") + "\n").as_bytes(), "ответ о форме");
+}
+
 /// Отказ по несогласованному свидетелю: сообщение и код 2 (как у прочих отказов хоста).
 fn refuse(message: String) -> ! {
     eprintln!("{message}");
@@ -519,6 +567,10 @@ fn main() {
     if args.vkeys {
         return write_program_keys();
     }
+    if let Some(items) = &args.classify_forced {
+        let chain_id = args.chain_id.expect("clap требует --chain-id");
+        return classify_forced(items, chain_id, args.report.as_ref().expect("clap требует --report"));
+    }
 
     let (input, extra) = load_input(&args);
     let queue_processed_from = extra.queue_processed_from;
@@ -555,10 +607,7 @@ fn main() {
     // выше — паника, и до записи дело не доходит. Через временный файл: прерванная запись не
     // оставит обрезанной фикстуры под настоящим именем.
     if let Some(path) = &args.write_input {
-        let mut temporary = path.clone().into_os_string();
-        temporary.push(".tmp");
-        fs::write(&temporary, &encoded).expect("вход батча не записан");
-        fs::rename(&temporary, path).expect("вход батча не переименован");
+        write_atomically(path, &encoded, "вход батча");
         println!("Вход батча: {} ({} байт)", path.display(), encoded.len());
     }
 
@@ -644,6 +693,6 @@ fn main() {
             "proofSeconds": proof_seconds,
             "programVKey": vkey,
         });
-        fs::write(path, serde_json::to_string_pretty(&report).unwrap() + "\n").expect("отчёт не записан");
+        write_atomically(path, (serde_json::to_string_pretty(&report).unwrap() + "\n").as_bytes(), "отчёт");
     }
 }
