@@ -44,7 +44,9 @@
 //   блок 9  — полный отрезок депозитов на новые счета;
 //   блок 10 — полный отрезок мусора;
 //   блок 11 — принудительная транзакция счёта, которого нет в дереве, а путь к его месту
-//             свидетель узла не раскрывает (отсутствие доказывает только дополнение).
+//             свидетель узла не раскрывает (отсутствие доказывает только дополнение);
+//   блок 12 — полный отрезок самых длинных принудительных транзакций, какие принимает контракт
+//             (8 128 байт): пропущены по длине, без разбора (FORCED_TX_MAX_BYTES).
 //
 // Ключи счетов одноразовые, создаются в памяти и никуда не пишутся: каждый запуск даёт новую
 // цепочку и меняет фикстуры целиком. Блок становится головой сразу, а хост проверяет его уже
@@ -96,6 +98,10 @@ const GENESIS_HASH = '0xc0284e91570e7f1314f6e4460a613225f49b46deeebd2be3c463fb1c
 const GAS_LIMIT = 30_000_000n;
 const FORCED_TX_GAS_CAP = 40_000n;
 const MAX_BATCH_QUEUE_ITEMS = 32;
+/** Наибольшая длина принудительной транзакции: 64 ячейки по 127 байт (MAX_FORCED_TX_CELLS контракта). */
+const MAX_FORCED_TX_BYTES = 64 * 127;
+/** Предел длины принудительной транзакции в программе (FORCED_TX_MAX_BYTES в zkvm-evm/lib). */
+const FORCED_TX_MAX_BYTES_PROGRAM = 256;
 /** Наименьший вывод: 0,05 монеты, в нанотонах. */
 const MIN_WITHDRAWAL = 50_000_000n;
 
@@ -163,7 +169,14 @@ function signHash(account, hash, highS = false) {
  * Подписанная транзакция в кодировке EIP-2718. Типы 0 (EIP-155), 1, 2; типы 3 и 4 — только как
  * байты для очереди L1 (программа их пропускает, узлу они не отдаются).
  */
+/** Кем подписаны байты транзакции (по байтам): чьё доказательство счёта нужно хосту. */
+const signerOf = new Map();
 function signTransaction(account, fields, options = {}) {
+    const raw = encodeSigned(account, fields, options);
+    signerOf.set(hex(raw), account.address);
+    return raw;
+}
+function encodeSigned(account, fields, options) {
     const {
         type = 2, chainId = CHAIN_ID, nonce, gas, to = null, value = 0n, data = '0x',
         gasPrice = 2n * GWEI, maxFee = 2n * GWEI, maxPriority = GWEI,
@@ -588,6 +601,31 @@ try {
     while (keccak(bytes(deepStranger.address))[0] >> 4 !== occupied) deepStranger = newAccount();
     forced('отправителя нет, путь к его месту не раскрыт', 'Skipped(Invalid(LackOfFunds))', bridgeCall(deepStranger, 0, MIN_WITHDRAWAL));
     await nextBlock('отсутствующий отправитель под нераскрытым узлом', queue.length, []);
+    // Блок 12: самый длинный элемент, какой контракт ставит в очередь (64 ячейки по 127 байт).
+    // Данные вызова подобраны так, чтобы транзакция заняла ровно столько. Программа пропускает
+    // такой элемент по длине, не разбирая: остаётся цена чтения входа и хеша очереди. (Без
+    // предела длины тот же отрезок стоил 20,76 млн циклов — разбор, сверка кодировки, хеш подписи.)
+    const longest = (index) => {
+        const build = (length, fill) => signTransaction(strangers[0], {
+            nonce: index, gas: FORCED_TX_GAS_CAP, to: BRIDGE, data: hex(Buffer.alloc(length, fill)),
+        });
+        // Длина подписи зависит от подписываемого (r и s бывают на байт короче), поэтому простая
+        // поправка длины данных может колебаться между «на байт меньше» и «на байт больше»:
+        // перебираем соседние длины и байт заполнения, пока транзакция не займёт ровно предел.
+        // Обвязка транзакции при длинных данных (префиксы длины RLP уже трёхбайтовые).
+        const base = MAX_FORCED_TX_BYTES - (build(1000, 0x80).length - 1000);
+        for (let fill = 0x80 + index; fill < 0x100; fill++) {
+            for (const length of [base, base + 1, base - 1, base + 2, base - 2]) {
+                const transaction = build(length, fill);
+                if (transaction.length === MAX_FORCED_TX_BYTES) return transaction;
+            }
+        }
+        return fail('не удалось подобрать длину данных под предел очереди');
+    };
+    for (let index = 0; index < MAX_BATCH_QUEUE_ITEMS; index++) {
+        forced(`полный отрезок: наибольшая по длине ${index}`, 'Skipped(TooLong)', longest(index));
+    }
+    await nextBlock('полный отрезок: принудительные наибольшей длины, пропущены по длине', queue.length, []);
 
     // На мосту — ровно сумма выводов; у получателя чаевых — ненулевой баланс.
     const allWithdrawals = blocks.flatMap((block) => block.withdrawals.map((leaf) => ({ ...leaf, block: block.number })));
@@ -596,7 +634,6 @@ try {
     if (BigInt(await call(HTTP, 'eth_getBalance', [sequencer.address, 'latest'])) === 0n) fail('чаевые не дошли до получателя');
 
     // --- входы батчей: свидетель от узла штатным rsp, дополнение счетами отправителей, наш хост ---
-    const signers = [user, other, ...strangers, deepStranger].map((account) => account.address);
     let depositHash = ZERO;
     let frontier = [];
     let withdrawalsCount = 0n;
@@ -611,15 +648,16 @@ try {
             '--cache-dir', path.join(WORK, 'cache'), '--report-path', path.join(WORK, 'rsp-report.csv'),
             '--state-backend', 'execution-witness',
         ], path.join(WORK, `rsp-block-${number}.log`));
-        // Доказательства счетов на состоянии РОДИТЕЛЯ: для всех известных отправителей, если в
-        // отрезке есть принудительные транзакции. Лишнее доказательство ничего не меняет.
+        // Доказательства счетов на состоянии РОДИТЕЛЯ — для отправителей принудительных транзакций
+        // отрезка. Отправителя сценарий знает сам (он их подписывал); настоящий секвенсор
+        // восстанавливает его из подписи. Лишнее доказательство ничего не меняет, недостающее
+        // хост обнаружит и откажет.
         const accountProofs = [];
-        if (block.segment.some((item) => item.kind === 'forced')) {
-            for (const address of signers) {
-                const proof = await call(HTTP, 'eth_getProof', [address, [], quantity(number - 1)]);
-                const code = await call(HTTP, 'eth_getCode', [address, quantity(number - 1)]);
-                accountProofs.push({ address, accountProof: proof.accountProof, ...(code === '0x' ? {} : { code }) });
-            }
+        const senders = new Set(block.segment.filter((item) => item.kind === 'forced').map((item) => signerOf.get(hex(item.bytes))).filter(Boolean));
+        for (const address of senders) {
+            const proof = await call(HTTP, 'eth_getProof', [address, [], quantity(number - 1)]);
+            const code = await call(HTTP, 'eth_getCode', [address, quantity(number - 1)]);
+            accountProofs.push({ address, accountProof: proof.accountProof, ...(code === '0x' ? {} : { code }) });
         }
         const witness = {
             prevDepositHash: depositHash,
@@ -769,6 +807,57 @@ try {
     );
     rmSync(FIXTURES, { recursive: true, force: true });
     cpSync(OUT, FIXTURES, { recursive: true });
+
+    // --- замер циклов (спайк 4, PROTOCOL-V2.md, 0.5): цена элемента очереди для прувера ---
+    const cycles = (number) => reports[number - 1].zkvmCycles;
+    const baseline = cycles(6);
+    const perItem = (number) => Math.round((cycles(number) - baseline) / MAX_BATCH_QUEUE_ITEMS);
+    writeFileSync(
+        path.join(ROOT, 'bench', 'evm-v2-cycles.json'),
+        JSON.stringify(
+            {
+                source: 'Сгенерировано zkvm-evm/scenario/reth-scenario.mjs; не редактировать вручную',
+                note: 'Программа батча EVM протокола версии 2: блоки узла Reth исполнены в zkVM SP1 БЕЗ пруфа, измерены циклы RISC-V. Время и память доказательства здесь НЕ измерялись. Цена элемента очереди — разность с пустым блоком, делённая на число элементов; свидетель состояния у блоков разный, поэтому это оценка с точностью до нескольких процентов.',
+                reth: version,
+                programElfSha256: PROGRAM.programElfSha256,
+                constants: { forcedTxGasCap: Number(FORCED_TX_GAS_CAP), forcedTxMaxBytes: FORCED_TX_MAX_BYTES_PROGRAM, maxBatchQueueItems: MAX_BATCH_QUEUE_ITEMS, gasLimit: Number(GAS_LIMIT) },
+                // Тот же отрезок из 32 элементов по 8 128 байт до введения предела длины в программе
+                // (замер 15.11.2026, прежний ELF): разбор, сверка кодировки и хеш подписи каждого.
+                beforeLengthLimit: { fullSegmentOfLongestCycles: 20757803, emptyBlockCycles: 7754015 },
+                blocks: blocks.map((block, index) => ({
+                    number: block.number,
+                    note: block.note,
+                    transactions: block.transactions.length,
+                    queueItems: block.segment.length,
+                    forcedIncluded: block.segment.filter((item) => item.kind === 'forced' && item.expect === 'included').length,
+                    forcedSkipped: block.segment.filter((item) => item.kind === 'forced' && item.expect !== 'included').length,
+                    deposits: block.segment.filter((item) => item.kind === 'deposit').length,
+                    withdrawals: block.withdrawals.length,
+                    gasUsed: Number(block.payload.gasUsed),
+                    dataBytes: reports[index].dataBytes,
+                    zkvmCycles: reports[index].zkvmCycles,
+                })),
+                emptyBlockCycles: baseline,
+                // Газ L2 включённого принудительного вывода (вызов моста с 32 байтами данных).
+                forcedWithdrawalGas: Math.round(Number(blocks[6].payload.gasUsed) / MAX_BATCH_QUEUE_ITEMS),
+                cyclesPerQueueItem: {
+                    forcedWithdrawalIncluded: perItem(7),
+                    forcedSkippedByRevm: perItem(8),
+                    deposit: perItem(9),
+                    forcedSkippedByForm: perItem(10),
+                    // Наибольший по длине (8 128 байт) элемент очереди: пропущен по длине без разбора.
+                    forcedSkippedLongest: perItem(12),
+                },
+                // Худший для прувера отрезок: все элементы — включённые принудительные выводы.
+                fullSegmentWorstCase: { cycles: cycles(7), overEmptyBlock: cycles(7) - baseline, ratioToEmptyBlock: Number((cycles(7) / baseline).toFixed(3)) },
+                // Худший отрезок, который может навязать посторонний за одну плату за место в
+                // очереди (без монет на L2): транзакции, которые доходят до revm и отвергаются.
+                fullSegmentOfRefused: { cycles: cycles(8), overEmptyBlock: cycles(8) - baseline, ratioToEmptyBlock: Number((cycles(8) / baseline).toFixed(3)) },
+            },
+            null,
+            2,
+        ) + '\n',
+    );
     console.log(`Записано: fixtures/evm_batches/reth/ — блоки 1–${blocks.length} (${reports.map((report) => report.zkvmCycles).join(', ')} циклов)`);
 } finally {
     node.kill();

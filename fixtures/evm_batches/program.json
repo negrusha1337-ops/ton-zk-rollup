@@ -4,7 +4,7 @@
   "sp1Version": "6.10.0",
   "guestRustc": "rustc 1.96.0-dev",
   "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
-  "sourcesSha256": "09eaa8ff87c909a48f3cd85822e97cfa52e3a5eaca23603944d1a65dd1b593ad",
-  "programVKey": "0x007e659f98ad96ebbb7bae0ff31568289fb2b3f16bd57fd721d7de4171537828",
-  "programElfSha256": "8a44c176827cb8635df875bc9371da9209eece6dfe43e906b48bd4efcd2d8913"
+  "sourcesSha256": "79e353def0dab2b0acf2e03310f6c4303be380ada886740991f0b350a00f7a00",
+  "programVKey": "0x0044524ca1c8ee10c40fba6b7b10bffa8bbfb4e9c96324eef7e20b1db239d94d",
+  "programElfSha256": "6828d42b82f3bb5ee9c660d30ee0d3eded06a861d0cf4c59e385cbfe7d05fba3"
 }

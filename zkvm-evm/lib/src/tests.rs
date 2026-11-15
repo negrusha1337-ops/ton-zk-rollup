@@ -18,7 +18,7 @@ use crate::{
     },
     withdrawals::{FrontierError, WithdrawalTree, MAX_WITHDRAWALS, WITHDRAWAL_TREE_DEPTH},
     Deposit, EvmBatchError, Hash, PublicValues, QueueItem, WithdrawalLeaf, BRIDGE_ADDRESS, BRIDGE_CODE,
-    BRIDGE_CODE_HASH, FORCED_TX_GAS_CAP, GAS_LIMIT, MAX_BATCH_QUEUE_ITEMS, WITHDRAWAL_TOPIC,
+    BRIDGE_CODE_HASH, FORCED_TX_GAS_CAP, FORCED_TX_MAX_BYTES, GAS_LIMIT, MAX_BATCH_QUEUE_ITEMS, WITHDRAWAL_TOPIC,
 };
 
 fn deposit(recipient: u8, amount: u128) -> Deposit {
@@ -632,6 +632,7 @@ fn protocol_vectors() -> Value {
             "minWithdrawalNanotons": MIN_WITHDRAWAL_NANOTONS.to_string(),
             "gasLimit": GAS_LIMIT.to_string(),
             "forcedTxGasCap": FORCED_TX_GAS_CAP.to_string(),
+            "forcedTxMaxBytes": FORCED_TX_MAX_BYTES,
             "maxBatchQueueItems": MAX_BATCH_QUEUE_ITEMS,
             "maxWithdrawals": MAX_WITHDRAWALS.to_string(),
         },
@@ -789,4 +790,32 @@ fn forced_transaction_that_does_not_fit_the_block_is_a_batch_error() {
     // С пределом протокола тот же элемент — пропуск по форме, и батч годен.
     let outcome = process_evm_batch(input).unwrap();
     assert_eq!(outcome.forced, [ForcedOutcome::Skipped(SkipReason::GasLimitAboveCap)]);
+}
+
+// ---------------------------------------------------------------- константы контракта
+
+/// Значение константы из contracts/rollup/logic.tolk: `const ИМЯ: int = ЗНАЧЕНИЕ`.
+fn contract_constant(name: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts/rollup/logic.tolk");
+    let source = fs::read_to_string(path).expect("нет contracts/rollup/logic.tolk");
+    let prefix = format!("const {name}: int = ");
+    let mut found = source.lines().filter_map(|line| line.strip_prefix(prefix.as_str()));
+    let value = found.next().unwrap_or_else(|| panic!("в контракте нет константы {name}")).trim().to_string();
+    assert!(found.next().is_none(), "константа {name} объявлена дважды");
+    value
+}
+
+#[test]
+fn constants_shared_with_the_contract_are_equal() {
+    // Программа и контракт обязаны считать одинаково: предел отрезка очереди (контракт не
+    // примет отметку дальше, программа — отрезок длиннее), глубину дерева выводов, метку
+    // принудительной транзакции и хеш заголовка генезиса.
+    assert_eq!(contract_constant("MAX_BATCH_QUEUE_ITEMS"), MAX_BATCH_QUEUE_ITEMS.to_string());
+    assert_eq!(MAX_BATCH_QUEUE_ITEMS, 32);
+    assert_eq!(contract_constant("WITHDRAWAL_TREE_DEPTH"), WITHDRAWAL_TREE_DEPTH.to_string());
+    assert_eq!(contract_constant("FORCED_TRANSACTION_MARKER"), "1 << 255");
+    assert_eq!(FORCED_TRANSACTION_MARKER[0], 1 << 7);
+    assert_eq!(FORCED_TRANSACTION_MARKER[1..], [0u8; 31]);
+    assert_eq!(contract_constant("GENESIS_HASH"), format!("{}", crate::GENESIS_HASH));
+    assert_eq!(GAS_LIMIT, 30_000_000);
 }

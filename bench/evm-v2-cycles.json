@@ -1,0 +1,193 @@
+{
+  "source": "Сгенерировано zkvm-evm/scenario/reth-scenario.mjs; не редактировать вручную",
+  "note": "Программа батча EVM протокола версии 2: блоки узла Reth исполнены в zkVM SP1 БЕЗ пруфа, измерены циклы RISC-V. Время и память доказательства здесь НЕ измерялись. Цена элемента очереди — разность с пустым блоком, делённая на число элементов; свидетель состояния у блоков разный, поэтому это оценка с точностью до нескольких процентов.",
+  "reth": "Reth Version: 2.2.0",
+  "programElfSha256": "6828d42b82f3bb5ee9c660d30ee0d3eded06a861d0cf4c59e385cbfe7d05fba3",
+  "constants": {
+    "forcedTxGasCap": 40000,
+    "forcedTxMaxBytes": 256,
+    "maxBatchQueueItems": 32,
+    "gasLimit": 30000000
+  },
+  "beforeLengthLimit": {
+    "fullSegmentOfLongestCycles": 20757803,
+    "emptyBlockCycles": 7754015
+  },
+  "blocks": [
+    {
+      "number": 1,
+      "note": "родитель — генезис; зачисление депозита; частичная обработка очереди",
+      "transactions": 0,
+      "queueItems": 1,
+      "forcedIncluded": 0,
+      "forcedSkipped": 0,
+      "deposits": 1,
+      "withdrawals": 0,
+      "gasUsed": 0,
+      "dataBytes": 612,
+      "zkvmCycles": 7605543
+    },
+    {
+      "number": 2,
+      "note": "депозит, принудительный вывод включён, пропуски; перевод, вывод, создание контрактов",
+      "transactions": 7,
+      "queueItems": 7,
+      "forcedIncluded": 1,
+      "forcedSkipped": 5,
+      "deposits": 1,
+      "withdrawals": 2,
+      "gasUsed": 394034,
+      "dataBytes": 1704,
+      "zkvmCycles": 9091276
+    },
+    {
+      "number": 3,
+      "note": "пропуски по каждой причине; выводы из контракта L2, откатившийся кадр, DELEGATECALL",
+      "transactions": 8,
+      "queueItems": 21,
+      "forcedIncluded": 3,
+      "forcedSkipped": 18,
+      "deposits": 0,
+      "withdrawals": 3,
+      "gasUsed": 259737,
+      "dataBytes": 1791,
+      "zkvmCycles": 9919208
+    },
+    {
+      "number": 4,
+      "note": "обнуление слота рядом с веткой (7-1)",
+      "transactions": 1,
+      "queueItems": 0,
+      "forcedIncluded": 0,
+      "forcedSkipped": 0,
+      "deposits": 0,
+      "withdrawals": 0,
+      "gasUsed": 21349,
+      "dataBytes": 735,
+      "zkvmCycles": 8032595
+    },
+    {
+      "number": 5,
+      "note": "обнуление слота под расширением",
+      "transactions": 1,
+      "queueItems": 0,
+      "forcedIncluded": 0,
+      "forcedSkipped": 0,
+      "deposits": 0,
+      "withdrawals": 0,
+      "gasUsed": 21349,
+      "dataBytes": 735,
+      "zkvmCycles": 8040857
+    },
+    {
+      "number": 6,
+      "note": "пустой блок",
+      "transactions": 0,
+      "queueItems": 0,
+      "forcedIncluded": 0,
+      "forcedSkipped": 0,
+      "deposits": 0,
+      "withdrawals": 0,
+      "gasUsed": 0,
+      "dataBytes": 583,
+      "zkvmCycles": 7752577
+    },
+    {
+      "number": 7,
+      "note": "полный отрезок: все принудительные выводы включены",
+      "transactions": 32,
+      "queueItems": 32,
+      "forcedIncluded": 32,
+      "forcedSkipped": 0,
+      "deposits": 0,
+      "withdrawals": 32,
+      "gasUsed": 744320,
+      "dataBytes": 5547,
+      "zkvmCycles": 13601004
+    },
+    {
+      "number": 8,
+      "note": "полный отрезок: все принудительные пропущены revm",
+      "transactions": 0,
+      "queueItems": 32,
+      "forcedIncluded": 0,
+      "forcedSkipped": 32,
+      "deposits": 0,
+      "withdrawals": 0,
+      "gasUsed": 0,
+      "dataBytes": 583,
+      "zkvmCycles": 10002070
+    },
+    {
+      "number": 9,
+      "note": "полный отрезок: депозиты на новые счета",
+      "transactions": 0,
+      "queueItems": 32,
+      "forcedIncluded": 0,
+      "forcedSkipped": 0,
+      "deposits": 32,
+      "withdrawals": 0,
+      "gasUsed": 0,
+      "dataBytes": 1513,
+      "zkvmCycles": 8857377
+    },
+    {
+      "number": 10,
+      "note": "полный отрезок: мусор",
+      "transactions": 0,
+      "queueItems": 32,
+      "forcedIncluded": 0,
+      "forcedSkipped": 32,
+      "deposits": 0,
+      "withdrawals": 0,
+      "gasUsed": 0,
+      "dataBytes": 583,
+      "zkvmCycles": 7914858
+    },
+    {
+      "number": 11,
+      "note": "отсутствующий отправитель под нераскрытым узлом",
+      "transactions": 0,
+      "queueItems": 1,
+      "forcedIncluded": 0,
+      "forcedSkipped": 1,
+      "deposits": 0,
+      "withdrawals": 0,
+      "gasUsed": 0,
+      "dataBytes": 583,
+      "zkvmCycles": 7872827
+    },
+    {
+      "number": 12,
+      "note": "полный отрезок: принудительные наибольшей длины, пропущены по длине",
+      "transactions": 0,
+      "queueItems": 32,
+      "forcedIncluded": 0,
+      "forcedSkipped": 32,
+      "deposits": 0,
+      "withdrawals": 0,
+      "gasUsed": 0,
+      "dataBytes": 583,
+      "zkvmCycles": 12870157
+    }
+  ],
+  "emptyBlockCycles": 7752577,
+  "forcedWithdrawalGas": 23260,
+  "cyclesPerQueueItem": {
+    "forcedWithdrawalIncluded": 182763,
+    "forcedSkippedByRevm": 70297,
+    "deposit": 34525,
+    "forcedSkippedByForm": 5071,
+    "forcedSkippedLongest": 159924
+  },
+  "fullSegmentWorstCase": {
+    "cycles": 13601004,
+    "overEmptyBlock": 5848427,
+    "ratioToEmptyBlock": 1.754
+  },
+  "fullSegmentOfRefused": {
+    "cycles": 10002070,
+    "overEmptyBlock": 2249493,
+    "ratioToEmptyBlock": 1.29
+  }
+}

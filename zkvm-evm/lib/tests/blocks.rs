@@ -311,8 +311,8 @@ fn scenario_covers_what_the_tests_rely_on() {
         assert_eq!(values.prev_deposit_hash, values.new_deposit_hash);
         assert_ne!(values.new_deposit_hash, [0u8; 32]);
     }
-    // Блоки 7–10: отрезок ровно в предел.
-    for block in [7, 8, 9, 10] {
+    // Блоки 7–10 и 12: отрезок ровно в предел.
+    for block in [7, 8, 9, 10, 12] {
         let (from, up_to) = segment(block);
         assert_eq!(up_to - from, MAX_BATCH_QUEUE_ITEMS, "блок {block}");
     }
@@ -364,6 +364,7 @@ fn forced_transactions_end_up_as_the_scenario_says() {
     // Причины, достижимые на настоящем узле: по каждой есть элемент очереди.
     let required = [
         "Included",
+        "Skipped(TooLong)",
         "Skipped(Undecodable)",
         "Skipped(UnsupportedType)",
         "Skipped(MissingChainId)",
@@ -401,11 +402,11 @@ fn duplicate_of_an_included_forced_transaction_is_skipped() {
 
 #[test]
 fn refused_forced_transactions_leave_no_trace_in_the_state() {
-    // Спайк 3. Блоки 8, 10 и 11 — без транзакций и зачислений, в очереди только пропущенные
+    // Спайк 3. Блоки 8, 10, 11 и 12 — без транзакций и зачислений, в очереди только пропущенные
     // принудительные (в блоке 8 все 32 дошли до revm и отвергнуты им). Корень состояния у узла
     // после такого блока — тот же, что до него, и программа с ним согласна: отказ исполнения не
     // оставляет следа ни в nonce, ни в балансе, ни в «тронутых» счетах.
-    for block in [8u64, 10, 11] {
+    for block in [8u64, 10, 11, 12] {
         let input = batch(block);
         assert!(input.block.current_block.body.transactions.is_empty());
         assert!(!forced_items(&input).is_empty());
@@ -419,6 +420,10 @@ fn refused_forced_transactions_leave_no_trace_in_the_state() {
     let revm_refused = outcome(8).forced;
     assert_eq!(revm_refused.len(), MAX_BATCH_QUEUE_ITEMS);
     assert!(revm_refused.iter().all(|outcome| *outcome == ForcedOutcome::Skipped(SkipReason::Invalid(InvalidReason::NonceTooHigh))));
+    // Блок 12: элементы наибольшей длины, какую контракт ставит в очередь (64 ячейки по 127 байт).
+    let longest = batch(12);
+    assert!(forced_items(&longest).iter().all(|bytes| bytes.len() == 64 * 127));
+    assert!(outcome(12).forced.iter().all(|outcome| *outcome == ForcedOutcome::Skipped(SkipReason::TooLong)));
     // Блок 3: пропущенные вперемешку с включёнными и с транзакциями секвенсора; корень состояния
     // со слов узла, который пропущенных транзакций не видел вовсе.
     assert_eq!(outcome(3).values.new_state_root, node_hash(3));

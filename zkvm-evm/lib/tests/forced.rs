@@ -7,7 +7,7 @@ use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, U256};
 use reth_ethereum_primitives::TransactionSigned;
 use rollup_evm::{
     forced::{decode_forced_transaction, SkipReason},
-    BRIDGE_ADDRESS, FORCED_TX_GAS_CAP,
+    BRIDGE_ADDRESS, FORCED_TX_GAS_CAP, FORCED_TX_MAX_BYTES,
 };
 
 mod common;
@@ -61,6 +61,51 @@ fn bridge_call_of_each_ordinary_type_is_well_formed() {
     assert_ne!(address_of(&key(1)), address_of(&key(2)));
 }
 
+/// Вызов моста с данными такой длины, чтобы вся транзакция заняла ровно `length` байт.
+fn bridge_call_of_length(length: usize) -> Vec<u8> {
+    let build = |data: usize| {
+        let mut transaction = bridge_call(0, 50_000_000, RECIPIENT);
+        transaction.input = Bytes::from(vec![0x5a; data]);
+        encoded(&sign(&key(1), transaction))
+    };
+    let mut data = length.saturating_sub(120);
+    for _ in 0..8 {
+        let actual = build(data).len();
+        if actual == length {
+            return build(data);
+        }
+        data = data + length - actual;
+    }
+    panic!("не удалось подобрать длину данных под {length} байт");
+}
+
+#[test]
+fn forced_transaction_longer_than_the_limit_is_skipped() {
+    // Вывод через мост укладывается в предел с запасом при любых значениях полей.
+    assert_eq!(FORCED_TX_MAX_BYTES, 256);
+    let mut widest = bridge_call(u64::MAX - 1, 0, RECIPIENT);
+    widest.value = U256::MAX;
+    widest.max_fee_per_gas = u128::MAX;
+    widest.max_priority_fee_per_gas = u128::MAX;
+    widest.gas_limit = FORCED_TX_GAS_CAP;
+    let widest = encoded(&sign(&key(1), widest));
+    assert!(widest.len() <= 212, "самый широкий вывод через мост — {} байт", widest.len());
+    assert!(decode(&widest).is_ok());
+
+    // Ровно предел — годна, на байт больше — пропуск без разбора.
+    let at_limit = bridge_call_of_length(FORCED_TX_MAX_BYTES);
+    assert_eq!(at_limit.len(), FORCED_TX_MAX_BYTES);
+    assert_eq!(decode(&at_limit), Ok(address_of(&key(1))));
+    let over = bridge_call_of_length(FORCED_TX_MAX_BYTES + 1);
+    assert_eq!(over.len(), FORCED_TX_MAX_BYTES + 1);
+    assert_eq!(decode(&over), Err(SkipReason::TooLong));
+    // Самый длинный элемент, какой ставит в очередь контракт (64 ячейки по 127 байт), и мусор
+    // такой же длины: причина одна — длина, до разбора дело не доходит.
+    assert_eq!(decode(&bridge_call_of_length(64 * 127)), Err(SkipReason::TooLong));
+    assert_eq!(decode(&vec![0xffu8; 64 * 127]), Err(SkipReason::TooLong));
+    assert_eq!(decode(&vec![0xffu8; FORCED_TX_MAX_BYTES]), Err(SkipReason::Undecodable));
+}
+
 #[test]
 fn bytes_that_are_not_one_transaction_are_skipped() {
     let honest = encoded(&sign(&key(1), bridge_call(0, 50_000_000, RECIPIENT)));
@@ -74,8 +119,12 @@ fn bytes_that_are_not_one_transaction_are_skipped() {
     let mut tail = honest.clone();
     tail.push(0);
     assert_eq!(decode(&tail), Err(SkipReason::Undecodable));
-    // Две транзакции подряд — не одна.
-    assert_eq!(decode(&[honest.clone(), honest.clone()].concat()), Err(SkipReason::Undecodable));
+    // Две транзакции подряд — не одна (короткие, чтобы вместе уложиться в предел длины).
+    let mut short = bridge_call(0, 0, RECIPIENT);
+    short.input = Bytes::new();
+    let short = encoded(&sign(&key(1), short));
+    assert!(decode(&short).is_ok() && 2 * short.len() <= FORCED_TX_MAX_BYTES);
+    assert_eq!(decode(&[short.clone(), short].concat()), Err(SkipReason::Undecodable));
     // Неизвестный тип.
     let mut unknown_type = honest.clone();
     unknown_type[0] = 0x05;
@@ -220,6 +269,8 @@ fn non_canonical_variants(canonical: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
     let mut wide_length = vec![0xf9, 0x00, canonical[1]];
     wide_length.extend_from_slice(&canonical[2..]);
     variants.push(("длина списка с ведущим нулём", wide_length));
+    // Обычная транзакция с байтом типа 0 впереди: «типизированной» обычной транзакции нет.
+    variants.push(("байт типа 0 перед обычной транзакцией", [&[0u8][..], canonical].concat()));
     variants
 }
 
