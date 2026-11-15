@@ -29,6 +29,9 @@ import path from 'path';
 // - свою блокировку снимают так же: переименование, сверка токена, чужая — назад.
 // Остаток: если между ошибочным снятием и возвратом третий экземпляр успел создать файл,
 // возврат не удаётся и об этом говорит ошибка; для этого нужны три запуска в одни миллисекунды.
+// Круг 20, пункт 9: владение перепроверяется перед каждой записью состояния и перед отправкой
+// батча (`assertHeld`): блокировку, снятую чужим «мёртвым» решением, сервис замечает до того, как
+// два экземпляра напишут в один каталог или пошлют один батч дважды.
 
 /** Каталог состояния занят другим экземпляром сервиса. */
 export class StateDirBusy extends Error {}
@@ -158,6 +161,29 @@ function busyReason(dir: string, file: string, text: string): string | null {
     return null;
 }
 
+/** Блокировка, которую держит экземпляр: снять и проверить, что она всё ещё наша. */
+export type StateDirLock = (() => void) & {
+    /** Файл блокировки — ровно наш (тот же токен и текст); иначе StateDirBusy. */
+    assertHeld(): void;
+};
+
+function assertHeld(token: string): void {
+    const held = heldLocks.get(token);
+    if (!held) throw new StateDirBusy('блокировка каталога состояния уже снята этим экземпляром: запись и отправка запрещены');
+    let text: string | null;
+    try {
+        text = readFileSync(held.file, 'utf8');
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        text = null;
+    }
+    if (text !== held.text)
+        throw new StateDirBusy(
+            `блокировка ${held.file} больше не наша (${text === null ? 'файла нет' : 'в файле другой владелец'}): ` +
+                'её снял или занял другой экземпляр; запись состояния и отправка остановлены — остановите все экземпляры и запустите один',
+        );
+}
+
 /** Снять свою блокировку: только если в файле наш токен. */
 function release(token: string): void {
     const held = heldLocks.get(token);
@@ -177,7 +203,7 @@ function release(token: string): void {
  * Взять блокировку каталога состояния. Занят — StateDirBusy с причиной. Возвращает функцию
  * снятия; при выходе процесса снимаются все свои (со сверкой токена).
  */
-export function lockStateDir(dir: string): () => void {
+export function lockStateDir(dir: string): StateDirLock {
     mkdirSync(dir, { recursive: true });
     const file = path.join(dir, 'sequencer.lock');
     const owner: Owner = { pid: process.pid, host: os.hostname(), token: randomBytes(16).toString('hex') };
@@ -197,7 +223,7 @@ export function lockStateDir(dir: string): () => void {
                     }
                 });
             }
-            return () => release(owner.token);
+            return Object.assign(() => release(owner.token), { assertHeld: () => assertHeld(owner.token) });
         }
         let text: string;
         try {

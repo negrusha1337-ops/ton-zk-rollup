@@ -166,7 +166,7 @@ if (missing.length > 0) {
             return blockchain.now;
         };
         const submitter = (): BatchSubmitter =>
-            new SandboxSubmitter(rollup, owner.getSender(), (result) => feed.record(result));
+            new SandboxSubmitter(rollup, owner.getSender(), (result) => feed.record(result), () => blockchain.now!);
         /** Шаг, пережидающий «блок из будущего L1» (время блока — max(родитель + 1, сейчас)). */
         const settle = async (service: Sequencer) => {
             for (let attempt = 0; ; attempt++) {

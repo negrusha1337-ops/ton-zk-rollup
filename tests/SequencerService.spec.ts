@@ -29,7 +29,7 @@ describe('сервис сборщика на заглушках узла и хо
     let lines: string[];
     let open: Sequencer[];
     /** Двойник контракта для сервиса: что принято, и сколько раз слали. */
-    let contract: ContractBatchState;
+    let contract: Omit<ContractBatchState, 'utime'>;
     let submits: number;
     const accepted: BatchSubmitter = {
         submit: async (batch) => {
@@ -37,7 +37,9 @@ describe('сервис сборщика на заглушках узла и хо
             contract = { batchIndex: batch.number, stateRoot: BigInt(batch.blockHash) };
             return { accepted: true, alreadyAccepted: false };
         },
-        contractState: async () => contract,
+        // Снимок контракта — на время L1 теста.
+        contractState: async () => ({ ...contract, utime: clock.l1 }),
+        deployment: async () => ({ chainId: FAKE_CHAIN_ID, maxBlockAge: MAX_BLOCK_AGE }),
     };
 
     const config = (overrides: Partial<SequencerConfig> = {}): SequencerConfig => ({
@@ -163,12 +165,17 @@ describe('сервис сборщика на заглушках узла и хо
             'часы машины расходятся со временем L1 на 61 с (предел 60): время блоков и срок приёма считались бы неверно',
         );
         clock.l1 = clock.machine;
-        // По умолчанию 1800 + 300: с наименьшим maxBlockAge контракта (1800) сервис не стартует.
+        // По умолчанию 300 + 1800 + 300: с наименьшим maxBlockAge контракта (1800) сервис не стартует.
         await expect(sequencer({ maxBlockAge: 1800 }).start()).rejects.toThrow(
-            'время пруфа 1800 с + запас 300 с не меньше maxBlockAge 1800 с: каждый блок пересобирался бы до пруфа; ' +
-                'уменьшите expectedProofTime либо разверните контракт с большим maxBlockAge',
+            'время проверки кандидата 300 с + время пруфа 1800 с + запас 300 с = 2400 с не меньше maxBlockAge 1800 с: ' +
+                'каждый блок пересобирался бы до пруфа; уменьшите expectedProofTime либо разверните контракт с большим maxBlockAge',
         );
-        await expect(sequencer({ expectedProofTime: 3300 }).start()).rejects.toThrow(/^время пруфа 3300 с \+ запас 300 с/);
+        await expect(sequencer({ expectedProofTime: 3300 }).start()).rejects.toThrow(/^время проверки кандидата 300 с \+ время пруфа 3300 с/);
+        // Круг 20, пункт 7: пруф и запас помещаются (3000 + 300 < 3600), а с проверкой кандидата — нет.
+        await expect(sequencer({ expectedProofTime: 3000 }).start()).rejects.toThrow(
+            /^время проверки кандидата 300 с \+ время пруфа 3000 с \+ запас 300 с = 3600 с не меньше maxBlockAge 3600 с/,
+        );
+        await expect(sequencer({ expectedProofTime: 2999 }).start()).resolves.toBeUndefined();
         const service = sequencer({ expectedProofTime: 600 });
         await service.start();
         await service.step();
@@ -287,7 +294,8 @@ describe('сервис сборщика на заглушках узла и хо
                 if (failing) throw new Error('сеть не ответила');
                 return accepted.submit(batch);
             },
-            contractState: async () => contract,
+            contractState: accepted.contractState,
+            deployment: accepted.deployment,
         };
         const first = sequencer({}, { submitter: flaky });
         await first.start();
@@ -302,13 +310,16 @@ describe('сервис сборщика на заглушках узла и хо
         expect(await waiting.step()).toMatchObject({ kind: 'waiting', number: 1 });
         expect(submits).toBe(0);
         expect(waiting.snapshot.blocks[0].status).toBe('proven');
-        // Срок истёк, контракт не принял — пересборка.
-        clock.l1 = clock.machine = BLOCK.timestamp + MAX_BLOCK_AGE + 1;
+        // Срок истёк, контракт не принял — пересборка, но только за запасом rebuildMargin (60 с).
+        clock.l1 = clock.machine = BLOCK.timestamp + MAX_BLOCK_AGE + 61;
         const expired = sequencer({}, { submitter: flaky, faults: { stopAfter: 'built' } });
         await expired.start();
         await expect(expired.step()).rejects.toThrow(Interrupted);
         expect(expired.snapshot.rebuild).toMatchObject({ number: 1, replaces: BLOCK.hash });
-        expect(lines.some((line) => line.startsWith(`блок 1 (${BLOCK.hash}) пересобирается: батч не успеть принять до отправки:`))).toBe(true);
+        expect(lines).toContain(
+            `блок 1 (${BLOCK.hash}) пересобирается: срок приёма батча ${BLOCK.timestamp + MAX_BLOCK_AGE} истёк: по снимку контракта на время L1 ` +
+                `${BLOCK.timestamp + MAX_BLOCK_AGE + 61} (позже срока на запас 60 с) батч не принят`,
+        );
 
         // Пруф построен в этом шаге и попал в запас: батч не уходил — пересборка сразу.
         rmSync(config().stateDir, { recursive: true, force: true });

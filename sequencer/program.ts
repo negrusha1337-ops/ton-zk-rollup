@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import path from 'path';
 import { EvmBatchReport } from '../wrappers/evmProofs';
-import { track } from './children';
+import { assertNotShuttingDown, track } from './children';
 
 // Вызовы программы батча: хост zkvm-evm (нативный расчёт той же библиотекой, что в zkVM) и
 // штатный rsp (вход блока: блок, заголовки предков и свидетель состояния от узла одним
@@ -48,6 +48,12 @@ export function runNiced(
     logFile?: string,
     timeoutMs = DEFAULT_TIMEOUT_MS,
 ): Promise<ProcessResult> {
+    // Во время остановки по сигналу (и для повторов после сбоя) новый инструмент не запускается.
+    try {
+        assertNotShuttingDown(path.basename(binary));
+    } catch (error) {
+        return Promise.reject(error);
+    }
     return new Promise((resolve, reject) => {
         const child = track(spawn('nice', ['-n', '15', binary, ...args], { env: ENVIRONMENT }));
         const stdout: Buffer[] = [];

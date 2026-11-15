@@ -173,6 +173,15 @@ const b = JSON.parse(fs.readFileSync(file, 'utf8'));
 const args = process.argv.slice(2);
 const arg = (name) => args[args.indexOf(name) + 1];
 if (args.includes('--identity')) { console.log(JSON.stringify(b.identity)); process.exit(0); }
+// Форма принудительных: байты с 0xff — мусор (пропуск), остальные — годные от одного отправителя.
+if (args.includes('--classify-forced')) {
+  const items = JSON.parse(fs.readFileSync(arg('--classify-forced'), 'utf8'));
+  const verdicts = items.map((hex, index) => hex.startsWith('0xff')
+    ? { index, form: 'skipped', reason: 'мусор' }
+    : { index, form: 'valid', signer: '0x' + 'ab'.repeat(20), hash: '0x' + '00'.repeat(32) });
+  fs.writeFileSync(arg('--report'), JSON.stringify({ chainId: arg('--chain-id'), verdicts }));
+  process.exit(0);
+}
 if (b.failTimes > 0) {
   b.failTimes--; fs.writeFileSync(file, JSON.stringify(b));
   process.stderr.write('Свидетель не продолжает предыдущий батч: не совпал хеш очереди.\\n');

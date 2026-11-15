@@ -1,3 +1,4 @@
+import '@ton/test-utils';
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Address, Cell } from '@ton/core';
 import { keccak_256 } from '@noble/hashes/sha3';

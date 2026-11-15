@@ -41,7 +41,7 @@ describe('отправщик батчей на двойнике: отказы, �
     let actors: RethActors;
     let ready: BlockchainSnapshot;
     let sent: { transactions: Transaction[] }[];
-    const mock: BatchProof = { kind: 'mock', proof: MOCK_PROOF, hintsBoc: null };
+    const mock: BatchProof = { kind: 'mock', proof: MOCK_PROOF, hintsBoc: null, jobKey: 'не проверяется отправщиком' };
     const batch = (number: number, report = reportOf(number), blockHash = blockOf(number).hash): Batch => ({
         number,
         blockHash,
@@ -140,7 +140,7 @@ describe('отправщик батчей на НАСТОЯЩЕМ контрак
     let owner: SandboxContract<TreasuryContract>;
     let rollup: SandboxContract<Rollup>;
     let ready: BlockchainSnapshot;
-    const groth16: BatchProof = { kind: 'groth16', proof: proven.proof, hintsBoc: proven.hinted.hintsBoc };
+    const groth16: BatchProof = { kind: 'groth16', proof: proven.proof, hintsBoc: proven.hinted.hintsBoc, jobKey: 'не проверяется отправщиком' };
 
     beforeAll(async () => {
         const code = await compile('Rollup');

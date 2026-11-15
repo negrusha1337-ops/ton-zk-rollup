@@ -139,6 +139,7 @@ export function writeAtomically(file: string, contents: string | Buffer): void {
 }
 
 export { lockStateDir, StateDirBusy } from './lock';
+export type { StateDirLock } from './lock';
 
 export function genesisState(chainId: bigint): SequencerState {
     return {

@@ -145,4 +145,52 @@ setInterval(() => {}, 1000);
         expect(result).toMatchObject({ code: 1, childAlive: false, marker: false });
         expect(result.took).toBeGreaterThanOrEqual(600);
     }, 30_000);
+
+    it('20-9: второй сигнал во время ожидания — SIGKILL дочерним, выход и снятая блокировка; в остановке инструменты не запускаются', async () => {
+        const lockDir = path.join(dir, 'state');
+        const script = path.join(dir, 'service2.js');
+        writeFileSync(
+            script,
+            `require(${JSON.stringify(require.resolve('ts-node'))}).register({ transpileOnly: true });
+const { track, signalGrace } = require(${JSON.stringify(path.join(ROOT, 'sequencer', 'children'))});
+const { lockStateDir } = require(${JSON.stringify(path.join(ROOT, 'sequencer', 'lock'))});
+const { runNiced } = require(${JSON.stringify(path.join(ROOT, 'sequencer', 'program'))});
+const { spawn } = require('child_process');
+signalGrace.ms = 20000;
+lockStateDir(${JSON.stringify(lockDir)});
+const child = track(spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); console.log('готов')"], { stdio: ['ignore', 'pipe', 'ignore'] }));
+child.stdout.once('data', () => console.log('pid ' + child.pid));
+process.on('SIGINT', () => {
+  // Повтор инструмента во время остановки обязан получить отказ, а не новый процесс.
+  setTimeout(() => runNiced('/bin/echo', ['x']).then(() => console.log('запущен'), (error) => console.log('отказ: ' + error.message)), 50);
+});
+setInterval(() => {}, 1000);
+`,
+        );
+        const service = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'inherit'] });
+        let output = '';
+        const waitFor = (pattern: RegExp) =>
+            new Promise<RegExpMatchArray>((resolve, reject) => {
+                const check = () => {
+                    const match = output.match(pattern);
+                    if (match) return resolve(match);
+                };
+                service.stdout.on('data', (data) => ((output += String(data)), check()));
+                service.once('exit', (code) => reject(new Error(`сервис вышел: ${code}; вывод: ${output}`)));
+                check();
+            });
+        const childPid = Number((await waitFor(/pid (\d+)/))[1]);
+        expect(existsSync(path.join(lockDir, 'sequencer.lock'))).toBe(true);
+        const exited = new Promise<number | null>((resolve) => service.once('exit', (code) => resolve(code)));
+        service.kill('SIGINT');
+        expect((await waitFor(/отказ: (.*)/))[1]).toBe('echo не запускается: сервис останавливается по сигналу SIGINT');
+        const started = Date.now();
+        service.kill('SIGINT');
+        expect(await exited).toBe(1);
+        expect(Date.now() - started).toBeLessThan(3_000);
+        for (let wait = 0; alive(childPid) && wait < 40; wait++) await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(alive(childPid)).toBe(false);
+        expect(output).not.toContain('запущен');
+        expect(existsSync(path.join(lockDir, 'sequencer.lock'))).toBe(false);
+    }, 30_000);
 });
