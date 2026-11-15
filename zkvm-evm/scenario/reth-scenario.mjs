@@ -3,7 +3,7 @@
 // аварийного выхода (фикстуры fixtures/evm_batches/reth/).
 //
 //   node zkvm-evm/scenario/reth-scenario.mjs [адрес получателя выплат в TON]
-//       [--first-block-time=<unix>] [--first-block-in=<секунд от запуска>]
+//       [--first-block-time=<unix>] [--first-block-in=<секунд от запуска>] [--profile=default|testnet]
 //
 // С адресом выводы через мост и аварийные выходы обоих счетов идут этому получателю (кошелёк
 // будущего прогона в testnet: согласие подписывается одноразовым ключом, переподписать его потом
@@ -15,6 +15,13 @@
 // запуска); без них — момент запуска. Каждый следующий блок — на секунду позже родителя: вся
 // цепочка укладывается в одно окно maxBlockAge. Узел Reth блок с временем из будущего через
 // Engine API принимает (после Merge время блока сверяет клиент консенсуса, а его здесь нет).
+//
+// Профиль (profile.mjs). default — цепочка для Sandbox со всеми случаями пропуска. testnet — та же
+// цепочка, дешёвая для кошелька прогона в сети: депозиты меньше, а в блоках 2–3 из принудительных
+// оставлены десять негодных подписей, включённый вывод и по одному пропуску по форме и по отказу
+// revm (место в очереди L1 стоит 0,05 TON и не возвращается); вызовов, оставляющих монеты на
+// контрактах L2, нет. Монеты на блоки замеров 7 и 12 в этом профиле даёт депозит в отрезке
+// блока 4. В конце сценарий печатает расчётную потребность кошелька прогона.
 //
 // Генезис закреплён протоколом (zkvm-evm/lib/src/genesis.rs): один счёт — мост-предустановка
 // (код, nonce 1, баланс 0), время 0, лимит газа 30 млн. Все монеты L2 — только из депозитов.
@@ -86,6 +93,7 @@ import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak_256 } from '@noble/hashes/sha3.js';
 import tonCore from '@ton/core';
 import { evmSourcesSha256 } from '../../zk/evm-binding.mjs';
+import { bridgeWithdrawals, FORCED_CASES, keepsForced, profileNamed, profileProblems, queuePlan, walletNeed } from './profile.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TOOLS = process.env.EVM_TOOLS ?? path.join(ROOT, '.tools');
@@ -129,23 +137,32 @@ const MAX_FORCED_TX_BYTES = 256;
 /** Наименьший вывод: 0,05 монеты, в нанотонах. */
 const MIN_WITHDRAWAL = 50_000_000n;
 
-/** Депозиты в нанотонах (= gwei): что зачтётся на L2. */
-const USER_DEPOSIT = 3_000_000_000n;
-const OTHER_DEPOSIT = 300_000_000n;
 const TRANSFER_TO = '0x' + '22'.repeat(20);
-const TRANSFER_WEI = 10_000_000n * GWEI;
 // --- аргументы ---
 const STARTED_AT = Math.floor(Date.now() / 1000);
 const options = Object.fromEntries(
     process.argv.slice(2).filter((argument) => argument.startsWith('--')).map((argument) => {
         const [name, value] = argument.slice(2).split('=');
+        if (name === 'profile' && value) return [name, value];
         if (!['first-block-time', 'first-block-in'].includes(name) || !/^\d+$/.test(value ?? '')) {
-            throw new Error(`непонятный аргумент ${argument}: ожидается --first-block-time=<unix> или --first-block-in=<секунд>`);
+            throw new Error(`непонятный аргумент ${argument}: ожидается --first-block-time=<unix>, --first-block-in=<секунд> или --profile=<имя>`);
         }
         return [name, Number(value)];
     }),
 );
 if ('first-block-time' in options && 'first-block-in' in options) throw new Error('время первого блока задано дважды');
+/** Профиль цепочки (profile.mjs): суммы и состав блоков 2–3; по умолчанию — цепочка для Sandbox. */
+const PROFILE = profileNamed(options.profile ?? 'default');
+{
+    const problems = profileProblems(PROFILE);
+    if (problems.length > 0) throw new Error(`профиль ${PROFILE.name} негоден: ${problems.join('; ')}`);
+}
+/** Депозиты в нанотонах (= gwei): что зачтётся на L2. */
+const USER_DEPOSIT = PROFILE.userDeposit;
+const OTHER_DEPOSIT = PROFILE.otherDeposit;
+const TRANSFER_WEI = PROFILE.transferWei;
+/** Сумма в монетах для метки: 250 000 000 нанотон — «0,25». */
+const coins = (nanotons) => (Number(nanotons) / 1e9).toString().replace('.', ',');
 /** Время первого блока (unix): заданное либо момент запуска. */
 const FIRST_BLOCK_TIME = options['first-block-time'] ?? STARTED_AT + (options['first-block-in'] ?? 0);
 const FIRST_BLOCK_TIME_SOURCE = 'first-block-time' in options ? 'first-block-time' : 'first-block-in' in options ? 'first-block-in' : 'now';
@@ -587,9 +604,22 @@ try {
     const deposit = (l2Recipient, amount) => queue.push({ kind: 'deposit', l2Recipient, amount });
     /** `expect`: 'included' либо причина пропуска в том виде, как её печатает хост. */
     const forced = (label, expect, transaction) => {
+        if (!transaction) fail(`«${label}»: транзакции нет — случай, от которого она зависит, профилем убран`);
         queue.push({ kind: 'forced', bytes: Buffer.from(transaction), label, expect });
         return transaction;
     };
+    /**
+     * Принудительная транзакция блока 2 или 3 из перечня профиля (FORCED_CASES): ставится в
+     * очередь, только если профиль её оставляет; иначе не строится вовсе (и nonce счёта не
+     * тратит) и возвращает null. `build` вызывается сразу, в порядке записи.
+     */
+    const seenForced = { 2: [], 3: [] };
+    const forcedCase = (block, id, label, expect, build) => {
+        seenForced[block].push(id);
+        return keepsForced(PROFILE, block, id) ? forced(label, expect, build()) : null;
+    };
+    /** Транзакция блока от принудительной: её нет, если случай убран профилем. */
+    const includedEntry = (label, raw, status, bridgeLogs) => (raw ? [entry(label, raw, status, bridgeLogs)] : []);
     /** Транзакция блока: байты, ожидаемый статус и число логов моста. */
     const entry = (label, raw, status = 1, bridgeLogs = 0) => ({ label, raw, status, bridgeLogs });
     const blocks = [];
@@ -626,21 +656,22 @@ try {
 
     // Блок 2.
     let nonce = 0;
-    const firstForced = forced('принудительный вывод 0,1', 'included', bridgeCall(user, nonce++, 100_000_000n));
-    forced('мусор', 'Skipped(Undecodable)', keccak(Buffer.from('ton-zk-rollup: not a transaction')).subarray(0, 20));
-    forced('nonce выше', 'Skipped(Invalid(NonceTooHigh))', bridgeCall(user, 7, MIN_WITHDRAWAL));
-    forced('дубль включённой', 'Skipped(Invalid(NonceTooLow))', firstForced);
-    forced('отправителя нет в дереве', 'Skipped(Invalid(LackOfFunds))', bridgeCall(strangers[0], 0, MIN_WITHDRAWAL));
-    forced('отправитель получает депозит в этом же блоке', 'Skipped(Invalid(LackOfFunds))', bridgeCall(other, 0, MIN_WITHDRAWAL));
+    const firstForcedLabel = `принудительный вывод ${coins(PROFILE.forcedWithdrawal)}`;
+    const firstForced = forcedCase(2, 'withdrawal', firstForcedLabel, 'included', () => bridgeCall(user, nonce++, PROFILE.forcedWithdrawal));
+    forcedCase(2, 'garbage', 'мусор', 'Skipped(Undecodable)', () => keccak(Buffer.from('ton-zk-rollup: not a transaction')).subarray(0, 20));
+    forcedCase(2, 'nonceHigh', 'nonce выше', 'Skipped(Invalid(NonceTooHigh))', () => bridgeCall(user, 7, MIN_WITHDRAWAL));
+    forcedCase(2, 'duplicate', 'дубль включённой', 'Skipped(Invalid(NonceTooLow))', () => firstForced);
+    forcedCase(2, 'absentSender', 'отправителя нет в дереве', 'Skipped(Invalid(LackOfFunds))', () => bridgeCall(strangers[0], 0, MIN_WITHDRAWAL));
+    forcedCase(2, 'depositedSender', 'отправитель получает депозит в этом же блоке', 'Skipped(Invalid(LackOfFunds))', () => bridgeCall(other, 0, MIN_WITHDRAWAL));
     const contracts = {};
     const create = (name, code) => {
         contracts[name] = contractAddress(user.address, nonce);
         return entry(`создание ${name}`, signTransaction(user, { nonce: nonce++, gas: 300_000n, data: code }));
     };
     await nextBlock('депозит, принудительный вывод включён, пропуски; перевод, вывод, создание контрактов', queue.length, [
-        entry('принудительный вывод 0,1', firstForced, 1, 1),
+        ...includedEntry(firstForcedLabel, firstForced, 1, 1),
         entry('перевод', signTransaction(user, { type: 0, nonce: nonce++, gas: 21_000n, to: TRANSFER_TO, value: TRANSFER_WEI })),
-        entry('вывод 0,25', signTransaction(user, { type: 0, nonce: nonce++, gas: 60_000n, to: BRIDGE, value: 250_000_000n * GWEI, data: recipientData }), 1, 1),
+        entry(`вывод ${coins(PROFILE.sequencerWithdrawal)}`, signTransaction(user, { type: 0, nonce: nonce++, gas: 60_000n, to: BRIDGE, value: PROFILE.sequencerWithdrawal * GWEI, data: recipientData }), 1, 1),
         create('splitter', creation(SPLITTER)),
         create('reverter', creation(REVERTER)),
         create('delegator', creation(DELEGATOR)),
@@ -654,26 +685,26 @@ try {
 
     // Блок 3: пропуски по каждой причине, включённые принудительные вперемешку с ними.
     const next = nonce; // nonce счёта A перед блоком 3
-    forced('получатель — не мост', 'Skipped(NotBridgeCall)', signTransaction(user, { nonce: next, gas: 21_000n, to: TRANSFER_TO, value: TRANSFER_WEI }));
-    forced('тип 3 (блобы)', 'Skipped(UnsupportedType)', signTransaction(user, { type: 3, nonce: next, gas: FORCED_TX_GAS_CAP, to: BRIDGE, value: MIN_WITHDRAWAL * GWEI, data: recipientData }));
-    const reverted = forced('включена: сумма ниже минимума, мост откатывает', 'included', bridgeCall(user, nonce++, 10_000_000n));
-    forced('тип 4 (делегирование)', 'Skipped(UnsupportedType)', signTransaction(user, { type: 4, nonce, gas: FORCED_TX_GAS_CAP, to: BRIDGE, value: MIN_WITHDRAWAL * GWEI, data: recipientData }));
-    forced('чужой chainId', 'Skipped(ForeignChainId)', bridgeCall(user, nonce, MIN_WITHDRAWAL, { chainId: CHAIN_ID + 1n }));
-    forced('существующий счёт, nonce выше', 'Skipped(Invalid(NonceTooHigh))', bridgeCall(other, 3, MIN_WITHDRAWAL));
-    forced('без chainId', 'Skipped(MissingChainId)', bridgeCall(user, nonce, MIN_WITHDRAWAL, { type: 0 }, { noChainId: true }));
-    forced('s в верхней половине', 'Skipped(Signature)', bridgeCall(user, nonce, MIN_WITHDRAWAL, {}, { highS: true }));
-    const minimum = forced('включена: вывод ровно на минимум', 'included', bridgeCall(user, nonce++, MIN_WITHDRAWAL, { type: 1 }));
-    forced('лимит газа выше предела', 'Skipped(GasLimitAboveCap)', bridgeCall(user, nonce, MIN_WITHDRAWAL, { gas: FORCED_TX_GAS_CAP + 1n }));
-    forced('создание контракта', 'Skipped(Create)', signTransaction(user, { nonce, gas: FORCED_TX_GAS_CAP, data: '0x00' }));
-    forced('хвост после транзакции', 'Skipped(Undecodable)', Buffer.concat([bridgeCall(user, nonce, MIN_WITHDRAWAL), Buffer.from([0])]));
-    forced('нехватка баланса', 'Skipped(Invalid(LackOfFunds))', bridgeCall(other, 0, 1_000_000_000n));
-    forced('цена ниже базовой', 'Skipped(Invalid(GasPriceBelowBaseFee))', bridgeCall(other, 0, MIN_WITHDRAWAL, { type: 0, gasPrice: 1n }));
-    forced('чаевые выше наибольшей цены', 'Skipped(Invalid(PriorityFeeAboveMaxFee))', bridgeCall(other, 0, MIN_WITHDRAWAL, { maxPriority: 3n * GWEI }));
-    forced('лимита газа не хватает на саму транзакцию', 'Skipped(Invalid(IntrinsicGas))', bridgeCall(other, 0, MIN_WITHDRAWAL, { gas: 21_000n }));
-    forced('плата не помещается в 256 бит', 'Skipped(Invalid(PaymentOverflow))', signTransaction(other, { nonce: 0, gas: FORCED_TX_GAS_CAP, to: BRIDGE, value: 2n ** 256n - 1n, data: recipientData }));
-    forced('nonce — наибольшее u64', 'Skipped(Invalid(NonceOverflow))', bridgeCall(other, 2n ** 64n - 1n, MIN_WITHDRAWAL));
-    forced('nonce ниже', 'Skipped(Invalid(NonceTooLow))', bridgeCall(user, 0, 70_000_000n));
-    forced('второго отправителя нет в дереве', 'Skipped(Invalid(LackOfFunds))', bridgeCall(strangers[1], 0, MIN_WITHDRAWAL));
+    forcedCase(3, 'notBridge', 'получатель — не мост', 'Skipped(NotBridgeCall)', () => signTransaction(user, { nonce: next, gas: 21_000n, to: TRANSFER_TO, value: TRANSFER_WEI }));
+    forcedCase(3, 'blobType', 'тип 3 (блобы)', 'Skipped(UnsupportedType)', () => signTransaction(user, { type: 3, nonce: next, gas: FORCED_TX_GAS_CAP, to: BRIDGE, value: MIN_WITHDRAWAL * GWEI, data: recipientData }));
+    const reverted = forcedCase(3, 'belowMinimum', 'включена: сумма ниже минимума, мост откатывает', 'included', () => bridgeCall(user, nonce++, 10_000_000n));
+    forcedCase(3, 'delegationType', 'тип 4 (делегирование)', 'Skipped(UnsupportedType)', () => signTransaction(user, { type: 4, nonce, gas: FORCED_TX_GAS_CAP, to: BRIDGE, value: MIN_WITHDRAWAL * GWEI, data: recipientData }));
+    forcedCase(3, 'foreignChainId', 'чужой chainId', 'Skipped(ForeignChainId)', () => bridgeCall(user, nonce, MIN_WITHDRAWAL, { chainId: CHAIN_ID + 1n }));
+    forcedCase(3, 'otherNonceHigh', 'существующий счёт, nonce выше', 'Skipped(Invalid(NonceTooHigh))', () => bridgeCall(other, 3, MIN_WITHDRAWAL));
+    forcedCase(3, 'noChainId', 'без chainId', 'Skipped(MissingChainId)', () => bridgeCall(user, nonce, MIN_WITHDRAWAL, { type: 0 }, { noChainId: true }));
+    forcedCase(3, 'highS', 's в верхней половине', 'Skipped(Signature)', () => bridgeCall(user, nonce, MIN_WITHDRAWAL, {}, { highS: true }));
+    const minimum = forcedCase(3, 'minimumWithdrawal', 'включена: вывод ровно на минимум', 'included', () => bridgeCall(user, nonce++, MIN_WITHDRAWAL, { type: 1 }));
+    forcedCase(3, 'gasAboveCap', 'лимит газа выше предела', 'Skipped(GasLimitAboveCap)', () => bridgeCall(user, nonce, MIN_WITHDRAWAL, { gas: FORCED_TX_GAS_CAP + 1n }));
+    forcedCase(3, 'create', 'создание контракта', 'Skipped(Create)', () => signTransaction(user, { nonce, gas: FORCED_TX_GAS_CAP, data: '0x00' }));
+    forcedCase(3, 'trailingByte', 'хвост после транзакции', 'Skipped(Undecodable)', () => Buffer.concat([bridgeCall(user, nonce, MIN_WITHDRAWAL), Buffer.from([0])]));
+    forcedCase(3, 'lackOfFunds', 'нехватка баланса', 'Skipped(Invalid(LackOfFunds))', () => bridgeCall(other, 0, 1_000_000_000n));
+    forcedCase(3, 'priceBelowBase', 'цена ниже базовой', 'Skipped(Invalid(GasPriceBelowBaseFee))', () => bridgeCall(other, 0, MIN_WITHDRAWAL, { type: 0, gasPrice: 1n }));
+    forcedCase(3, 'priorityAboveMax', 'чаевые выше наибольшей цены', 'Skipped(Invalid(PriorityFeeAboveMaxFee))', () => bridgeCall(other, 0, MIN_WITHDRAWAL, { maxPriority: 3n * GWEI }));
+    forcedCase(3, 'intrinsicGas', 'лимита газа не хватает на саму транзакцию', 'Skipped(Invalid(IntrinsicGas))', () => bridgeCall(other, 0, MIN_WITHDRAWAL, { gas: 21_000n }));
+    forcedCase(3, 'paymentOverflow', 'плата не помещается в 256 бит', 'Skipped(Invalid(PaymentOverflow))', () => signTransaction(other, { nonce: 0, gas: FORCED_TX_GAS_CAP, to: BRIDGE, value: 2n ** 256n - 1n, data: recipientData }));
+    forcedCase(3, 'nonceOverflow', 'nonce — наибольшее u64', 'Skipped(Invalid(NonceOverflow))', () => bridgeCall(other, 2n ** 64n - 1n, MIN_WITHDRAWAL));
+    forcedCase(3, 'nonceLow', 'nonce ниже', 'Skipped(Invalid(NonceTooLow))', () => bridgeCall(user, 0, 70_000_000n));
+    forcedCase(3, 'secondAbsentSender', 'второго отправителя нет в дереве', 'Skipped(Invalid(LackOfFunds))', () => bridgeCall(strangers[1], 0, MIN_WITHDRAWAL));
     // Вызовы моста с негодными подписями: транзакция счёта B, которая с его настоящей подписью
     // была бы действительна (nonce 0, сумма по карману). Этот блок идёт в пруф.
     const badSignatures = [];
@@ -688,35 +719,62 @@ try {
         }
     };
     withBadSignatures(3, other, MIN_WITHDRAWAL, 'block-3');
-    const starved = forced('включена: газа не хватает на код моста', 'included', bridgeCall(user, nonce++, MIN_WITHDRAWAL, { gas: 21_550n }));
+    const starved = forcedCase(3, 'starved', 'включена: газа не хватает на код моста', 'included', () => bridgeCall(user, nonce++, MIN_WITHDRAWAL, { gas: 21_550n }));
+    // Перечень случаев в profile.mjs и этот код обязаны совпадать: по перечню считаются состав
+    // очереди и потребность кошелька.
+    for (const block of [2, 3]) {
+        if (JSON.stringify(seenForced[block]) !== JSON.stringify(Object.keys(FORCED_CASES[block]))) {
+            fail(`принудительные случаи блока ${block} в сценарии — не те, что в перечне profile.mjs`);
+        }
+    }
     const callContract = (label, name, valueNanotons, status, logs) =>
         entry(label, signTransaction(user, { nonce: nonce++, gas: 200_000n, to: contracts[name], value: valueNanotons * GWEI, data: recipientData }), status, logs);
     await nextBlock('пропуски по каждой причине; выводы из контракта L2, откатившийся кадр, DELEGATECALL', queue.length, [
-        entry('принудительная: мост откатывает', reverted, 0, 0),
-        entry('принудительная: вывод на минимум', minimum, 1, 1),
-        entry('принудительная: нехватка газа', starved, 0, 0),
-        callContract('два вывода из контракта L2', 'splitter', 200_000_000n, 1, 2),
-        callContract('вывод во внутреннем откатившемся кадре', 'reverter', 100_000_000n, 1, 0),
-        callContract('DELEGATECALL в мост', 'delegator', 100_000_000n, 1, 0),
+        ...includedEntry('принудительная: мост откатывает', reverted, 0, 0),
+        ...includedEntry('принудительная: вывод на минимум', minimum, 1, 1),
+        ...includedEntry('принудительная: нехватка газа', starved, 0, 0),
+        callContract('два вывода из контракта L2', 'splitter', PROFILE.splitterValue, 1, 2),
+        // После этих двух вызовов монеты остаются на контрактах L2 и аварийно не выходят: в
+        // профиле без них (lockedCallValue = 0) их нет.
+        ...(PROFILE.lockedCallValue > 0n
+            ? [
+                  callContract('вывод во внутреннем откатившемся кадре', 'reverter', PROFILE.lockedCallValue, 1, 0),
+                  callContract('DELEGATECALL в мост', 'delegator', PROFILE.lockedCallValue, 1, 0),
+              ]
+            : []),
         entry('вызов моста с 31 байтом данных', signTransaction(user, { nonce: nonce++, gas: 60_000n, to: BRIDGE, value: MIN_WITHDRAWAL * GWEI, data: recipientData.slice(0, 64) }), 0, 0),
         // Сумма не в целых нанотонах (0,05 монеты и 1 wei): мост откатывает, листа нет.
         entry('вызов моста с суммой не в целых нанотонах', signTransaction(user, { nonce: nonce++, gas: 60_000n, to: BRIDGE, value: MIN_WITHDRAWAL * GWEI + 1n, data: recipientData }), 0, 0),
         entry('перевод EIP-2930', signTransaction(user, { type: 1, nonce: nonce++, gas: 21_000n, to: TRANSFER_TO, value: TRANSFER_WEI })),
     ]);
-    // Вызов моста внутри откатившегося кадра СОСТОЯЛСЯ (признак в слоте 0), а лога нет.
-    if (BigInt(await slotAt(contracts.reverter, 0, 3)) !== 1n) fail('вызов моста во внутреннем кадре не состоялся: случай не тот');
-    // DELEGATECALL прошёл успешно, лог записан с адреса вызывающего контракта.
-    if (BigInt(await slotAt(contracts.delegator, 0, 3)) !== 1n) fail('DELEGATECALL в мост не прошёл: случай не тот');
-    const blockThree = await call(HTTP, 'eth_getBlockReceipts', ['0x3']);
-    const delegatedAt = blocks[2].transactions.findIndex((transaction) => transaction.label === 'DELEGATECALL в мост');
-    const delegated = blockThree[delegatedAt].logs;
-    if (delegated.length !== 1 || delegated[0].address !== contracts.delegator || delegated[0].topics[0] !== WITHDRAWAL_TOPIC) {
-        fail('DELEGATECALL в мост не записал лог события с адреса вызывающего');
+    if (PROFILE.lockedCallValue > 0n) {
+        // Вызов моста внутри откатившегося кадра СОСТОЯЛСЯ (признак в слоте 0), а лога нет.
+        if (BigInt(await slotAt(contracts.reverter, 0, 3)) !== 1n) fail('вызов моста во внутреннем кадре не состоялся: случай не тот');
+        // DELEGATECALL прошёл успешно, лог записан с адреса вызывающего контракта.
+        if (BigInt(await slotAt(contracts.delegator, 0, 3)) !== 1n) fail('DELEGATECALL в мост не прошёл: случай не тот');
+        const blockThree = await call(HTTP, 'eth_getBlockReceipts', ['0x3']);
+        const delegatedAt = blocks[2].transactions.findIndex((transaction) => transaction.label === 'DELEGATECALL в мост');
+        const delegated = blockThree[delegatedAt].logs;
+        if (delegated.length !== 1 || delegated[0].address !== contracts.delegator || delegated[0].topics[0] !== WITHDRAWAL_TOPIC) {
+            fail('DELEGATECALL в мост не записал лог события с адреса вызывающего');
+        }
+    }
+    // Блоки 1–3 идут в сеть: очередь и листья моста обязаны быть теми, по которым profile.mjs
+    // считает потребность кошелька прогона.
+    {
+        const planned = queuePlan(PROFILE);
+        const actual = queue.map((item, index) => ({ batch: blocks.find((block) => index < block.upTo).number, kind: item.kind, ...(item.kind === 'deposit' ? { amount: item.amount } : {}) }));
+        const same = planned.length === actual.length && planned.every((item, index) => item.batch === actual[index].batch && item.kind === actual[index].kind && item.amount === actual[index].amount);
+        if (!same) fail('очередь L1 блоков 1–3 — не та, что считает profile.mjs');
+        const leaves = blocks.flatMap((block) => block.withdrawals.map((leaf) => leaf.amount));
+        if (JSON.stringify(leaves) !== JSON.stringify(bridgeWithdrawals(PROFILE).map(String))) fail('выводы через мост блоков 2–3 — не те, что считает profile.mjs');
     }
     // Счёт B не тронут ни одной из своих принудительных транзакций.
     if (BigInt(await call(HTTP, 'eth_getTransactionCount', [other.address, '0x3'])) !== 0n) fail('у счёта B изменился nonce');
 
-    // Блоки 4 и 5: обнуление слотов (7-1). Отрезок очереди пуст.
+    // Блоки 4 и 5: обнуление слотов (7-1). Отрезок очереди пуст — кроме профиля с депозитом на
+    // блоки замеров: он обрабатывается батчем 4 и в прогон testnet (батчи 1–3) не входит.
+    if (PROFILE.topUp > 0n) deposit(user.address, PROFILE.topUp);
     const clear = (slot) => entry(`обнуление слота ${slot}`, signTransaction(user, { nonce: nonce++, gas: 100_000n, to: contracts.storage, data: hex(word(slot)) }));
     // Второй транзакцией — вызов моста, который мост откатывает: счёт моста раскрыт в свидетеле,
     // а логов моста в блоке нет (на таком блоке тест проверяет, что код моста сверяется только
@@ -997,12 +1055,16 @@ try {
     // подпись согласия. Согласие привязано к блоку, поэтому подписей — по одной на блок.
     const recipientHash = payoutTo ? payoutTo.hash : bytes(WITHDRAW_RECIPIENT);
     const exitsByBlock = [];
-    for (const block of blocks.slice(1)) {
+    // Против блока 1 — тоже (REVIEW.md, 16-2): если принят только батч 1, счёт A выходит по
+    // этому согласию; иначе его депозит остался бы заперт. Счёт без баланса (счёта B в блоке 1
+    // ещё нет) не выходит: согласие ему не нужно.
+    for (const block of blocks) {
         const blockHash = bytes(block.payload.blockHash);
         const consent = keccak(TAG, word(CHAIN_ID), blockHash, recipientHash);
         const exits = [];
         for (const account of [user, other]) {
             const proof = await call(HTTP, 'eth_getProof', [account.address, [], quantity(block.number)]);
+            if (BigInt(proof.balance) === 0n) continue;
             const { r, s, recovery } = signHash(account, keccak(ETH_PREFIX, consent));
             const signature = hex(Buffer.concat([word(r), word(s), Buffer.from([27 + recovery])]));
             const point = new secp256k1.Signature(r, s, recovery).recoverPublicKey(keccak(ETH_PREFIX, consent)).toBytes(false);
@@ -1010,7 +1072,10 @@ try {
             if (!keccak(bytes(proof.accountProof[0])).equals(bytes(block.payload.stateRoot))) fail('доказательство счёта не от корня состояния блока');
             exits.push({ account: account.address, balanceWei: BigInt(proof.balance).toString(), nonce: Number(proof.nonce), accountProof: proof.accountProof, signature });
         }
-        if (BigInt(exits[1].balanceWei) !== OTHER_DEPOSIT * GWEI) fail('баланс второго счёта — не его депозит');
+        // Блок 1 зачислил только депозит счёта A; со второго блока выходят оба счёта.
+        if (exits.length !== (block.number === 1 ? 1 : 2) || exits[0].account !== user.address) fail(`блок ${block.number}: согласия на выход не у тех счетов`);
+        if (block.number === 1 && BigInt(exits[0].balanceWei) !== USER_DEPOSIT * GWEI) fail('баланс первого счёта после блока 1 — не его депозит');
+        if (block.number > 1 && BigInt(exits[1].balanceWei) !== OTHER_DEPOSIT * GWEI) fail('баланс второго счёта — не его депозит');
         exitsByBlock.push({ block: block.number, blockHash: block.payload.blockHash, consentHash: hex(consent), exits });
     }
     const EXIT_BLOCK = 3;
@@ -1032,6 +1097,8 @@ try {
                 source: `Сгенерировано zkvm-evm/scenario/reth-scenario.mjs (${version}); не редактировать вручную`,
                 note: 'Цепочка узла Reth по протоколу версии 2: генезис с мостом-предустановкой, депозиты зачислениями EIP-4895, принудительные транзакции из очереди L1, выводы по логам моста. Ключи счетов одноразовые и в файл не попадают.',
                 protocolVersion: 2,
+                // Профиль цепочки (zkvm-evm/scenario/profile.mjs): суммы и состав блоков 2–3.
+                profile: PROFILE.name,
                 chainId: CHAIN_ID.toString(),
                 // Время блоков: первый — firstBlockTimestamp, каждый следующий на секунду позже.
                 // Батч с блоком контракт принимает, пока blockTimestamp ≤ now ≤ blockTimestamp + maxBlockAge.
@@ -1087,7 +1154,7 @@ try {
                 // Прежнюю отметку очереди хост сверяет с отчётом предыдущего батча.
                 refusedQueueMark,
                 // Аварийные выходы: согласие обоих счетов — одному получателю. По умолчанию —
-                // против блока exitBlock; exitsByBlock — против любого блока начиная со второго.
+                // против блока exitBlock; exitsByBlock — против любого блока (против первого — только счёт A).
                 exitRecipient: payoutTo ? payoutTo.toString({ testOnly: true }) : null,
                 exitRecipientHash: hex(recipientHash),
                 exitBlock: EXIT_BLOCK,
@@ -1106,8 +1173,9 @@ try {
     const cycles = (number) => reports[number - 1].zkvmCycles;
     const baseline = cycles(6);
     const perItem = (number) => Math.round((cycles(number) - baseline) / MAX_BATCH_QUEUE_ITEMS);
+    // Замер — цепочки для Sandbox: профиль testnet файл замера в репозитории не трогает.
     writeFileSync(
-        path.join(ROOT, 'bench', 'evm-v2-cycles.json'),
+        PROFILE.name === 'default' ? path.join(ROOT, 'bench', 'evm-v2-cycles.json') : path.join(WORK, 'evm-v2-cycles.json'),
         JSON.stringify(
             {
                 source: 'Сгенерировано zkvm-evm/scenario/reth-scenario.mjs; не редактировать вручную',
@@ -1180,6 +1248,15 @@ try {
         ) + '\n',
     );
     console.log(`Записано: fixtures/evm_batches/reth/ — блоки 1–${blocks.length} (${reports.map((report) => report.zkvmCycles).join(', ')} циклов)`);
+    // Потребность кошелька прогона батчей 1–3 в testnet — расчёт profile.mjs (оценка: точнее —
+    // режим check скрипта scripts/runRethCycleTestnet.ts, по настоящим телам сообщений).
+    const need = walletNeed(PROFILE);
+    const ton = (nanotons) => `${coins(nanotons)} TON`;
+    console.log(
+        `Профиль ${PROFILE.name}: в очереди L1 батчей 1–3 — ${need.queueItems} элементов (принудительных ${need.forcedItems}), сообщений прогона ${need.messages}. ` +
+            `Кошельку нужно около ${ton(need.total)}: депозиты ${ton(need.deposited)}, плата за места ${ton(need.depositFees + need.forcedFees)}, ` +
+            `суммы сообщений ${ton(need.fixed)}, комиссии кошелька (оценка) ${ton(need.walletFees)}. Вернётся не меньше ${ton(need.returns)}, не вернётся около ${ton(need.lost)}.`,
+    );
 } finally {
     node.kill();
 }

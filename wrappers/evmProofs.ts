@@ -159,6 +159,8 @@ export type RethExit = { account: string; balanceWei: string; nonce: number; acc
 /** Описание цепочки сценария (fixtures/evm_batches/reth/expected.json). */
 export type RethExpected = {
     protocolVersion: number;
+    /** Профиль сценария (zkvm-evm/scenario/profile.mjs); у цепочек, собранных до профилей, поля нет. */
+    profile?: string;
     chainId: string;
     /** Хеш заголовка генезиса цепочки: с ним обязана совпасть константа GENESIS_HASH контракта. */
     genesisHash: string;
@@ -186,7 +188,7 @@ export type RethExpected = {
     withdrawals: { leafIndex: number; recipientHash: string; amount: string; block: number }[];
     /** Получатель выплат в basechain (хеш адреса): на него подписаны согласия на выход. */
     exitRecipientHash: string;
-    /** Аварийные выходы счетов против состояния после каждого блока. */
+    /** Аварийные выходы счетов против состояния после блока: только счета с балансом (у прежних цепочек записи для блока 1 нет). */
     exitsByBlock: { block: number; blockHash: string; consentHash: string; exits: RethExit[] }[];
 };
 export const loadRethExpected = (): RethExpected => read('evm_batches', 'reth', 'expected.json');
