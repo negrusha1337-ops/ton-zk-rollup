@@ -151,5 +151,95 @@
     },
     "serverBuiltElfSha256": "a0e1d98c0112a1d9bce9f7705cacc61a53919516880d44ef5d48dac39ce32d30",
     "serverBuiltElfMatchesMac": false
+  },
+  "allBlocks": {
+    "note": "Пруфы Groth16 целиком на GPU блоков 1, 2, 4–15 цепочки Reth, по одному на карту, две карты одновременно (делят процессор на чтении схемы и обёртке — дольше, чем одна карта: блок 3 в одиночку — 178 с). Каждый пруф на маке проверен эталонной библиотекой (import-sp1-fixture.mjs) и сверен с отчётом блока; включены 32 вывода (блок 7, худший отрезок), 32 элемента по 256 байт (12, 14), 32 негодные подписи (13). Пруфы в репозиторий не кладутся: к контракту v2 подходят только блоки 1–3 этой цепочки по порядку.",
+    "proofs": [
+      {
+        "block": 1,
+        "exitCode": 0,
+        "seconds": 239,
+        "gpu": 0
+      },
+      {
+        "block": 2,
+        "exitCode": 0,
+        "seconds": 221,
+        "gpu": 1
+      },
+      {
+        "block": 4,
+        "exitCode": 0,
+        "seconds": 216,
+        "gpu": 0
+      },
+      {
+        "block": 5,
+        "exitCode": 0,
+        "seconds": 239,
+        "gpu": 1
+      },
+      {
+        "block": 6,
+        "exitCode": 0,
+        "seconds": 218,
+        "gpu": 0
+      },
+      {
+        "block": 7,
+        "exitCode": 0,
+        "seconds": 279,
+        "gpu": 0
+      },
+      {
+        "block": 8,
+        "exitCode": 0,
+        "seconds": 279,
+        "gpu": 1
+      },
+      {
+        "block": 9,
+        "exitCode": 0,
+        "seconds": 250,
+        "gpu": 0
+      },
+      {
+        "block": 10,
+        "exitCode": 0,
+        "seconds": 214,
+        "gpu": 1
+      },
+      {
+        "block": 11,
+        "exitCode": 0,
+        "seconds": 256,
+        "gpu": 1
+      },
+      {
+        "block": 12,
+        "exitCode": 0,
+        "seconds": 233,
+        "gpu": 0
+      },
+      {
+        "block": 13,
+        "exitCode": 0,
+        "seconds": 192,
+        "gpu": 1
+      },
+      {
+        "block": 14,
+        "exitCode": 0,
+        "seconds": 222,
+        "gpu": 1
+      },
+      {
+        "block": 15,
+        "exitCode": 0,
+        "seconds": 210,
+        "gpu": 0
+      }
+    ],
+    "wallClockSeconds": null
   }
 }
