@@ -134,6 +134,14 @@ if [ "$("$GPU_SERVER" --version 2>/dev/null | tr -d '[:space:]')" != "$SP1_VERSI
     tar -xzf "$TMP/$ASSET" -C "$HOME/.sp1/bin"
     rm -rf "$TMP"
 fi
+# Сервер собран под рантайм CUDA 12 (libcudart.so.12). В образах с CUDA 13 его нет — ставим только
+# рантайм 12.x из репозитория NVIDIA (не драйвер: он хостовый; драйвер с CUDA 13 запускает сборки 12.x).
+if ldd "$GPU_SERVER" | grep -q 'libcudart.so.12 => not found'; then
+    say "ставлю рантайм CUDA 12 (cuda-cudart-12-9): в образе его нет"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cuda-cudart-12-9 >/dev/null
+    echo "/usr/local/cuda-12.9/targets/x86_64-linux/lib" > /etc/ld.so.conf.d/cuda-12-9.conf
+    ldconfig
+fi
 [ "$("$GPU_SERVER" --version | tr -d '[:space:]')" = "$SP1_VERSION" ] || die "sp1-gpu-server --version не $SP1_VERSION"
 GPU_SERVER_SHA256="$(sha256sum "$GPU_SERVER" | awk '{ print $1 }')"
 say "sp1-gpu-server $SP1_VERSION, sha256 $GPU_SERVER_SHA256"
