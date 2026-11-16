@@ -95,6 +95,27 @@ fn prover_kind(mode: Mode) -> String {
     prover
 }
 
+/// Карта для `SP1_PROVER=cuda` — из `SP1_CUDA_DEVICE` (номер в порядке CUDA). `CUDA_VISIBLE_DEVICES`
+/// здесь не работает: SDK (sp1-cuda 6.10.0, server.rs) сам ставит серверу GPU
+/// `CUDA_VISIBLE_DEVICES=<номер>`, по умолчанию 0, и без этой переменной все пруфы идут на карту 0.
+#[cfg(feature = "cuda")]
+fn cuda_on_device(prover: &str) -> Option<EnvProver> {
+    let raw = std::env::var("SP1_CUDA_DEVICE").ok()?;
+    if prover != "cuda" {
+        refuse(format!("SP1_CUDA_DEVICE задан, а прувер «{prover}»: номер карты — только для SP1_PROVER=cuda."));
+    }
+    let id: u32 = raw.parse().unwrap_or_else(|_| refuse(format!("SP1_CUDA_DEVICE «{raw}»: нужен номер карты")));
+    Some(EnvProver::Cuda(ProverClient::builder().cuda().with_device_id(id).build()))
+}
+
+#[cfg(not(feature = "cuda"))]
+fn cuda_on_device(_prover: &str) -> Option<EnvProver> {
+    if std::env::var_os("SP1_CUDA_DEVICE").is_some() {
+        refuse("SP1_CUDA_DEVICE — только в сборке с --features cuda.".into());
+    }
+    None
+}
+
 /// Через временный файл: прерванная запись не оставит обрезанного пруфа под настоящим именем.
 fn write_atomically(path: &Path, write: impl FnOnce(&Path) -> anyhow::Result<()>) {
     let mut temporary = path.as_os_str().to_owned();
@@ -131,7 +152,7 @@ pub fn run(mode: Mode, job: &Job) -> Outcome {
     // --wrap-groth16 — всегда процессор: SDK здесь только выводит ключ и проверяет пруфы.
     let client = match mode {
         Mode::WrapGroth16(_) => EnvProver::Cpu(ProverClient::builder().cpu().build()),
-        _ => ProverClient::from_env(),
+        _ => cuda_on_device(&prover).unwrap_or_else(ProverClient::from_env),
     };
     let pk = client.setup(job.program.elf.clone()).expect("не удалось подготовить ключ программы");
     let vkey = pk.verifying_key().bytes32().to_string();
