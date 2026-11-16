@@ -1,0 +1,155 @@
+{
+  "source": "Замер zkvm-evm/host/remote/measure.sh both на арендованном сервере vast.ai, 16.11.2026; пруфы проверены на маке verify-local.sh (настоящий контракт в Sandbox принял батч 3 за 951 962 gas, лучшая подделка — 7300); не редактировать вручную",
+  "machine": "2× NVIDIA RTX A6000 48 ГБ (использовалась одна), Xeon Gold 6248R 48 потоков, 377 ГБ ОЗУ, Ubuntu 24.04, драйвер CUDA 13 + рантайм CUDA 12.9",
+  "block": 3,
+  "cycles": 10307880,
+  "measure": {
+    "run": "20261116T104944Z",
+    "block": 3,
+    "mode": "both",
+    "pathUsed": "onestep",
+    "zkvmCyclesOnMac": 10307795,
+    "programVKey": "0x0044524ca1c8ee10c40fba6b7b10bffa8bbfb4e9c96324eef7e20b1db239d94d",
+    "programElfSha256": "6828d42b82f3bb5ee9c660d30ee0d3eded06a861d0cf4c59e385cbfe7d05fba3",
+    "setup": {
+      "cudaVersion": "13.0",
+      "computeCap": "8.6",
+      "gpuMemoryMiB": 49140,
+      "ramGB": 377,
+      "cpus": 48,
+      "freeDiskGBBeforeBuild": 125,
+      "rustToolchain": "1.94.0",
+      "guestRustc": "rustc 1.96.0-dev",
+      "sp1Version": "6.10.0",
+      "goVersion": "1.27.4",
+      "protoc": "libprotoc 3.21.12",
+      "gpuServerSha256": "4043fe250c471515e144f4ae722b7ea3afd9bdc257609d3bcd9fea6247f74537",
+      "gpuServerArchive": "20ee4b96fa6e5a2ce8a9da523ee42b75c698658ae1d4366e57b52bdd642f1bdb  sp1_gpu_server_v6.10.0_x86_64.tar.gz",
+      "hostBuildSeconds": 107,
+      "identity": {
+        "hostSha256": "56bf4b4693e738dff2f72e1c51a6cb3248111d7ac7688650bae2dfd83c694feb",
+        "hostSha256OnDisk": "56bf4b4693e738dff2f72e1c51a6cb3248111d7ac7688650bae2dfd83c694feb",
+        "programElfSha256": "0xa0e1d98c0112a1d9bce9f7705cacc61a53919516880d44ef5d48dac39ce32d30",
+        "sourcesSha256": "41956908f3684653c25b91565ddd79db342268768f39d4d32820eebfd50643db",
+        "sourcesSha256OnDisk": "41956908f3684653c25b91565ddd79db342268768f39d4d32820eebfd50643db"
+      },
+      "serverBuiltElfSha256": "a0e1d98c0112a1d9bce9f7705cacc61a53919516880d44ef5d48dac39ce32d30",
+      "serverBuiltElfMatchesMac": false
+    },
+    "stages": [
+      {
+        "stage": "execute",
+        "prover": "cpu",
+        "exitCode": 0,
+        "seconds": 67,
+        "peakGpuMemMiB": 2,
+        "peakGpuUtil": 0,
+        "peakRamUsedMiB": 33945,
+        "maxRssMiB": 7407,
+        "minDiskFreeGB": 125,
+        "hostLines": [
+          "ELF из файла /root/ton-zk-rollup/remote-input/rollup-evm-program.elf: sha256 совпал с program.json (6828d42b82f3bb5ee9c660d30ee0d3eded06a861d0cf4c59e385cbfe7d05fba3)",
+          "Ключ программы из ELF совпал с program.json: 0x0044524ca1c8ee10c40fba6b7b10bffa8bbfb4e9c96324eef7e20b1db239d94d (34 с)"
+        ],
+        "tail": []
+      },
+      {
+        "stage": "groth16-gpu",
+        "prover": "cuda",
+        "exitCode": 0,
+        "seconds": 178,
+        "peakGpuMemMiB": 23425,
+        "peakGpuUtil": 100,
+        "peakRamUsedMiB": 58946,
+        "maxRssMiB": 7419,
+        "minDiskFreeGB": 125,
+        "hostLines": [
+          "ELF из файла /root/ton-zk-rollup/remote-input/rollup-evm-program.elf: sha256 совпал с program.json (6828d42b82f3bb5ee9c660d30ee0d3eded06a861d0cf4c59e385cbfe7d05fba3)",
+          "Ключ программы из ELF совпал с program.json: 0x0044524ca1c8ee10c40fba6b7b10bffa8bbfb4e9c96324eef7e20b1db239d94d (36 с)",
+          "Ключ программы: 0x0044524ca1c8ee10c40fba6b7b10bffa8bbfb4e9c96324eef7e20b1db239d94d (прувер cuda, подготовка 29 с)",
+          "[этап] пруф Groth16 построен и проверен за 113 с"
+        ],
+        "tail": []
+      },
+      {
+        "stage": "compressed-gpu",
+        "prover": "cuda",
+        "exitCode": 0,
+        "seconds": 71,
+        "peakGpuMemMiB": 23425,
+        "peakGpuUtil": 99,
+        "peakRamUsedMiB": 54886,
+        "maxRssMiB": 7438,
+        "minDiskFreeGB": 125,
+        "hostLines": [
+          "ELF из файла /root/ton-zk-rollup/remote-input/rollup-evm-program.elf: sha256 совпал с program.json (6828d42b82f3bb5ee9c660d30ee0d3eded06a861d0cf4c59e385cbfe7d05fba3)",
+          "Ключ программы из ELF совпал с program.json: 0x0044524ca1c8ee10c40fba6b7b10bffa8bbfb4e9c96324eef7e20b1db239d94d (37 с)",
+          "Ключ программы: 0x0044524ca1c8ee10c40fba6b7b10bffa8bbfb4e9c96324eef7e20b1db239d94d (прувер cuda, подготовка 22 с)",
+          "[этап] сжатый пруф построен и проверен за 11 с"
+        ],
+        "tail": []
+      },
+      {
+        "stage": "wrap-cpu",
+        "prover": "cpu",
+        "exitCode": 0,
+        "seconds": 511,
+        "peakGpuMemMiB": 23327,
+        "peakGpuUtil": 100,
+        "peakRamUsedMiB": 61298,
+        "maxRssMiB": 33174,
+        "minDiskFreeGB": 125,
+        "hostLines": [
+          "ELF из файла /root/ton-zk-rollup/remote-input/rollup-evm-program.elf: sha256 совпал с program.json (6828d42b82f3bb5ee9c660d30ee0d3eded06a861d0cf4c59e385cbfe7d05fba3)",
+          "Ключ программы из ELF совпал с program.json: 0x0044524ca1c8ee10c40fba6b7b10bffa8bbfb4e9c96324eef7e20b1db239d94d (35 с)",
+          "Ключ программы: 0x0044524ca1c8ee10c40fba6b7b10bffa8bbfb4e9c96324eef7e20b1db239d94d (прувер cpu, подготовка 34 с)",
+          "[этап] shrink+wrap на процессоре: 322 с",
+          "[этап] gnark Groth16 на процессоре: 84 с",
+          "[этап] обёртка Groth16 построена и проверена за 439 с"
+        ],
+        "tail": []
+      }
+    ],
+    "proofs": {
+      "proof.json": {
+        "sha256": "1d15769ad055608b17f529f99ea0fb228bbfd996b80b955d6f48fd84f71f47a2",
+        "vkeyMatchesProgramJson": true,
+        "elfMatchesProgramJson": true,
+        "publicValuesMatchBlockReport": true,
+        "proofBytes": 356
+      },
+      "proof-twostep.json": {
+        "sha256": "5e16a43606b09e8adc98fa61f6df56b7f6717bbb29a8a61bba4bc03455c4ccb1",
+        "vkeyMatchesProgramJson": true,
+        "elfMatchesProgramJson": true,
+        "publicValuesMatchBlockReport": true,
+        "proofBytes": 356
+      }
+    }
+  },
+  "setup": {
+    "cudaVersion": "13.0",
+    "computeCap": "8.6",
+    "gpuMemoryMiB": 49140,
+    "ramGB": 377,
+    "cpus": 48,
+    "freeDiskGBBeforeBuild": 125,
+    "rustToolchain": "1.94.0",
+    "guestRustc": "rustc 1.96.0-dev",
+    "sp1Version": "6.10.0",
+    "goVersion": "1.27.4",
+    "protoc": "libprotoc 3.21.12",
+    "gpuServerSha256": "4043fe250c471515e144f4ae722b7ea3afd9bdc257609d3bcd9fea6247f74537",
+    "gpuServerArchive": "20ee4b96fa6e5a2ce8a9da523ee42b75c698658ae1d4366e57b52bdd642f1bdb  sp1_gpu_server_v6.10.0_x86_64.tar.gz",
+    "hostBuildSeconds": 107,
+    "identity": {
+      "hostSha256": "56bf4b4693e738dff2f72e1c51a6cb3248111d7ac7688650bae2dfd83c694feb",
+      "hostSha256OnDisk": "56bf4b4693e738dff2f72e1c51a6cb3248111d7ac7688650bae2dfd83c694feb",
+      "programElfSha256": "0xa0e1d98c0112a1d9bce9f7705cacc61a53919516880d44ef5d48dac39ce32d30",
+      "sourcesSha256": "41956908f3684653c25b91565ddd79db342268768f39d4d32820eebfd50643db",
+      "sourcesSha256OnDisk": "41956908f3684653c25b91565ddd79db342268768f39d4d32820eebfd50643db"
+    },
+    "serverBuiltElfSha256": "a0e1d98c0112a1d9bce9f7705cacc61a53919516880d44ef5d48dac39ce32d30",
+    "serverBuiltElfMatchesMac": false
+  }
+}
