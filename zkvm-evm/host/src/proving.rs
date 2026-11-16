@@ -100,12 +100,40 @@ fn prover_kind(mode: Mode) -> String {
 /// `CUDA_VISIBLE_DEVICES=<номер>`, по умолчанию 0, и без этой переменной все пруфы идут на карту 0.
 #[cfg(feature = "cuda")]
 fn cuda_on_device(prover: &str) -> Option<EnvProver> {
-    let raw = std::env::var("SP1_CUDA_DEVICE").ok()?;
+    let raw = std::env::var("SP1_CUDA_DEVICE").ok();
     if prover != "cuda" {
-        refuse(format!("SP1_CUDA_DEVICE задан, а прувер «{prover}»: номер карты — только для SP1_PROVER=cuda."));
+        if raw.is_some() {
+            refuse(format!("SP1_CUDA_DEVICE задан, а прувер «{prover}»: номер карты — только для SP1_PROVER=cuda."));
+        }
+        return None;
     }
-    let id: u32 = raw.parse().unwrap_or_else(|_| refuse(format!("SP1_CUDA_DEVICE «{raw}»: нужен номер карты")));
+    let id: u32 = match &raw {
+        Some(raw) => raw.parse().unwrap_or_else(|_| refuse(format!("SP1_CUDA_DEVICE «{raw}»: нужен номер карты"))),
+        None => 0,
+    };
+    remove_stale_gpu_socket(id);
     Some(EnvProver::Cuda(ProverClient::builder().cuda().with_device_id(id).build()))
+}
+
+/// Сокет сервера GPU (`/tmp/sp1-cuda-<номер>.sock`, sp1-cuda 6.10.0, client.rs), который остался от
+/// сервера, убитого вместе с прежним хостом (`kill_on_drop` шлёт SIGKILL — убрать за собой он не
+/// успевает). SDK видит файл, считает сервер живым и падает с «Connection refused», не запуская
+/// новый; так на сервере с двумя картами каждое второе задание не стартовало. Файл, к которому
+/// никто не принимает соединения, удаляется — живой сервер не трогается.
+#[cfg(feature = "cuda")]
+fn remove_stale_gpu_socket(id: u32) {
+    let socket = std::path::PathBuf::from(format!("/tmp/sp1-cuda-{id}.sock"));
+    if !socket.exists() {
+        return;
+    }
+    match std::os::unix::net::UnixStream::connect(&socket) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            eprintln!("Сокет {} без сервера (остался от прежнего запуска) — удаляю.", socket.display());
+            let _ = fs::remove_file(&socket);
+        }
+        Err(_) => {}
+    }
 }
 
 #[cfg(not(feature = "cuda"))]
