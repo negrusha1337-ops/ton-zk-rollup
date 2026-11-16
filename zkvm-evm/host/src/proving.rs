@@ -211,12 +211,30 @@ pub fn run(mode: Mode, job: &Job) -> Outcome {
             }
         }
         Mode::Groth16 => {
+            // Замер «тёплого» прувера (ROLLUP_PROVE_REPEAT=N, только для замеров): тот же блок N раз в
+            // одном процессе — сколько стоит пруф, когда клиент, ключ и сервер GPU уже подняты.
+            // В пруф и в файл идёт последний; на результат не влияет.
+            let repeats: u32 = std::env::var("ROLLUP_PROVE_REPEAT").ok().and_then(|raw| raw.parse().ok()).unwrap_or(1).max(1);
+            for round in 1..repeats {
+                let warm = Instant::now();
+                client
+                    .prove(&pk, stdin.clone())
+                    .groth16()
+                    .with_proof_nonce(PROOF_NONCE)
+                    .run()
+                    .expect("не удалось построить пруф");
+                println!("[замер] пруф {round} из {repeats} в том же процессе: {:.0} с", warm.elapsed().as_secs_f64());
+            }
+            let last = Instant::now();
             let proof = client
                 .prove(&pk, stdin)
                 .groth16()
                 .with_proof_nonce(PROOF_NONCE)
                 .run()
                 .expect("не удалось построить пруф");
+            if repeats > 1 {
+                println!("[замер] пруф {repeats} из {repeats} в том же процессе: {:.0} с", last.elapsed().as_secs_f64());
+            }
             check_public_values(&proof, job.native_public_values, "пруф");
             client.verify(&proof, pk.verifying_key(), None).expect("пруф не прошёл локальную проверку");
             println!("[этап] пруф Groth16 построен и проверен за {:.0} с", started.elapsed().as_secs_f64());
