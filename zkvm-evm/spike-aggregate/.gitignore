@@ -1,0 +1,5 @@
+target/
+program/target/
+# ELF агрегатора собирается cargo prove build; sha256 записан в bench/aggregation-spike.json.
+elf/
+out/

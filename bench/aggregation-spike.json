@@ -1,0 +1,374 @@
+{
+  "source": "Спайк агрегации zkvm-evm/spike-aggregate (README.md там же): замер на арендованном сервере zk-gpu 16.11.2026 12:28–12:57 UTC, газ — Sandbox на маке (ton/verify-gas.ts); собрано ton/write-bench.py, не редактировать вручную",
+  "machine": "2× NVIDIA RTX A6000 48 ГБ, Xeon Gold 6248R 48 потоков, 377 ГБ ОЗУ (как в bench/remote-gpu-proof.json)",
+  "protocolNote": "Измерение, не протокол v2: контракт, программа EVM, ключи и фикстуры не менялись; агрегатный пруф к контракту не подключён",
+  "evmProgramVKey": "0x0044524ca1c8ee10c40fba6b7b10bffa8bbfb4e9c96324eef7e20b1db239d94d",
+  "aggregateVKey": "0x004570516f27e260519c9d9f7fd321c7482b6aabe90cf5fd820f8026d35c055a",
+  "aggregateElfSha256": "9155c8258dbb10faa5c9cf0fe0a82dd18a4ba1b4d02f4115354dd90667819c6e",
+  "chain": "цепочка Reth fixtures/evm_batches/reth, блоки 1–8 подряд (входы ~/allblocks/in на сервере — те же sha256, что на маке)",
+  "blockCompressedColdProcesses": {
+    "note": "Существующий хост EVM, по процессу на блок (remote/compress-blocks.sh), две карты одновременно. processSeconds — весь процесс: сверка ключа ELF на процессоре (cpuVkeyCheckSeconds), подъём сервера GPU, пруф (proofSeconds). Код 101 — сервер GPU не поднялся («Could not connect to sp1-gpu-server socket»), повтор. Блоки 4, 6, 7 повторены, пока на сервере шла сборка хоста спайка (процессор занят)",
+    "runs": [
+      {
+        "block": 2,
+        "card": 1,
+        "exitCode": 0,
+        "processSeconds": 85,
+        "maxRssKiB": 7614124,
+        "proofSeconds": 10,
+        "cpuVkeyCheckSeconds": 53
+      },
+      {
+        "block": 1,
+        "card": 0,
+        "exitCode": 0,
+        "processSeconds": 89,
+        "maxRssKiB": 7602520,
+        "proofSeconds": 10,
+        "cpuVkeyCheckSeconds": 53
+      },
+      {
+        "block": 4,
+        "card": 0,
+        "exitCode": 101,
+        "processSeconds": 49,
+        "maxRssKiB": 7548624,
+        "proofSeconds": null,
+        "cpuVkeyCheckSeconds": 85
+      },
+      {
+        "block": 3,
+        "card": 1,
+        "exitCode": 0,
+        "processSeconds": 87,
+        "maxRssKiB": 7612984,
+        "proofSeconds": 13,
+        "cpuVkeyCheckSeconds": 46
+      },
+      {
+        "block": 5,
+        "card": 0,
+        "exitCode": 0,
+        "processSeconds": 71,
+        "maxRssKiB": 7613616,
+        "proofSeconds": 11,
+        "cpuVkeyCheckSeconds": 38
+      },
+      {
+        "block": 6,
+        "card": 1,
+        "exitCode": 101,
+        "processSeconds": 41,
+        "maxRssKiB": 7611404,
+        "proofSeconds": null,
+        "cpuVkeyCheckSeconds": 85
+      },
+      {
+        "block": 7,
+        "card": 0,
+        "exitCode": 101,
+        "processSeconds": 48,
+        "maxRssKiB": 7562600,
+        "proofSeconds": null,
+        "cpuVkeyCheckSeconds": 46
+      },
+      {
+        "block": 8,
+        "card": 1,
+        "exitCode": 0,
+        "processSeconds": 78,
+        "maxRssKiB": 7609876,
+        "proofSeconds": 11,
+        "cpuVkeyCheckSeconds": 45
+      },
+      {
+        "block": 6,
+        "card": 1,
+        "exitCode": 0,
+        "processSeconds": 129,
+        "maxRssKiB": 7604048,
+        "proofSeconds": 15,
+        "cpuVkeyCheckSeconds": 85
+      },
+      {
+        "block": 4,
+        "card": 0,
+        "exitCode": 0,
+        "processSeconds": 133,
+        "maxRssKiB": 7600312,
+        "proofSeconds": 16,
+        "cpuVkeyCheckSeconds": 85
+      },
+      {
+        "block": 7,
+        "card": 1,
+        "exitCode": 0,
+        "processSeconds": 89,
+        "maxRssKiB": 7603656,
+        "proofSeconds": 16,
+        "cpuVkeyCheckSeconds": 46
+      }
+    ],
+    "peakVramMiB": 24350
+  },
+  "aggregatesColdProcess": {
+    "note": "Агрегат блоков 1..N на карте 0, по процессу на N (remote/aggregate.sh): подъём клиента и ключа программы EVM, проверка сжатых пруфов блоков, исполнение агрегатора, сжатый агрегат, Groth16 агрегата одним запросом SDK (рекурсия на GPU, gnark на процессоре: в журнале acceleration=none). n8-ram — повтор N = 8 с записью занятой ОЗУ машины (сервер GPU — отдельный процесс, RSS хоста его не включает)",
+    "runs": [
+      {
+        "run": "n2",
+        "blocks": 2,
+        "card": 0,
+        "aggregateCycles": 1341172,
+        "stageSeconds": {
+          "client": 1.36,
+          "evmSetup": 20.38,
+          "blockProofsVerify": 0.48,
+          "aggregateSetup": 0.05,
+          "execute": 0.11,
+          "compressed": 2.45,
+          "compressedVerify": 0.05,
+          "groth16": 89.33,
+          "groth16Verify": 0.34
+        },
+        "gnarkSeconds": {
+          "readR1cs": [
+            27.9
+          ],
+          "readProvingKey": [
+            6.3
+          ],
+          "gnarkProve": [
+            43.3
+          ]
+        },
+        "processWallSeconds": 114.89,
+        "peakVramMiB": 12160,
+        "compressedProofBytes": 1272921,
+        "groth16ProofBytes": 356
+      },
+      {
+        "run": "n3",
+        "blocks": 3,
+        "card": 0,
+        "aggregateCycles": 1432458,
+        "stageSeconds": {
+          "client": 1.17,
+          "evmSetup": 20.43,
+          "blockProofsVerify": 0.71,
+          "aggregateSetup": 0.04,
+          "execute": 0.15,
+          "compressed": 3.76,
+          "compressedVerify": 0.05,
+          "groth16": 96.9,
+          "groth16Verify": 0.36
+        },
+        "gnarkSeconds": {
+          "readR1cs": [
+            28.8
+          ],
+          "readProvingKey": [
+            5.9
+          ],
+          "gnarkProve": [
+            46.2
+          ]
+        },
+        "processWallSeconds": 123.94,
+        "peakVramMiB": 12352,
+        "compressedProofBytes": 1272921,
+        "groth16ProofBytes": 356
+      },
+      {
+        "run": "n4",
+        "blocks": 4,
+        "card": 0,
+        "aggregateCycles": 1524303,
+        "stageSeconds": {
+          "client": 1.24,
+          "evmSetup": 19.88,
+          "blockProofsVerify": 0.94,
+          "aggregateSetup": 0.05,
+          "execute": 0.26,
+          "compressed": 3.0,
+          "compressedVerify": 0.05,
+          "groth16": 88.07,
+          "groth16Verify": 0.35
+        },
+        "gnarkSeconds": {
+          "readR1cs": [
+            26.4
+          ],
+          "readProvingKey": [
+            6.2
+          ],
+          "gnarkProve": [
+            41.1
+          ]
+        },
+        "processWallSeconds": 114.19,
+        "peakVramMiB": 12512,
+        "compressedProofBytes": 1272921,
+        "groth16ProofBytes": 356
+      },
+      {
+        "run": "n8",
+        "blocks": 8,
+        "card": 0,
+        "aggregateCycles": 1890565,
+        "stageSeconds": {
+          "client": 2.08,
+          "evmSetup": 20.46,
+          "blockProofsVerify": 1.91,
+          "aggregateSetup": 0.04,
+          "execute": 0.4,
+          "compressed": 4.13,
+          "compressedVerify": 0.05,
+          "groth16": 94.52,
+          "groth16Verify": 0.36
+        },
+        "gnarkSeconds": {
+          "readR1cs": [
+            28.2
+          ],
+          "readProvingKey": [
+            5.9
+          ],
+          "gnarkProve": [
+            45.4
+          ]
+        },
+        "processWallSeconds": 124.29,
+        "peakVramMiB": 13312,
+        "compressedProofBytes": 1272921,
+        "groth16ProofBytes": 356
+      },
+      {
+        "run": "n8-ram",
+        "blocks": 8,
+        "card": 0,
+        "aggregateCycles": 1890565,
+        "stageSeconds": {
+          "client": 1.22,
+          "evmSetup": 19.87,
+          "blockProofsVerify": 1.91,
+          "aggregateSetup": 0.04,
+          "execute": 0.38,
+          "compressed": 4.17,
+          "compressedVerify": 0.05,
+          "groth16": 94.87,
+          "groth16Verify": 0.35
+        },
+        "gnarkSeconds": {
+          "readR1cs": [
+            32.2
+          ],
+          "readProvingKey": [
+            6.0
+          ],
+          "gnarkProve": [
+            44.0
+          ]
+        },
+        "processWallSeconds": 123.21,
+        "peakVramMiB": 13280,
+        "compressedProofBytes": 1272921,
+        "groth16ProofBytes": 356,
+        "machineRamUsedMiB": {
+          "min": 30181,
+          "max": 61893
+        }
+      }
+    ]
+  },
+  "warmPipelineTwoCards": {
+    "note": "Тёплый конвейер (remote/pipeline.sh): карта 0 — сжатые пруфы блоков 1–4, карта 1 — 5–8, каждая в ОДНОМ процессе хоста спайка (сервер GPU и ключ программы подняты один раз), одновременно; затем агрегат N = 8 на карте 0 с двумя Groth16 подряд в одном процессе (второй — тёплый: схема gnark уже прочитана)",
+    "lanes": {
+      "lane0": {
+        "card": 0,
+        "blocks": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "evmSetupSeconds": 20.62,
+        "blockCompressedSeconds": [
+          9.29,
+          10.04,
+          11.05,
+          10.91
+        ],
+        "processWallSeconds": 64.73,
+        "peakVramMiB": 23422
+      },
+      "lane1": {
+        "card": 1,
+        "blocks": [
+          5,
+          6,
+          7,
+          8
+        ],
+        "evmSetupSeconds": 25.54,
+        "blockCompressedSeconds": [
+          11.4,
+          11.41,
+          14.33,
+          11.43
+        ],
+        "processWallSeconds": 76.94,
+        "peakVramMiB": 24446
+      }
+    },
+    "aggregate": {
+      "blocks": 8,
+      "card": 0,
+      "stageSeconds": {
+        "client": 1.17,
+        "evmSetup": 20.27,
+        "blockProofsVerify": 1.93,
+        "aggregateSetup": 0.04,
+        "execute": 0.4,
+        "compressed": 4.08,
+        "compressedVerify": 0.07,
+        "groth16": 95.72,
+        "groth16Verify": 0.34
+      },
+      "groth16RepeatSeconds": [
+        95.72,
+        53.42
+      ],
+      "gnarkSeconds": {
+        "readR1cs": [
+          30.5
+        ],
+        "readProvingKey": [
+          6.2
+        ],
+        "gnarkProve": [
+          44.3,
+          42.0
+        ]
+      },
+      "processWallSeconds": 177.8
+    },
+    "wallSeconds": {
+      "blocksWallSeconds": 84,
+      "aggregateWallSeconds": 178,
+      "totalWallSeconds": 262
+    }
+  },
+  "tonVerifyGas": {
+    "note": "Общий верификатор contracts/bn254_groth16_verifier.tolk в Sandbox, одна транзакция Verify (переменные входы — дайджест и нонс, как у sp1_v6_fibonacci); это не rollup-контракт. Пруфы проверены эталонной библиотекой (ton/check-proof.mjs — шаги zk/import-sp1-fixture.mjs) под закреплённым ключом схемы v6.1.0, публичные значения агрегата — из отчётов блоков на маке (ton/expected-aggregate.mjs). Лучшая подделка каждого отклонена кодом 7100 (wrongProof верификатора)",
+    "evmBlock3Proof": 945622,
+    "aggregate": {
+      "n2": 947490,
+      "n3": 938389,
+      "n4": 944814,
+      "n8": 945232
+    },
+    "forgeryExitCodes": [
+      7100
+    ]
+  }
+}

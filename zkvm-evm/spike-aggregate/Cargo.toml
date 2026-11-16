@@ -1,0 +1,15 @@
+# Спайк агрегации (измерение, не протокол): своё рабочее пространство, НЕ член zkvm-evm/Cargo.toml
+# — иначе изменился бы хеш исходников программы EVM (sourcesSha256). Гость — отдельно
+# (program/, свой Cargo.lock), как в zkvm-evm.
+[workspace]
+members = ["host"]
+exclude = ["program"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# Те же замены, что в zkvm-evm/Cargo.toml: тот же граф зависимостей sp1-sdk, что у хоста EVM.
+[patch.crates-io]
+sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", tag = "patch-sha2-0.10.9-sp1-6.10.0", package = "sha2" }

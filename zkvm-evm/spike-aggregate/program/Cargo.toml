@@ -1,0 +1,17 @@
+# Гость-агрегатор спайка: проверяет N сжатых пруфов программы EVM (рекурсия SP1) и сцепку их
+# публичных значений. Отдельное рабочее пространство со своим Cargo.lock.
+[package]
+name = "spike-aggregate-program"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+# `verify` — и у sp1-zkvm, и у sp1-lib (sp1-lib-6.10.0/src/verify.rs).
+sp1-zkvm = { version = "=6.10.0", features = ["verify"] }
+sp1-lib = { version = "=6.10.0", features = ["verify"] }
+sha2 = "0.10.9"
+
+[patch.crates-io]
+sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", tag = "patch-sha2-0.10.9-sp1-6.10.0", package = "sha2" }
