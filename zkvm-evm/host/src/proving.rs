@@ -195,5 +195,17 @@ pub fn run(mode: Mode, job: &Job) -> Outcome {
             write_groth16_fixture(job, &vkey, &proof);
         }
     }
-    Outcome { prover, vkey, setup_seconds, proof_seconds: started.elapsed().as_secs_f64() }
+    let outcome = Outcome { prover, vkey, setup_seconds, proof_seconds: started.elapsed().as_secs_f64() };
+    // Ключ программы на GPU (`sp1-cuda`, `SessionKey`) в своём `Drop` зовёт `tokio::spawn`, чтобы
+    // закрыть сессию на сервере GPU, а блокирующий клиент SDK рантайма снаружи не держит: без него
+    // хост падал (код 134) уже ПОСЛЕ записи пруфа, и успешный пруф выглядел сбоем. Ключ и клиент
+    // уничтожаются внутри рантайма; сессию сервер закрывает и сам, когда процесс выходит.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("рантайм tokio для завершения прувера");
+    let _context = runtime.enter();
+    drop(pk);
+    drop(client);
+    outcome
 }
